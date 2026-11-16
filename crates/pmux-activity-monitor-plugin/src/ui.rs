@@ -85,7 +85,7 @@ impl Palette {
             SeatState::Idle => self.muted,
             SeatState::Stuck => self.failed,
             SeatState::Failed => self.failed,
-            SeatState::Stopped => self.stopped,
+            SeatState::Stopped | SeatState::NoAgent => self.stopped,
         }
     }
 
@@ -239,6 +239,7 @@ pub struct Ui {
     removal_prompt: Option<RemovalPrompt>,
     cleanup_requests: Vec<CleanupRequest>,
     notice: Option<String>,
+    rescan: bool,
     list_offset: usize,
     timeline_offset: usize,
     /// Rows per page from the last frame, for PgUp/PgDn.
@@ -265,6 +266,7 @@ impl Default for Ui {
             removal_prompt: None,
             cleanup_requests: Vec::new(),
             notice: None,
+            rescan: false,
             list_offset: 0,
             timeline_offset: 0,
             page: 10,
@@ -305,6 +307,7 @@ pub fn rows(hosts: &[Host], ui: &Ui, now: u64) -> Vec<Row> {
             .iter()
             .filter(|(_, seat)| visible(host, seat, ui.filter, now))
             .filter(|(id, seat)| !host.is_dismissed(id, seat.session_id()))
+            .filter(|(id, seat)| !model::expired_unattributed(id, seat, now))
             .collect();
         match ui.sort {
             Sort::Name => {}
@@ -373,11 +376,48 @@ impl Ui {
         }
     }
 
+    /// True once per `R` press; the host then polls at once.
+    pub fn take_rescan(&mut self) -> bool {
+        std::mem::take(&mut self.rescan)
+    }
+
+    /// Report what the rescan found, after the poll that served it.
+    pub fn rescanned(&mut self, hosts: &[Host]) {
+        let count = |state| {
+            hosts
+                .iter()
+                .flat_map(|host| host.seats.values())
+                .filter(|seat| seat.state == state)
+                .count()
+        };
+        self.notice = Some(format!(
+            "Rescanned: {} no agent, {} idle, {} stuck.",
+            count(SeatState::NoAgent),
+            count(SeatState::Idle),
+            count(SeatState::Stuck)
+        ));
+    }
+
     fn request_remove_selected(&mut self, hosts: &mut [Host]) {
         let Some((host_index, seat_id)) = self.selected.clone() else {
-            self.notice = Some("Select a down session first.".into());
+            self.notice = Some("Select a down or no-agent row first.".into());
             return;
         };
+        if hosts
+            .get(host_index)
+            .and_then(|host| host.seats.get(&seat_id))
+            .is_some_and(|seat| seat.state == SeatState::NoAgent)
+        {
+            // The pmux session is alive. Hide the row and leave it running.
+            let hidden = hosts[host_index].dismiss_stopped(&seat_id);
+            self.notice = Some(if hidden {
+                "Hid the row; the pmux session keeps running. It returns if an agent starts there."
+                    .into()
+            } else {
+                "The session changed; nothing was hidden.".into()
+            });
+            return;
+        }
         let Some(session_id) = hosts
             .get(host_index)
             .and_then(|host| host.seats.get(&seat_id))
@@ -390,7 +430,7 @@ impl Ui {
             self.notice = Some(if hidden {
                 "Hidden the row only; pmux no longer tracks this session.".into()
             } else {
-                "Only down sessions can be removed.".into()
+                "Only down or no-agent rows can be removed.".into()
             });
             return;
         };
@@ -551,6 +591,11 @@ impl Ui {
         let page = self.page.max(1) as isize;
         if self.screen == Screen::List && key.code == KeyCode::Char('x') {
             self.request_remove_selected(hosts);
+            return false;
+        }
+        if self.screen == Screen::List && key.code == KeyCode::Char('R') {
+            self.rescan = true;
+            self.notice = Some("Rescanning the live panes…".into());
             return false;
         }
         if self.screen == Screen::List && key.code == KeyCode::Char('X') {
@@ -918,6 +963,10 @@ fn draw_counts(
     let totals = counts(hosts);
     let mut x = x;
     for (state, count) in SeatState::ALL.iter().zip(totals) {
+        // Shown only when a row has no agent, so a healthy fleet's header is unchanged.
+        if *state == SeatState::NoAgent && count == 0 {
+            continue;
+        }
         let color = paint.palette.state(*state);
         let text = if words {
             format!("{} {count} {}  ", state.glyph(), state.word())
@@ -1357,7 +1406,7 @@ fn draw_seat_row(
         base.fg(state_color),
     );
     let cols = columns(area, tier, longest);
-    let name_color = if seat.state == SeatState::Stopped {
+    let name_color = if matches!(seat.state, SeatState::Stopped | SeatState::NoAgent) {
         palette.muted
     } else {
         palette.text
@@ -1390,7 +1439,7 @@ fn draw_seat_row(
     paint.right(cols.age + 1, y, 4, &age, age_style);
     if let Some(flag) = cols.flag {
         match seat.state {
-            SeatState::Idle | SeatState::Stuck | SeatState::Stopped => {
+            SeatState::Idle | SeatState::Stuck | SeatState::Stopped | SeatState::NoAgent => {
                 paint.text(
                     flag,
                     y,
@@ -1475,7 +1524,7 @@ fn draw_timeline(
     x = paint.text(x + 3, y, limit, &state, fg(palette.state(seat.state)));
     if matches!(
         seat.state,
-        SeatState::Idle | SeatState::Stuck | SeatState::Stopped
+        SeatState::Idle | SeatState::Stuck | SeatState::Stopped | SeatState::NoAgent
     ) {
         paint.text(
             x + 2,
@@ -2001,6 +2050,7 @@ fn draw_footer(
             ("⇥", "host"),
             ("f", "filter"),
             ("?", "keys"),
+            ("R", "rescan"),
             ("s", "sort"),
             ("p", "pixels"),
             ("i", "IDs"),
@@ -2057,10 +2107,7 @@ fn draw_help(paint: &mut Painter<'_, '_>, area: Rect) {
         ("Tab", "next host (Shift-Tab: previous)"),
         ("Enter → l", "open the timeline"),
         ("d", "open selected seat details"),
-        (
-            "x / X",
-            "remove selected / clear down rows; confirm cleanup",
-        ),
+        ("x / X / R", "remove / clear / rescan; no-agent rows hide"),
         (":", "open monitor commands"),
         ("i", "show or hide run and operation ids"),
         ("Esc ← h", "back to the list"),
@@ -2411,7 +2458,7 @@ mod tests {
                                                               │
                                                               │
                                                               │
- x remove  X clear  : commands  ↑↓ move  ⏎ timeline  q quit  ⇥ host  ? keys  s sort  i IDs  f filter  d details"#,
+ x remove  X clear  : commands  ↑↓ move  ⏎ timeline  q quit  ⇥ host  ? keys  R rescan  s sort  f filter  d details"#,
         ),
         (
             90,
@@ -2449,7 +2496,7 @@ mod tests {
  ● win│ Tab         next host (Shift-Tab: previous)            │
       │ Enter → l   open the timeline                          │
       │ d           open selected seat details                 │
-      │ x / X       remove selected / clear down rows; confirm…│
+      │ x / X / R   remove / clear / rescan; no-agent rows hide│
       │ :           open monitor commands                      │
       │ i           show or hide run and operation ids         │
       │ Esc ← h     back to the list                           │
@@ -2506,7 +2553,11 @@ mod tests {
     }
 
     fn stopped_monitor() -> Monitor {
-        use prismattyc_core::activity::{ActivitySession, ActivitySessionState, ActivitySessions};
+        session_monitor(prismattyc_core::activity::ActivitySessionState::Stopped)
+    }
+
+    fn session_monitor(state: prismattyc_core::activity::ActivitySessionState) -> Monitor {
+        use prismattyc_core::activity::{ActivitySession, ActivitySessions};
 
         let mut monitor = Monitor::new(vec!["local".into()], Palette::DARK, 0);
         let seat = AgentId::new("stopped-seat").unwrap();
@@ -2516,7 +2567,7 @@ mod tests {
             seats: vec![ActivitySession {
                 seat: seat.clone(),
                 session_id: 42,
-                state: ActivitySessionState::Stopped,
+                state,
                 last_output_at_ms: None,
                 harness: None,
                 model: None,
@@ -2527,6 +2578,79 @@ mod tests {
         monitor.hosts[0].apply(page, 0);
         monitor.ui.selected = Some((0, seat));
         monitor
+    }
+
+    #[test]
+    fn remove_hides_a_no_agent_row_without_cleaning_up_its_live_session() {
+        use prismattyc_core::activity::ActivitySessionState;
+
+        let mut monitor = session_monitor(ActivitySessionState::Idle);
+        assert_eq!(counts(&monitor.hosts)[6], 1, "one row has no agent");
+        press_char(&mut monitor, 'x');
+        // The session is alive: nothing may be queued that would kill it,
+        // and no confirmation about a dead session is shown.
+        assert!(monitor.ui.removal_prompt.is_none());
+        assert!(monitor.ui.take_cleanup_requests().is_empty());
+        assert_eq!(counts(&monitor.hosts)[6], 0);
+        assert!(!rows(&monitor.hosts, &monitor.ui, 0)
+            .iter()
+            .any(|row| matches!(row, Row::Seat(..))));
+        let (frame, ..) = draw(&mut monitor, 100, 14);
+        assert!(frame.contains("keeps running"), "{frame}");
+    }
+
+    #[test]
+    fn remove_still_refuses_a_working_seat() {
+        use prismattyc_core::activity::ActivitySessionState;
+
+        let mut monitor = session_monitor(ActivitySessionState::Working);
+        press_char(&mut monitor, 'x');
+        assert!(monitor.ui.removal_prompt.is_none());
+        assert!(monitor.ui.take_cleanup_requests().is_empty());
+        assert_eq!(counts(&monitor.hosts)[0], 1, "the working row stays");
+        let (frame, ..) = draw(&mut monitor, 100, 14);
+        assert!(frame.contains("Only down or no-agent rows"), "{frame}");
+    }
+
+    #[test]
+    fn the_unknown_seat_row_leaves_the_list_once_it_is_old() -> Result<()> {
+        let mut monitor = Monitor::new(vec!["local".into()], Palette::DARK, 0);
+        let page = page_in(
+            "e0",
+            vec![
+                record_run("unknown", 1, "command_started", 1_000, "run-aaaaaaaa1")?,
+                record_run("worker", 2, "command_started", 1_000, "run-bbbbbbbb1")?,
+            ],
+            None,
+        )?;
+        monitor.hosts[0].apply(page, 1_000);
+        let names = |now| {
+            rows(&monitor.hosts, &monitor.ui, now)
+                .into_iter()
+                .filter_map(|row| match row {
+                    Row::Seat(_, id) => Some(id.as_str().to_owned()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(2_000), ["unknown", "worker"]);
+        assert_eq!(names(1_000 + model::UNATTRIBUTED_MS), ["worker"]);
+        Ok(())
+    }
+
+    #[test]
+    fn r_asks_the_host_to_rescan_once() {
+        let mut monitor = stopped_monitor();
+        assert!(!monitor.ui.take_rescan());
+        press_char(&mut monitor, 'R');
+        assert!(monitor.ui.take_rescan());
+        assert!(!monitor.ui.take_rescan(), "one press, one rescan");
+        monitor.ui.rescanned(&monitor.hosts);
+        let (frame, ..) = draw(&mut monitor, 100, 14);
+        assert!(
+            frame.contains("Rescanned: 0 no agent, 0 idle, 0 stuck."),
+            "{frame}"
+        );
     }
 
     #[test]

@@ -20,7 +20,7 @@ The monitor puts its visual weight in one place: a lane for each seat. A lane is
 | Selection / focus | `#1c2330` / `#5aa2ff` | `#eaf1fc` / `#2f6fd0` | Focused title row / focus color |
 | Hairline | `#262a32` | `#d5d9df` | Graphite hairline |
 
-Shape carries state as well as color, so the states stay distinct without color: `●` working, `◆` waiting, `○` idle, `!` stuck, `✕` failed, `■` down and `·` no state yet. The theme follows the terminal background reported by the probe and falls back to dark. `--theme light|dark` overrides it.
+Shape carries state as well as color, so the states stay distinct without color: `●` working, `◆` waiting, `○` idle, `!` stuck, `✕` failed, `■` down, `–` no agent and `·` no state yet. `–` no agent means the pmux session is alive but no agent process runs under its shell (the agent exited); it is counted in the header only when a row has it. `○` idle means an agent is running and waiting for input, including one that finished its turn and waits for mail. `!` stuck means a turn started (a tool, command or edit began) and nothing has happened for five minutes. A seat that never reported a turn is idle, not stuck. The row for events that name no seat (`unknown`) disappears five minutes after its last event. The theme follows the terminal background reported by the probe and falls back to dark. `--theme light|dark` overrides it.
 
 ## State
 
@@ -116,7 +116,8 @@ Enter opens the timeline for the selected seat, and in the wide tier the timelin
 | `Esc` / `←` / `h` | Back to the list |
 | `f` | Filter: all, needs attention (waiting, stuck, failed, stale), working |
 | `s` | Sort: by name, by most recent, by state |
-| `x` | Remove the selected stopped session; confirm cleanup if pmuxd still tracks it |
+| `x` | Remove the selected row. A stopped session is cleaned up after confirmation if pmuxd still tracks it; a no-agent row is only hidden and its session keeps running (it returns if an agent starts there) |
+| `R` | Rescan: poll the live panes now and report how many rows have no agent, are idle or are stuck |
 | `X` | Clear all stopped sessions with the same confirmation and live-session refusal |
 | `:` | Open the monitor command picker for either removal action |
 | `p` | Toggle pixel lanes when the terminal supports them |

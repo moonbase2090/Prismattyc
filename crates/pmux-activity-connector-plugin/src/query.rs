@@ -112,6 +112,53 @@ pub fn retained(
     bail!("activity feed exceeded the bounded query page limit")
 }
 
+/// Cursorless read of the newest window.
+///
+/// Retained history is oldest-first, and one page holds at most `limit`
+/// records. A full buffer is more than one page, so this learns the watermark
+/// from the opening page and jumps to the newest window instead of walking
+/// every page or failing once two pages are not enough. A feed that restarts
+/// between those reads fails with the reason rather than mixing histories.
+pub fn latest_page(
+    mut read: impl FnMut(Option<ActivityCursor>, u16) -> anyhow::Result<ActivityPage>,
+    limit: u16,
+) -> anyhow::Result<ActivityPage> {
+    if !(1..=256).contains(&limit) {
+        bail!("activity page limit must be 1..256");
+    }
+    let mut page = read(None, limit)?;
+    if page.reset.is_some() {
+        bail!("activity feed changed during the bounded query; retry");
+    }
+    // Two jumps cover a producer that moves the watermark during the first
+    // jump. The window already in hand is still returned if the feed keeps
+    // growing after that.
+    for _ in 0..2 {
+        if !page.has_more || page.cursor.sequence >= page.current_sequence {
+            return Ok(page);
+        }
+        let epoch = page.epoch.clone();
+        let start = page.current_sequence.saturating_sub(u64::from(limit));
+        let next = read(
+            Some(ActivityCursor {
+                epoch: epoch.clone(),
+                sequence: start,
+            }),
+            limit,
+        )?;
+        if next.epoch != epoch || next.reset.is_some() {
+            bail!("activity feed changed during the bounded query; retry");
+        }
+        if next.cursor.sequence <= page.cursor.sequence
+            && next.current_sequence <= page.current_sequence
+        {
+            bail!("activity feed cursor did not advance");
+        }
+        page = next;
+    }
+    Ok(page)
+}
+
 #[derive(Serialize)]
 struct ObservedSeat<'a> {
     seat: &'a AgentId,
@@ -254,7 +301,7 @@ pub fn poll_result(page: ActivityPage, seat: Option<&AgentId>) -> Value {
 mod tests {
     use super::*;
     use anyhow::Result;
-    use prismattyc_core::activity::ActivityReset;
+    use prismattyc_core::activity::{ActivityDetail, ActivityReset};
     #[test]
     fn seats_and_filtered_poll_include_sessions_without_retained_events() -> Result<()> {
         let mut first = page(vec![], None)?;
@@ -441,6 +488,153 @@ mod tests {
         assert_eq!(calls, 2);
         assert!(result.is_err());
         Ok(())
+    }
+
+    #[test]
+    fn cursorless_read_returns_the_newest_page_past_two_pages() -> Result<()> {
+        let mut calls = Vec::new();
+        let page = latest_page(
+            |cursor, limit| {
+                calls.push((cursor.as_ref().map(|cursor| cursor.sequence), limit));
+                let start = cursor.as_ref().map_or(0, |cursor| cursor.sequence);
+                let records = (1..=5)
+                    .filter(|sequence| *sequence > start)
+                    .take(usize::from(limit))
+                    .map(|sequence| record("worker-a", sequence, "waiting"))
+                    .collect::<Result<Vec<_>>>()?;
+                let mut page = page(records, None)?;
+                page.oldest_sequence = 1;
+                page.current_sequence = 5;
+                page.has_more = page.cursor.sequence < 5;
+                page.sessions = Some(serde_json::from_value(json!({
+                    "observed_at_ms": if cursor.is_none() { 1 } else { 2 },
+                    "seats": [{
+                        "seat": "worker-a",
+                        "session_id": 1,
+                        "state": "idle",
+                        "last_output_at_ms": null,
+                        "harness": null,
+                        "model": null,
+                        "quota": null,
+                        "project": null
+                    }]
+                }))?);
+                Ok(page)
+            },
+            2,
+        )?;
+        assert_eq!(
+            page.records
+                .iter()
+                .map(|record| record.sequence)
+                .collect::<Vec<_>>(),
+            vec![4, 5]
+        );
+        assert_eq!(
+            page.sessions
+                .as_ref()
+                .map(|sessions| sessions.observed_at_ms),
+            Some(2)
+        );
+        assert!(calls.len() >= 2 && calls.len() <= 3, "{calls:?}");
+        assert!(
+            calls[1].0.is_some_and(|sequence| sequence >= 3),
+            "{calls:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cursorless_read_names_a_reset_between_the_watermark_and_the_newest_page() -> Result<()> {
+        let mut calls = 0;
+        let error = latest_page(
+            |cursor, _| {
+                calls += 1;
+                if cursor.is_none() {
+                    let mut first = page(vec![record("worker-a", 1, "working")?], None)?;
+                    first.current_sequence = 5;
+                    first.has_more = true;
+                    Ok(first)
+                } else {
+                    page(vec![record("worker-a", 5, "waiting")?], Some("restarted"))
+                }
+            },
+            2,
+        )
+        .expect_err("a restart between reads must fail");
+        assert_eq!(
+            error.to_string(),
+            "activity feed changed during the bounded query; retry"
+        );
+        assert_eq!(calls, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn poll_and_recent_results_match_their_schemas_with_detail_and_session_state() -> Result<()> {
+        let mut record = record("worker-a", 4, "command_finished")?;
+        record.event.detail = Some(ActivityDetail {
+            tool: Some("cargo".into()),
+            file: None,
+            command: Some("cargo test".into()),
+            duration_ms: Some(10),
+            exit_code: None,
+            task: None,
+            operation_id: Some("op-1".into()),
+            model: None,
+        });
+        let mut history_page = page(vec![record], None)?;
+        history_page.current_sequence = 4;
+        history_page.sessions = Some(serde_json::from_value(json!({
+            "observed_at_ms": 9,
+            "seats": [
+                {"seat":"worker-a","session_id":1,"state":"idle","last_output_at_ms":4,"harness":null,"model":null,"quota":null,"project":"demo"},
+                {"seat":"worker-b","session_id":2,"state":"stuck","last_output_at_ms":null,"harness":"shell","model":null,"quota":null,"project":null}
+            ]
+        }))?);
+        let poll = poll_result(history_page.clone(), None);
+        let recent = recent_events(
+            &retained(|_| Ok(history_page.clone()))?,
+            &AgentId::new("worker-a")?,
+            None,
+        );
+        assert!(
+            schema_errors("poll-output.json", &poll).is_empty(),
+            "{poll}"
+        );
+        assert!(
+            schema_errors("recent-output.json", &recent).is_empty(),
+            "{recent}"
+        );
+        let mut rejected = poll.clone();
+        rejected["page"]["records"][0]["event"]["prompt"] = json!("hidden");
+        let errors = schema_errors("poll-output.json", &rejected);
+        assert!(!errors.is_empty(), "an undeclared event field must fail");
+        Ok(())
+    }
+
+    fn schema_errors(name: &str, value: &Value) -> Vec<String> {
+        let path = format!("{}/package/{name}", env!("CARGO_MANIFEST_DIR"));
+        let schema: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let validator = jsonschema::options()
+            .with_draft(jsonschema::Draft::Draft202012)
+            .with_retriever(DenySchemaRetrieval)
+            .build(&schema)
+            .unwrap();
+        validator
+            .iter_errors(value)
+            .map(|error| error.to_string())
+            .collect()
+    }
+
+    struct DenySchemaRetrieval;
+    impl jsonschema::Retrieve for DenySchemaRetrieval {
+        fn retrieve(
+            &self,
+            _: &jsonschema::Uri<String>,
+        ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+            Err("external schema references are not permitted".into())
+        }
     }
 
     #[test]

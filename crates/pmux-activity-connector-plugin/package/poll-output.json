@@ -134,6 +134,72 @@
             },
             "kind": {
               "type": "string"
+            },
+            "process_ids": {
+              "type": "array",
+              "maxItems": 256,
+              "items": {
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "detail": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "properties": {
+                "tool": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "file": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "command": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "duration_ms": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0
+                },
+                "exit_code": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "task": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "operation_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "model": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -222,6 +288,8 @@
                     "enum": [
                       "working",
                       "waiting",
+                      "idle",
+                      "stuck",
                       "stopped"
                     ]
                   },
@@ -231,6 +299,30 @@
                       "null"
                     ],
                     "minimum": 0
+                  },
+                  "harness": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "model": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "quota": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "project": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "additionalProperties": false

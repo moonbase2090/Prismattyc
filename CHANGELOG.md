@@ -13,6 +13,10 @@
 
 - The macOS app menu has **Restart…**. It previews what `pmux restart --plan` reports, saves a session configuration snapshot, then runs `pmux restart` without stopping any session. **Roll Back Last Update…** now saves a snapshot first too.
 
+### Fixed
+
+- A cursorless activity poll returns the newest retained page and the current session snapshot. The poll and recent results accept event detail and the session fields the feed already publishes. A poll that still fails names the schema path or the query error. The connector package is 1.0.2.
+
 ## [0.3.67] - 2026-11-13
 
 ### Fixed

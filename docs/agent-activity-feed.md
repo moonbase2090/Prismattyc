@@ -561,6 +561,7 @@ target/debug/pmux-activity-monitor --socket /tmp/activity-demo/feed.sock --tail 
 `--seats` lists seats observed in retained events. It does not assert that a
 process is alive. `--recent` returns retained events for one validated seat.
 Finite queries drain bounded pages rather than returning only the first page.
+`--json` with no cursor returns the newest retained page and the current session snapshot. `--json --since` resumes from a cursor or a millisecond timestamp.
 `--tail` emits cursor-bearing JSON lines with reset information and optional
 seat filtering. Filtering must still advance the underlying cursor through
 unmatched events. A consumer treats reset as lost continuity and never infers

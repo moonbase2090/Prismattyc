@@ -3523,6 +3523,7 @@ dependencies = [
  "anyhow",
  "flate2",
  "libc",
+ "nix",
  "png 0.17.16",
  "portable-pty",
  "prismattyc-core",

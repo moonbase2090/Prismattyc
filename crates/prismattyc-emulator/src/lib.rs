@@ -2052,6 +2052,17 @@ pub fn apply_child_term_env(command: &mut CommandBuilder) {
     }
 }
 
+/// The line-discipline flags of a PTY that tell a program reading a line from
+/// one reading raw keys or a hidden answer.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TtyModes {
+    /// ICANON: the kernel edits the line. A shell's own line editor turns it off.
+    pub canonical: bool,
+    /// ECHO: the kernel prints what is typed. A password read turns it off.
+    pub echo: bool,
+}
+
 /// A child process connected to a native pseudo-terminal.
 pub struct PtySession {
     master: Box<dyn MasterPty + Send>,
@@ -2306,6 +2317,27 @@ impl PtySession {
     /// stable mux identity or a control target.
     pub fn process_id(&self) -> Option<u32> {
         self.child.process_id()
+    }
+
+    /// The process group in the foreground of the PTY (`tcgetpgrp` on the
+    /// master), or `None` when the kernel cannot say. A shell that has started
+    /// a job in its own group is not in front, and a shell with no job control
+    /// is, with its own process id as the group.
+    #[cfg(unix)]
+    pub fn foreground_process_group(&self) -> Option<i32> {
+        self.master.process_group_leader()
+    }
+
+    /// The PTY's ICANON and ECHO flags, read from the master, or `None` when
+    /// they cannot be read. Read-only.
+    #[cfg(unix)]
+    pub fn tty_modes(&self) -> Option<TtyModes> {
+        use nix::sys::termios::LocalFlags;
+        let termios = self.master.get_termios()?;
+        Some(TtyModes {
+            canonical: termios.local_flags.contains(LocalFlags::ICANON),
+            echo: termios.local_flags.contains(LocalFlags::ECHO),
+        })
     }
 
     pub fn wait(&mut self) -> Result<portable_pty::ExitStatus> {
@@ -4672,5 +4704,85 @@ mod child_fd_tests {
             vec![(b.try_clone().unwrap(), 4), (b, 4)],
         );
         assert!(dup.is_err());
+    }
+
+    #[cfg(unix)]
+    mod tty_state {
+        use super::*;
+        use std::time::{Duration, Instant};
+
+        fn sh(script: &str) -> PtySession {
+            PtySession::spawn("/bin/sh", ["-c", script], portable_pty::PtySize::default())
+                .expect("spawn")
+        }
+
+        fn wait_for(mut done: impl FnMut() -> bool) -> bool {
+            let end = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < end {
+                if done() {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            false
+        }
+
+        #[test]
+        fn a_new_pty_is_canonical_with_echo() {
+            let mut s = sh("sleep 30");
+            assert_eq!(
+                s.tty_modes(),
+                Some(TtyModes {
+                    canonical: true,
+                    echo: true
+                })
+            );
+            s.kill_and_reap();
+        }
+
+        #[test]
+        fn the_flags_follow_what_the_program_sets_and_each_is_read_on_its_own() {
+            for (set, want) in [
+                ("-icanon -echo", (false, false)),
+                ("-icanon echo", (false, true)),
+                ("icanon -echo", (true, false)),
+            ] {
+                let mut s = sh(&format!("stty {set}; sleep 30"));
+                let want = TtyModes {
+                    canonical: want.0,
+                    echo: want.1,
+                };
+                assert!(
+                    wait_for(|| s.tty_modes() == Some(want)),
+                    "stty {set}: {:?}",
+                    s.tty_modes()
+                );
+                s.kill_and_reap();
+            }
+        }
+
+        #[test]
+        fn the_foreground_group_is_the_child_without_job_control() {
+            let mut s = sh("sleep 30");
+            let pid = i32::try_from(s.process_id().expect("pid")).expect("pid fits");
+            assert_eq!(s.foreground_process_group(), Some(pid));
+            s.kill_and_reap();
+        }
+
+        #[test]
+        fn a_job_in_front_has_its_own_group() {
+            // With job control on, the shell runs a command in a group of its
+            // own and gives it the terminal.
+            let mut s = sh("set -m; sleep 30");
+            let pid = i32::try_from(s.process_id().expect("pid")).expect("pid fits");
+            assert!(
+                wait_for(|| s
+                    .foreground_process_group()
+                    .is_some_and(|group| group != pid)),
+                "the group stayed {:?}, the shell's {pid}",
+                s.foreground_process_group()
+            );
+            s.kill_and_reap();
+        }
     }
 }

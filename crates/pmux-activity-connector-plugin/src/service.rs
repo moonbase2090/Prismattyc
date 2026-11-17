@@ -32,15 +32,15 @@ struct Arguments {
 
 struct Failure {
     code: &'static str,
-    message: &'static str,
+    message: String,
     retry_after_ms: Option<u32>,
 }
 
 impl Failure {
-    fn new(code: &'static str, message: &'static str) -> Self {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
-            message,
+            message: message.into(),
             retry_after_ms: None,
         }
     }
@@ -74,7 +74,7 @@ impl Failure {
         };
         Self {
             code,
-            message,
+            message: message.to_string(),
             retry_after_ms: matches!(error, read::Error::RateLimited).then_some(interval),
         }
     }
@@ -177,28 +177,35 @@ pub fn execute(metadata: &mut impl Metadata, contribution: &str, arguments: &str
             }
         };
         host = Some(endpoint.label.clone());
-        let mut value = if contribution == "poll" && args.since_ms.is_none() {
-            let page = metadata
-                .poll(endpoint.handle, cursor, args.limit.unwrap_or(256))
-                .map_err(|error| Failure::read(error, endpoint.min_interval_ms))?;
+        let handle = endpoint.handle;
+        let interval = endpoint.min_interval_ms;
+        let mut failure = None;
+        let mut read_page = |cursor: Option<ActivityCursor>, limit: u16| {
+            metadata.poll(handle, cursor, limit).map_err(|error| {
+                failure = Some(Failure::read(error, interval));
+                anyhow::anyhow!("activity page read failed")
+            })
+        };
+        let mut value = if contribution == "poll" && cursor.is_none() && args.since_ms.is_none() {
+            let page =
+                query::latest_page(&mut read_page, args.limit.unwrap_or(256)).map_err(|error| {
+                    failure
+                        .take()
+                        .unwrap_or_else(|| Failure::new("feed_changed_retry", error.to_string()))
+                })?;
+            query::poll_result(page, seat.as_ref())
+        } else if contribution == "poll" && args.since_ms.is_none() {
+            let page = read_page(cursor, args.limit.unwrap_or(256)).map_err(|error| {
+                failure
+                    .take()
+                    .unwrap_or_else(|| Failure::new("feed_changed_retry", error.to_string()))
+            })?;
             query::poll_result(page, seat.as_ref())
         } else {
-            let mut failure = None;
-            let history = query::retained(|cursor| {
-                metadata
-                    .poll(endpoint.handle, cursor, 256)
-                    .map_err(|error| {
-                        failure = Some(Failure::read(error, endpoint.min_interval_ms));
-                        anyhow::anyhow!("activity page read failed")
-                    })
-            })
-            .map_err(|_| {
-                failure.unwrap_or_else(|| {
-                    Failure::new(
-                        "feed_changed_retry",
-                        "cannot read a consistent retained activity history; retry",
-                    )
-                })
+            let history = query::retained(|cursor| read_page(cursor, 256)).map_err(|error| {
+                failure
+                    .take()
+                    .unwrap_or_else(|| Failure::new("feed_changed_retry", error.to_string()))
             })?;
             if contribution == "poll" {
                 let page = query::since_time(
@@ -355,5 +362,107 @@ mod tests {
             assert_eq!(error["error"]["code"], "invalid_argument");
         }
         assert_eq!(fixture.calls, 0);
+    }
+
+    struct Window {
+        calls: Vec<Option<u64>>,
+    }
+    impl Metadata for Window {
+        fn endpoints(&mut self) -> Result<Vec<read::Endpoint>, read::Error> {
+            Ok(vec![read::Endpoint {
+                handle: 1,
+                label: "local".into(),
+                kind: read::EndpointKind::Local,
+                min_interval_ms: 250,
+            }])
+        }
+        fn poll(
+            &mut self,
+            _: u64,
+            cursor: Option<ActivityCursor>,
+            limit: u16,
+        ) -> Result<ActivityPage, read::Error> {
+            self.calls
+                .push(cursor.as_ref().map(|cursor| cursor.sequence));
+            let start = cursor.as_ref().map_or(0, |cursor| cursor.sequence);
+            let sequences = (1..=5u64)
+                .filter(|sequence| *sequence > start)
+                .take(usize::from(limit))
+                .collect::<Vec<_>>();
+            let last = sequences.last().copied().unwrap_or(start);
+            Ok(serde_json::from_value(json!({
+                "epoch":"a0","oldest_sequence":1,"current_sequence":5,
+                "records": sequences.iter().map(|sequence| json!({
+                    "sequence": sequence, "received_at_ms": 1000,
+                    "event": {"schema_version":1,"seat":"worker-a","run_id":"run-1","event_id":format!("event-{sequence}"),"source":"runtime","kind":"waiting"}
+                })).collect::<Vec<_>>(),
+                "cursor":{"epoch":"a0","sequence":last},
+                "has_more": last < 5,
+                "reset": null,
+                "sessions": {"observed_at_ms": if cursor.is_none() { 1 } else { 2 }, "seats": [{
+                    "seat":"worker-a","session_id":1,"state":"idle","last_output_at_ms":null,
+                    "harness":null,"model":null,"quota":null,"project":null
+                }]}
+            }))
+            .unwrap())
+        }
+    }
+
+    #[test]
+    fn cursorless_poll_returns_the_newest_window_when_history_spans_three_pages() {
+        let mut window = Window { calls: Vec::new() };
+        let (value, failed) = execute(&mut window, "poll", r#"{"limit":2}"#);
+        assert!(!failed, "{value}");
+        assert_eq!(value["page"]["records"][0]["sequence"], 4);
+        assert_eq!(value["page"]["records"][1]["sequence"], 5);
+        assert_eq!(value["page"]["sessions"]["observed_at_ms"], 2);
+        assert_eq!(value["page"]["sessions"]["seats"][0]["state"], "idle");
+        assert!(window.calls.len() >= 2, "{:?}", window.calls);
+        assert!(window.calls[1].is_some_and(|sequence| sequence >= 3));
+    }
+
+    struct ShortPages {
+        calls: usize,
+    }
+    impl Metadata for ShortPages {
+        fn endpoints(&mut self) -> Result<Vec<read::Endpoint>, read::Error> {
+            Ok(vec![read::Endpoint {
+                handle: 1,
+                label: "local".into(),
+                kind: read::EndpointKind::Local,
+                min_interval_ms: 250,
+            }])
+        }
+        fn poll(
+            &mut self,
+            _: u64,
+            _: Option<ActivityCursor>,
+            _: u16,
+        ) -> Result<ActivityPage, read::Error> {
+            self.calls += 1;
+            let sequence = self.calls as u64;
+            Ok(serde_json::from_value(json!({
+                "epoch":"a0","oldest_sequence":1,"current_sequence":10,
+                "records":[{"sequence":sequence,"received_at_ms":1000,"event":{
+                    "schema_version":1,"seat":"worker-a","run_id":"run-1","event_id":format!("event-{sequence}"),"source":"runtime","kind":"waiting"
+                }}],
+                "cursor":{"epoch":"a0","sequence":sequence},
+                "has_more": true,
+                "reset": null
+            }))
+            .unwrap())
+        }
+    }
+
+    #[test]
+    fn a_query_that_still_cannot_finish_names_the_reason() {
+        let mut pages = ShortPages { calls: 0 };
+        let (value, failed) = execute(&mut pages, "recent", r#"{"seat":"worker-a"}"#);
+        assert!(failed);
+        assert_eq!(
+            value["error"]["message"],
+            "activity feed exceeded the bounded query page limit"
+        );
+        assert_eq!(pages.calls, 2);
     }
 }

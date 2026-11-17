@@ -3287,6 +3287,7 @@ name = "pmux-activity-connector-plugin"
 version = "0.3.67"
 dependencies = [
  "anyhow",
+ "jsonschema",
  "pmux-plugin-api",
  "prismattyc-core",
  "serde",

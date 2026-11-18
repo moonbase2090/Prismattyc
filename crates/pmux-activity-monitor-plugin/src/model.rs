@@ -186,6 +186,11 @@ pub struct Seat {
     /// Latest pane output the source reported, on the source's clock.
     pub output_at_ms: Option<u64>,
     discovery: Option<(u64, ActivityRecord)>,
+    /// The latest state-bearing event of any source, and the latest from hooks
+    /// or notifications. Kept apart from `history`, so a run of mail that
+    /// pushes them out of the retained events cannot erase the seat's state.
+    report: Option<ActivityRecord>,
+    hook_report: Option<ActivityRecord>,
 }
 
 impl Seat {
@@ -199,6 +204,8 @@ impl Seat {
             presence: Presence::Reported,
             output_at_ms: None,
             discovery: None,
+            report: None,
+            hook_report: None,
         }
     }
 
@@ -210,13 +217,35 @@ impl Seat {
     /// session snapshot vouches for the seat, the daemon's own runtime events
     /// give way to that snapshot.
     pub fn last_report(&self) -> Option<&ActivityRecord> {
-        self.history.iter().rev().find(|record| {
-            !matches!(
-                record.event.kind,
-                ActivityKind::MailSent | ActivityKind::MailReceived
-            ) && (self.presence == Presence::Reported
-                || record.event.source != ActivitySource::Runtime)
-        })
+        if self.presence == Presence::Reported {
+            self.report.as_ref()
+        } else {
+            self.hook_report.as_ref()
+        }
+    }
+
+    /// Adds a retained event and keeps the latest reports current.
+    fn record(&mut self, record: ActivityRecord) {
+        if !matches!(
+            record.event.kind,
+            ActivityKind::MailSent | ActivityKind::MailReceived
+        ) {
+            if record.event.source != ActivitySource::Runtime {
+                self.hook_report = Some(record.clone());
+            }
+            self.report = Some(record.clone());
+        }
+        if self.history.len() == HISTORY {
+            self.history.pop_front();
+        }
+        self.history.push_back(record);
+    }
+
+    /// Forgets a previous session's events and reports.
+    fn forget(&mut self) {
+        self.history.clear();
+        self.report = None;
+        self.hook_report = None;
     }
 
     /// When the seat last made progress: its last report or pane output.
@@ -398,7 +427,7 @@ impl Host {
                 .as_ref()
                 .is_some_and(|(id, _)| *id != session.session_id);
             if replaced {
-                seat.history.clear();
+                seat.forget();
             }
             // The daemon's own verdict is only evidence about the process. Its
             // stuck (an agent with quiet output) ignores hook events, so the
@@ -466,10 +495,7 @@ impl Host {
         }
         let at = record.received_at_ms;
         let seat = self.seats.entry(seat_id).or_insert_with(|| Seat::new(at));
-        if seat.history.len() == HISTORY {
-            seat.history.pop_front();
-        }
-        seat.history.push_back(record);
+        seat.record(record);
         seat.classify(at, fade_at);
     }
 
@@ -503,7 +529,11 @@ pub const UNATTRIBUTED_MS: u64 = 5 * 60 * 1000;
 
 /// Whether this row is the catch-all for events without a seat and has gone quiet.
 pub fn expired_unattributed(id: &AgentId, seat: &Seat, now_ms: u64) -> bool {
-    id.as_str() == "unknown" && seat.discovery.is_none() && age_ms(seat, now_ms) >= UNATTRIBUTED_MS
+    // Its last event of any kind, mail included, keeps the row: this row has no
+    // state to age from.
+    id.as_str() == "unknown"
+        && seat.discovery.is_none()
+        && now_ms.saturating_sub(seat.latest().received_at_ms) >= UNATTRIBUTED_MS
 }
 
 /// Time since the seat last made progress (an event or pane output), or since
@@ -1067,6 +1097,26 @@ pub(crate) mod tests {
             old - 1
         ));
         assert!(expired_unattributed(&unknown, &host.seats[&unknown], old));
+        // Later mail with no seat keeps the row for five minutes after it.
+        host.apply(
+            page_in(
+                "e0",
+                vec![record_at(
+                    "unknown",
+                    3,
+                    "mail_received",
+                    1_000 + 4 * 60_000,
+                )?],
+                None,
+            )?,
+            2_000,
+        );
+        assert!(!expired_unattributed(&unknown, &host.seats[&unknown], old));
+        assert!(expired_unattributed(
+            &unknown,
+            &host.seats[&unknown],
+            old + 4 * 60_000
+        ));
         assert!(!expired_unattributed(
             &worker,
             &host.seats[&worker],
@@ -1327,6 +1377,32 @@ pub(crate) mod tests {
         assert_eq!(agent.state, SeatState::Working);
         assert_eq!(agent.changed_at, None);
         assert_eq!(agent.session_id(), Some(1));
+        Ok(())
+    }
+
+    #[test]
+    fn a_run_of_mail_past_the_history_limit_keeps_the_seat_state() -> Result<()> {
+        let mut records = vec![record_at("agent", 1, "tool_failed", 1_000)?];
+        for sequence in 2..=(HISTORY as u64 + 10) {
+            records.push(record_at(
+                "agent",
+                sequence,
+                "mail_received",
+                1_000 + sequence,
+            )?);
+        }
+        let mut host = Host::new("remote");
+        host.apply(page_in("e0", records, None)?, 0);
+        let agent = seat(&host, "agent");
+        assert!(agent
+            .history
+            .iter()
+            .all(|record| record.event.kind == ActivityKind::MailReceived));
+        assert_eq!(agent.state, SeatState::Failed);
+        assert_eq!(
+            agent.last_report().map(|record| record.event.kind),
+            Some(ActivityKind::ToolFailed)
+        );
         Ok(())
     }
 

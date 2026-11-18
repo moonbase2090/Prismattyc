@@ -222,8 +222,13 @@ fixture in a clean private proof environment (Unix only):
 
 ```sh
 python3 scripts/test-plugin-runtime.py --feature seat-states \
-  --target-dir "$verify_target" --out "$verify_evidence/seat-states" --debug
+  --target-dir "$verify_target" --out "$verify_evidence/seat-states"
 ```
+
+Use the default optimized native binaries. With `--debug`, a small machine can
+exceed the plug-in worker's one-second call limit (`wasm trap: interrupt:
+component call: wall=1000ms`); this happened on a 4-vCPU arm64 Linux VM, so
+that failure says nothing about the monitor.
 
 It builds candidate guests, starts a private `pmuxd`, and creates four seats:
 an agent-named process whose hooks keep reporting while its pane prints nothing,

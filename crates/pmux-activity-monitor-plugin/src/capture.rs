@@ -228,6 +228,49 @@ mod tests {
     }
 
     #[test]
+    fn the_guest_frame_path_lets_time_pass_for_a_quiet_source() -> anyhow::Result<()> {
+        use crate::model::SeatState;
+
+        const WALL: u64 = 1_700_000_000_000;
+        let mut monitor = Monitor::new(vec!["remote".into()], Palette::DARK, WALL);
+        monitor.hosts[0].apply(
+            page_in(
+                "epoch",
+                vec![record_run("busy", 1, "tool_started", 1_000, "run")?],
+                None,
+            )?,
+            0,
+        );
+        let viewport = frame::Viewport {
+            columns: 100,
+            rows: 8,
+            pixels: None,
+        };
+        let state = |monitor: &Monitor| {
+            monitor.hosts[0]
+                .seats
+                .values()
+                .next()
+                .map(|seat| seat.state)
+        };
+        // The first frame learns the source's time; no poll follows.
+        render(&mut monitor, &viewport, 10, MAX_FRAME_BYTES as u32).map_err(anyhow::Error::msg)?;
+        assert_eq!(state(&monitor), Some(SeatState::Working));
+        // Five quiet minutes of viewer time later, the next frame shows the turn stuck.
+        monitor.now_ms = WALL + 5 * 60_000;
+        let content = render(&mut monitor, &viewport, 20, MAX_FRAME_BYTES as u32)
+            .map_err(anyhow::Error::msg)?;
+        assert_eq!(state(&monitor), Some(SeatState::Stuck));
+        let text = content
+            .cells
+            .iter()
+            .map(|cell| cell.text.as_str())
+            .collect::<String>();
+        assert!(text.contains("stuck"), "{text}");
+        Ok(())
+    }
+
+    #[test]
     fn oversized_pixel_targets_keep_the_cell_fallback_before_allocation() {
         let capture = Capture {
             pixels: Some(frame::PixelSize {

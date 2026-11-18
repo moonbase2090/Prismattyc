@@ -73,10 +73,6 @@ impl View {
 
     fn poll(&mut self, clock: &frame::Clock) {
         self.monitor.now_ms = clock.wall_ms;
-        // Seats age between reports, even when a poll brings nothing new.
-        for host in &mut self.monitor.hosts {
-            host.advance(clock.wall_ms, clock.monotonic_ms);
-        }
         if !self.readable
             || self.last_poll.is_some_and(|last| {
                 clock.monotonic_ms.saturating_sub(last) < u64::from(POLL_INTERVAL_MS)

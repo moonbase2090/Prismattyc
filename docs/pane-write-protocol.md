@@ -34,10 +34,12 @@ characters are rejected. Use `pmux send` for raw control keys.
 | `enter` | Write the body followed by CR. Use this when you intentionally want Enter in the target application. |
 | `none` | Write the body without adding a submit key. The input ledger remains dirty. |
 
-Auto supports the Grok, Claude, Kiro, Codex, and Cursor agent families.
-It uses bracketed paste for the body. Grok, Claude, and Kiro receive CR.
+Auto supports the Grok, Claude, Kiro, Codex, Cursor, Muse, and Hermes agent families.
+It uses bracketed paste for the body. Grok, Claude, Kiro, and Hermes receive CR.
 Codex receives two separate CR chunks. Cursor receives kitty Ctrl+Enter
-(`ESC [ 13 ; 5 u`). Chunks are separated by 80 ms.
+(`ESC [ 13 ; 5 u`). Muse receives Kitty Enter when its keyboard mode is active,
+otherwise CR. Chunks are separated by 80 ms, so Hermes receives its submit key
+after its rapid-input newline guard.
 These are terminal adapters, not an application acknowledgement protocol.
 Guest versions can change submission behavior.
 

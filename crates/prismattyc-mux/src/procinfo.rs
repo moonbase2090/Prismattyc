@@ -200,7 +200,8 @@ pub fn foreground_command(root: u32) -> Option<String> {
 
 /// Resume known agents without replaying their startup prompt. Preserve
 /// explicit session selection and recognized model, configuration and policy
-/// options. Other agents reopen idle; non-agent commands stay unchanged.
+/// options. Hermes keeps its launch arguments; other agents reopen idle.
+/// Non-agent commands stay unchanged.
 #[must_use]
 pub fn resume_args(args: Vec<String>) -> Vec<String> {
     use crate::inject_submit::InjectAgent;
@@ -210,7 +211,7 @@ pub fn resume_args(args: Vec<String>) -> Vec<String> {
     let agent = match crate::inject_submit::classify_agent_argv0(program) {
         Some(InjectAgent::Claude) => InjectAgent::Claude,
         Some(InjectAgent::Codex) => InjectAgent::Codex,
-        Some(InjectAgent::Unknown) | None => return args,
+        Some(InjectAgent::Hermes | InjectAgent::Unknown) | None => return args,
         Some(_) => return vec![program.clone()],
     };
     let mut options = Vec::new();
@@ -1736,6 +1737,10 @@ mod tests {
         );
         // Anything else is saved as it ran.
         assert_eq!(resume_args(args(&["sleep", "30"])), args(&["sleep", "30"]));
+        assert_eq!(
+            resume_args(args(&["hermes", "--profile", "demo", "chat"])),
+            args(&["hermes", "--profile", "demo", "chat"])
+        );
         assert_eq!(
             resume_args(args(&["echo", "claude"])),
             args(&["echo", "claude"])

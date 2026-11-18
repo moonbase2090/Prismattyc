@@ -200,6 +200,7 @@ mod tests {
             (Claude, vec![b"\r".to_vec()]),
             (Kiro, vec![b"\r".to_vec()]),
             (Muse, vec![b"\r".to_vec()]),
+            (Hermes, vec![b"\r".to_vec()]),
             (Codex, vec![b"\r".to_vec(), b"\r".to_vec()]),
             (Cursor, vec![crate::inject_submit::CURSOR_SUBMIT.to_vec()]),
         ] {

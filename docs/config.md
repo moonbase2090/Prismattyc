@@ -33,6 +33,8 @@ install; `PRISMATTYC_NO_AGENT_SKILLS=1` also opts out and wins over the config
 value. Automatic signed-release checks run on app launch and daily by default.
 Set the top-level `automatic_update_checks = false` or turn them off in the app
 menu to opt out. The app menu's manual check works regardless of this setting.
+On Linux and Windows the same setting controls a notice-only check: it never
+installs or stops sessions.
 `async_file_writes` writes render status and attach-cache files on the host's
 file-writer thread. It defaults to `true` and takes effect at startup, so
 restart the host after changing it.

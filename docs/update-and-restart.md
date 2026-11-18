@@ -11,6 +11,13 @@ flow is available from **Update and restart** in the command palette on
 all platforms. **Roll Back Last Update…** restores the previous verified app.
 The command-line update path remains available on all platforms.
 
+On Linux and Windows the app runs the same check (`pmux update --check --json`)
+on launch and daily while `automatic_update_checks` is on. When a newer release
+exists it shows one notice naming the version, then stays quiet about that
+version until the app restarts. The notice does not install anything and never
+stops a session; install from **Update and restart** when you choose. It is
+kept in Recent messages and is hidden only by `toasts = "off"`.
+
 ## Restart without stopping sessions
 
 On macOS, choose **Restart…** from the Prismattyc app menu. A dialog shows

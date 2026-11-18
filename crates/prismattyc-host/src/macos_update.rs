@@ -9,14 +9,6 @@ use winit::event_loop::EventLoopProxy;
 
 use crate::{find_mux_bin, UserAction};
 
-#[derive(Debug, Deserialize)]
-pub(super) struct ReleaseCheck {
-    pub available: String,
-    pub update_available: bool,
-    #[serde(default)]
-    pub release_notes: String,
-}
-
 #[derive(Debug)]
 pub(super) struct InstallResult {
     pub notice: String,
@@ -40,24 +32,11 @@ struct RestartComponent {
     status: String,
 }
 
-pub(super) fn start_check(proxy: EventLoopProxy<UserAction>) {
-    thread::spawn(move || {
-        let result = check_release().map_err(|error| format!("{error:#}"));
-        let _ = proxy.send_event(UserAction::UpdateCheckFinished { result });
-    });
-}
-
 pub(super) fn start_install(proxy: EventLoopProxy<UserAction>, rollback: bool) {
     thread::spawn(move || {
         let result = install_release(rollback).map_err(|error| format!("{error:#}"));
         let _ = proxy.send_event(UserAction::UpdateInstallFinished { rollback, result });
     });
-}
-
-fn check_release() -> Result<ReleaseCheck> {
-    let output = run_pmux(&["update", "--check", "--json"])?;
-    ensure!(output.status.success(), "{}", command_error(&output));
-    serde_json::from_slice(&output.stdout).context("parse pmux update check")
 }
 
 fn install_release(rollback: bool) -> Result<InstallResult> {
@@ -147,10 +126,6 @@ fn ensure_daemon(pmux: &std::path::Path) -> String {
     } else {
         "The pmux daemon could not be started; pmux sessions were left untouched.".into()
     }
-}
-
-fn run_pmux(args: &[&str]) -> Result<Output> {
-    run(&find_mux_bin(), args)
 }
 
 fn run(pmux: &std::path::Path, args: &[&str]) -> Result<Output> {

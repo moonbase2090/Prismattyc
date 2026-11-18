@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- In the activity monitor's seat details, `Enter`, `Space` or a click expands the selected line in place so its full command or file name wraps onto the rows below, with the age, result and timing columns unchanged. `e` expands or collapses every line. It is on by default and uses the same already-redacted text as the collapsed line. `↑`/`↓` now move the selected line, and the list scrolls to keep it visible. The Activity Monitor package is now 1.3.4.
+
 ## [0.3.68] - 2026-11-17
 
 ### Changed

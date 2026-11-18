@@ -1468,6 +1468,66 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    #[test]
+    fn a_new_source_time_reanchors_the_clock() -> Result<()> {
+        let mut host = Host::new("remote");
+        host.apply(
+            page_in(
+                "e0",
+                vec![record_at("early", 1, "turn_finished", 1_000)?],
+                None,
+            )?,
+            0,
+        );
+        host.advance(50_000, 10);
+        // The source reports a much later time; the clock follows it from now on.
+        let later = 1_000 + 10 * MIN;
+        host.apply(
+            page_in(
+                "e0",
+                vec![record_at("busy", 2, "tool_started", later)?],
+                None,
+            )?,
+            20,
+        );
+        host.advance(50_000 + MIN, 30);
+        assert_eq!(seat(&host, "busy").state, SeatState::Working);
+        host.advance(50_000 + 6 * MIN, 40);
+        assert_eq!(host.clock_ms, later + 5 * MIN);
+        assert_eq!(seat(&host, "busy").state, SeatState::Stuck);
+        Ok(())
+    }
+
+    #[test]
+    fn a_replaced_session_forgets_the_previous_reports() -> Result<()> {
+        use prismattyc_core::activity::ActivitySessionState;
+
+        let mut first = page_in(
+            "e0",
+            vec![record_at("agent", 1, "tool_failed", 1_000)?],
+            None,
+        )?;
+        first.sessions = Some(session(
+            "agent",
+            ActivitySessionState::Working,
+            Some(1_000),
+            1_000,
+        ));
+        let mut host = Host::new("local");
+        host.apply(first, 0);
+        assert_eq!(seat(&host, "agent").state, SeatState::Failed);
+        // The same seat in a new session: the old failure is not this session's.
+        let mut second = page_in("e0", vec![], None)?;
+        let mut sessions = session("agent", ActivitySessionState::Working, Some(2_000), 2_000);
+        sessions.seats[0].session_id = 2;
+        second.sessions = Some(sessions);
+        host.apply(second, 10);
+        let agent = seat(&host, "agent");
+        assert!(agent.last_report().is_none());
+        assert_eq!(agent.state, SeatState::Working);
+        Ok(())
+    }
+
     fn quiet_agent_after(kind: &str) -> Result<SeatState> {
         use prismattyc_core::activity::ActivitySessionState;
 

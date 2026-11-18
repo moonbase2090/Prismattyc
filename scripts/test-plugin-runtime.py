@@ -576,6 +576,84 @@ def exercise(bins, scratch, feature="all", expected_catalog=None, frame_probe=No
         (scratch / "discovery-result.json").write_text(json.dumps({"status":"PASS", "checks":["runtime seed events only", "pmuxd workspace restore", "named idle seats after restart", "520-event retention gap", "fresh monitor", "live discovery", "stopped seat remains visible"]}, indent=2) + "\n")
         print("PASS named shell-idle seat discovery after daemon restore; unchanged cursor; 520-event retention gap; fresh monitor views retain quiet seats; live periodic discovery and stopped-seat display; existing activity-only grants", flush=True)
 
+    def seat_states_proof():
+        """Scripted seats on a real pmuxd: hooks and pane output decide working,
+        stuck, idle and pane-only states the same way, whatever pmuxd's own
+        output-only verdict says. Takes about six minutes of real time."""
+        assert os.name != "nt", "seat-states uses Unix process names"
+        connector = "org.moonbase.activity-connector"
+        monitor = "org.moonbase.activity-monitor"
+        cli("install", connector)
+        cli("enable", connector, "--allow", "activity.read:local")
+        # sleep under a name like an agent CLI: pmuxd sees an agent in front.
+        # A link keeps that name in argv; a copied system binary may not run.
+        agent_bin = scratch / "agent-bin"
+        agent_bin.mkdir()
+        agent = agent_bin / "codex"
+        agent.symlink_to(shutil.which("sleep"))
+        sessions = {}
+
+        def create(name, script):
+            reply = connection.request("create_session", name=name,
+                spawn={"program": "/bin/sh", "argv": ["-c", script], "cwd": None, "env": {}},
+                agent_id=name, headless=False)
+            assert reply["status"] == "ok", reply
+            sessions[name] = reply["response"]["session_id"]
+
+        counter = [0]
+
+        def publish(seat, kind):
+            counter[0] += 1
+            event = {"schema_version": 1, "seat": seat, "run_id": f"{seat}-run",
+                     "event_id": f"{seat}-{counter[0]}", "source": "hooks", "kind": kind}
+            assert connection.request("publish_activity", event=event)["status"] == "ok"
+
+        def daemon_states():
+            page = connection.request("read_activity", cursor=None, limit=1)["response"]["page"]
+            return {seat["seat"]: seat["state"] for seat in page["sessions"]["seats"]}
+
+        try:
+            for name in ("hooked-quiet", "open-turn", "finished-turn"):
+                create(name, f"echo started; exec {agent} 900")
+            create("pane-only", "while :; do echo tick; sleep 15; done")
+            for name in ("hooked-quiet", "open-turn", "finished-turn"):
+                publish(name, "turn_started")
+            publish("open-turn", "tool_started")
+            publish("finished-turn", "turn_finished")
+            quiet_since = time.monotonic()
+            deadline = quiet_since + 9 * 60
+            beat = 0.0
+            while True:
+                states = daemon_states()
+                if time.monotonic() - beat >= 30:
+                    # The hooks keep reporting while the pane prints nothing.
+                    publish("hooked-quiet", "tool_started" if counter[0] % 2 else "tool_finished")
+                    beat = time.monotonic()
+                if states.get("hooked-quiet") == "stuck" and time.monotonic() - quiet_since >= 5 * 60 + 10:
+                    break
+                assert time.monotonic() < deadline, f"pmuxd never called the quiet agent pane stuck: {states}"
+                time.sleep(2)
+            publish("hooked-quiet", "tool_started")
+            frame = cli("run", monitor, "--snapshot", "--cols", "100", "--rows", "16", text=True)
+            states = daemon_states()
+            (scratch / "seat-states-frame.txt").write_text(frame)
+            (scratch / "seat-states-daemon.json").write_text(json.dumps(states, indent=2, sort_keys=True) + "\n")
+            rows = {name: next((line for line in frame.splitlines() if f" {name} " in line), "") for name in sessions}
+            for name, row in rows.items():
+                assert " local " in row, (name, frame)
+            # pmuxd's verdict (an agent with five quiet minutes of output) says stuck;
+            # its hooks say working, and the monitor agrees with the hooks.
+            assert states["hooked-quiet"] == "stuck", states
+            assert "●" in rows["hooked-quiet"] and "stuck" not in rows["hooked-quiet"], frame
+            assert "!" in rows["open-turn"] and "stuck" in rows["open-turn"], frame
+            assert "○" in rows["finished-turn"] and "idle" in rows["finished-turn"], frame
+            assert "●" in rows["pane-only"] and "no events" in rows["pane-only"], frame
+        finally:
+            for session_id in sessions.values():
+                connection.request("destroy_session", session_id=session_id)
+        (scratch / "seat-states-result.json").write_text(json.dumps({"status": "PASS", "daemon": states, "rows": rows}, indent=2) + "\n")
+        print("PASS seat states on a real pmuxd: hooked agent with a quiet pane stays working while pmuxd calls it stuck; open turn stuck after five quiet minutes; finished turn settles to idle; pane-only seat works by output; every row names its source", flush=True)
+
     def mcp_proof(arguments, activity_only, expected_seats=()):
         import queue
         import threading
@@ -1142,6 +1220,8 @@ else:
             cli("enable",monitor,"--allow","activity.read:local")
             if feature == "discovery":
                 discovery_proof()
+            elif feature == "seat-states":
+                seat_states_proof()
             elif feature == "remote-query":
                 connector = "org.moonbase.activity-connector"
                 cli("install", connector)
@@ -1296,7 +1376,7 @@ def main():
     parser.add_argument("--toolchain", default="1.90.0")
     parser.add_argument("--release", action="store_true", dest="release", default=True, help="exercise optimized native binaries as shipped (default)")
     parser.add_argument("--debug", action="store_false", dest="release", help="use slower debug native binaries for local diagnostics")
-    parser.add_argument("--feature", choices=["all","activity-bench","endpoint-pressure","legacy-import","production","discovery","remote-query","graph-styles"], default="all")
+    parser.add_argument("--feature", choices=["all","activity-bench","endpoint-pressure","legacy-import","production","discovery","seat-states","remote-query","graph-styles"], default="all")
     args = parser.parse_args()
     # A killed run (timeout, cancel, closed terminal) still runs the finally
     # blocks that stop each isolated daemon.

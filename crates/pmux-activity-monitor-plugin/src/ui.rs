@@ -2168,8 +2168,23 @@ fn activity_text(
     )
 }
 
-/// Breaks `text` into rows: the first `first` wide, the rest `rest` wide,
-/// preferring to break after a space. Never loses a character.
+/// How many leading characters of `chars` fit in `budget` terminal cells. A
+/// character wider than the budget still goes alone, so wrapping always advances.
+fn chars_within(chars: &[char], budget: usize) -> usize {
+    let mut used = 0;
+    for (index, character) in chars.iter().enumerate() {
+        used += prismattyc_core::char_display_width(*character);
+        if used > budget {
+            return index.max(1);
+        }
+    }
+    chars.len()
+}
+
+/// Breaks `text` into rows: the first `first` cells wide, the rest `rest`,
+/// preferring to break after a space. Never loses a character, and no row is
+/// wider in terminal cells than its budget (one wide character excepted when
+/// the budget is a single cell).
 fn wrap_rows(text: &str, first: usize, rest: usize) -> Vec<String> {
     let mut rows = Vec::new();
     let mut chars: Vec<char> = text.chars().collect();
@@ -2179,16 +2194,16 @@ fn wrap_rows(text: &str, first: usize, rest: usize) -> Vec<String> {
         rows.push(String::new());
         width = rest;
     }
-    let width = width.max(1);
-    let mut width_now = width;
+    let mut width_now = width.max(1);
     while !chars.is_empty() {
-        if chars.len() <= width_now {
+        let fit = chars_within(&chars, width_now);
+        if fit == chars.len() {
             rows.push(chars.drain(..).collect());
             break;
         }
-        let mut cut = width_now;
-        if let Some(space) = chars[..width_now].iter().rposition(|c| *c == ' ') {
-            if space + 1 > width_now / 2 {
+        let mut cut = fit;
+        if let Some(space) = chars[..fit].iter().rposition(|c| *c == ' ') {
+            if space + 1 > fit / 2 {
                 cut = space + 1;
             }
         }
@@ -4073,6 +4088,29 @@ mod tests {
         let rows = wrap_rows("abc def", 0, 4);
         assert_eq!(rows[0], "");
         assert_eq!(rows[1..].concat(), "abc def");
+    }
+
+    #[test]
+    fn wide_characters_wrap_by_terminal_cells_not_by_character_count() {
+        use prismattyc_core::line_display_width;
+        // Each CJK character is two cells wide: four cells hold two of them.
+        let rows = wrap_rows("資料/output.txt", 4, 4);
+        assert_eq!(rows.concat(), "資料/output.txt");
+        assert_eq!(rows[0], "資料");
+        for (width, text) in [
+            (4, "資料/output.txt"),
+            (5, "日本語のファイル名.log"),
+            (3, "a資b料c"),
+        ] {
+            let rows = wrap_rows(text, width, width);
+            assert_eq!(rows.concat(), text, "width {width}");
+            assert!(
+                rows.iter().all(|row| line_display_width(row) <= width),
+                "width {width}: {rows:?}"
+            );
+        }
+        // A single wide character in a one-cell budget still advances.
+        assert_eq!(wrap_rows("資料", 1, 1), vec!["資", "料"]);
     }
 
     #[test]

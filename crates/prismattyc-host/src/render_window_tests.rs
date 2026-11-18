@@ -2564,8 +2564,9 @@ fn update_notice_appears_once_in_a_private_window() {
             os_tree: Some(false),
             announce: Some(false),
         }),
-        // The stand-in answers the check below; the timer-driven one stays off.
-        automatic_update_checks: Some(false),
+        // The notice is shown only while automatic checks are on. This fixture
+        // starts each check itself and never drives the timer.
+        automatic_update_checks: Some(true),
         ..Default::default()
     };
     let app = App::new(cli, config, None, event_loop.create_proxy()).unwrap();

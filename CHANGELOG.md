@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.68] - 2026-11-17
+
 ### Changed
 
 - The activity monitor shows a seat whose agent has exited as `no agent` instead of `idle`, and `x` hides that row without stopping its session; the row returns if an agent starts there. `R` rescans the live panes on demand.
@@ -12,10 +14,18 @@
 ### Added
 
 - The macOS app menu has **Restart…**. It previews what `pmux restart --plan` reports, saves a session configuration snapshot, then runs `pmux restart` without stopping any session. **Roll Back Last Update…** now saves a snapshot first too.
+- A seat can set, clear, and show its current ticket with `pmux activity ticket`. `activity-emit` attaches that marker to the seat's activity events.
 
 ### Fixed
 
 - A cursorless activity poll returns the newest retained page and the current session snapshot. The poll and recent results accept event detail and the session fields the feed already publishes. A poll that still fails names the schema path or the query error. The connector package is 1.0.2.
+- This release embeds official plug-in catalog 1.3.3, which adds activity-connector 1.0.2 and keeps the earlier packages.
+- A host restart keeps each session's own name in a split tab, so restore does not attach those sessions a second time.
+- Restoring a saved command that contains a line break skips that command instead of aborting the restore. Saving a session no longer records a multi-line wrapper script as a pane's launch command.
+
+## [0.3.68-rc.1]
+
+Release candidate for 0.3.68, with the [same changes](#0368---2026-11-17).
 
 ## [0.3.67] - 2026-11-13
 

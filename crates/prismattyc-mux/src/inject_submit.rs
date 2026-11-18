@@ -17,8 +17,6 @@
 
 #[cfg(not(windows))]
 use std::collections::{HashSet, VecDeque};
-#[cfg(not(windows))]
-use std::path::Path;
 
 use crate::PMUX_MAIL_NOTIFICATION;
 
@@ -126,34 +124,14 @@ pub(crate) fn submit_writes(agent: InjectAgent, kitty_flags: u16) -> Vec<Vec<u8>
 #[must_use]
 #[cfg(not(windows))]
 pub fn classify_cmdline(cmd: &str) -> Option<InjectAgent> {
-    let normalized = cmd.replace('\0', " ");
-    let tokens: Vec<&str> = normalized.split_whitespace().collect();
-    let names: Vec<String> = tokens
-        .iter()
-        .map(|token| {
-            Path::new(token.trim_matches(['\'', '"']))
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or(token)
-                .to_ascii_lowercase()
-        })
-        .collect();
-    // Family order matches the previous classifiers: cursor wins over a
-    // later token that names another agent.
-    const ORDER: [InjectAgent; 7] = [
-        InjectAgent::Cursor,
-        InjectAgent::Codex,
-        InjectAgent::Claude,
-        InjectAgent::Grok,
-        InjectAgent::Kiro,
-        InjectAgent::Muse,
-        InjectAgent::Hermes,
-    ];
-    ORDER.into_iter().find(|&kind| {
-        names
-            .iter()
-            .any(|name| classify_agent_file_name(name) == Some(kind))
-    })
+    let args = if cmd.contains('\0') {
+        cmd.split('\0').map(str::to_owned).collect()
+    } else {
+        shlex::split(cmd)?
+    };
+    // An interpreter may precede the launcher. Once a family is found, model
+    // and prompt arguments must not change it.
+    args.iter().find_map(|arg| classify_agent_argv0(arg))
 }
 
 #[cfg(windows)]
@@ -395,6 +373,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn classify_hermes_launchers_and_python_entrypoint() {
         for name in ["hermes", "HERMES", "/opt/bin/hermes", "hermes-agent"] {
             assert_eq!(classify_agent_argv0(name), Some(InjectAgent::Hermes));
@@ -423,6 +402,33 @@ mod tests {
                 vec![b"\x1b[200~PMUX_MAIL\x1b[201~".to_vec(), b"\r".to_vec()]
             );
         }
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn launcher_family_precedes_model_and_prompt_names() {
+        assert_eq!(
+            classify_cmdline("hermes --model anthropic/claude-sonnet-4"),
+            Some(InjectAgent::Hermes)
+        );
+        assert_eq!(
+            classify_cmdline("/opt/bin/python3\0/opt/bin/hermes\0chat\0--model\0grok-4"),
+            Some(InjectAgent::Hermes)
+        );
+        assert_eq!(
+            classify_cmdline("codex 'ask cursor-agent for help'"),
+            Some(InjectAgent::Codex)
+        );
+        assert_eq!(
+            classify_cmdline("'/opt/Grok Apps/cursor-agent'"),
+            Some(InjectAgent::Cursor)
+        );
+        assert_eq!(
+            classify_cmdline("python3 '/opt/Claude Apps/bin/hermes' chat"),
+            Some(InjectAgent::Hermes)
+        );
+        assert_eq!(classify_cmdline("'hermes"), None);
+        assert_eq!(classify_cmdline("'hermes'\0chat"), None);
     }
 
     #[test]

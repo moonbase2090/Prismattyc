@@ -59,11 +59,11 @@ Every row says where its facts come from. In the medium and wide layouts, a sour
 Seats reached through the pod hub use the same rule and the same columns. The hub keeps no per-seat state. For each pod it stores a `status` check-in that the pod agent sends every 30 seconds when its session list changes, and at least every 300 seconds otherwise. The check-in lists the pod's session names and its self-reported ticket. For a hub seat:
 
 - the source label is the pod, under a hub heading;
-- presence comes from the newest check-in: a listed session is live, and a session that leaves the list, or a pod the hub reports killed or gone, is down;
+- presence comes from the newest check-in: a listed session is live, and a session that leaves the list is down. The hub's activity feed does not say that a pod ended, so a pod whose check-ins stop goes stale rather than down;
 - progress is unknown until pod activity events reach the hub, so a hub seat shows no state yet rather than a guess;
 - the seat is stale when no check-in has arrived for ten minutes, which is two missed 300-second check-ins and the same line the hub dashboard uses for an idle pod. A quiet seat in a pod that keeps checking in is never stale.
 
-The monitor shows only session names, the ticket and check-in times from the hub. It never shows the check-in's free-text summary or branch. How check-ins reach the monitor (a vetted command, like `--host-cmd`, that prints the hub's existing activity JSON, with credentials kept out of the monitor) is a separate change.
+The monitor shows only session names, the ticket and check-in times from the hub. It never shows the check-in's free-text summary or branch. Check-ins will reach the monitor through `--hub-cmd LABEL JSON_ARGV`: a vetted command, like `--host-cmd`, that prints the hub's existing `GET /v1/activity` JSON. Credentials stay with that command and never reach the monitor. That transport is a separate change, built and tested against a fixture producer.
 
 Select a seat and press `d` to open its details. The top lines say who the seat
 is: its harness, model, quota and project, its ticket, and how long ago it last

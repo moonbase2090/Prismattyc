@@ -22390,7 +22390,10 @@ impl ApplicationHandler<UserAction> for App {
                 self.update_check_inflight = None;
                 match result {
                     Ok(check) => {
-                        if let Some(notice) = self.update_announced.notice(&check) {
+                        if let Some(notice) = self
+                            .update_announced
+                            .notice(&check, self.automatic_update_checks)
+                        {
                             for host in self.windows.values_mut() {
                                 status_toast(host, ToastKind::Notice, &notice);
                             }

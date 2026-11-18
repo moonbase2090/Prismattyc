@@ -64,9 +64,14 @@ pub(super) struct Announced(Option<String>);
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 impl Announced {
     /// The notice to show for `check`, or `None` when no update exists or
-    /// this version was already announced.
-    pub fn notice(&mut self, check: &ReleaseCheck) -> Option<String> {
-        if !check.update_available || self.0.as_deref() == Some(check.available.as_str()) {
+    /// this version was already announced. A check that finishes after the
+    /// user turned automatic checks off is dropped without being recorded, so
+    /// turning them back on still announces the release.
+    pub fn notice(&mut self, check: &ReleaseCheck, enabled: bool) -> Option<String> {
+        if !enabled
+            || !check.update_available
+            || self.0.as_deref() == Some(check.available.as_str())
+        {
             return None;
         }
         self.0 = Some(check.available.clone());
@@ -93,22 +98,37 @@ mod tests {
     fn a_new_release_is_announced_once_per_version() {
         let mut seen = Announced::default();
         let first = check(r#"{"available":"0.4.0","update_available":true}"#);
-        let notice = seen.notice(&first).expect("first announcement");
+        let notice = seen.notice(&first, true).expect("first announcement");
         assert!(notice.contains("0.4.0"), "{notice}");
-        assert_eq!(seen.notice(&first), None, "the daily recheck stays quiet");
+        assert_eq!(
+            seen.notice(&first, true),
+            None,
+            "the daily recheck stays quiet"
+        );
         let newer = check(r#"{"available":"0.4.1","update_available":true}"#);
-        assert!(seen.notice(&newer).expect("newer").contains("0.4.1"));
+        assert!(seen.notice(&newer, true).expect("newer").contains("0.4.1"));
     }
 
     #[test]
     fn an_up_to_date_install_is_never_announced() {
         let mut seen = Announced::default();
         let current = check(r#"{"available":"0.4.0","update_available":false}"#);
-        assert_eq!(seen.notice(&current), None);
+        assert_eq!(seen.notice(&current, true), None);
         let later = check(r#"{"available":"0.4.0","update_available":true}"#);
         assert!(
-            seen.notice(&later).is_some(),
+            seen.notice(&later, true).is_some(),
             "a skipped quiet check must not hide a later release"
+        );
+    }
+
+    #[test]
+    fn a_check_finishing_after_checks_were_turned_off_stays_quiet() {
+        let mut seen = Announced::default();
+        let pending = check(r#"{"available":"0.4.0","update_available":true}"#);
+        assert_eq!(seen.notice(&pending, false), None);
+        assert!(
+            seen.notice(&pending, true).is_some(),
+            "a dropped result must not count as announced"
         );
     }
 

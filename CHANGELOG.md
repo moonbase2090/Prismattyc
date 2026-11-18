@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.68] - 2026-11-17
 
 ### Changed
 
@@ -16,6 +16,11 @@
 ### Fixed
 
 - A cursorless activity poll returns the newest retained page and the current session snapshot. The poll and recent results accept event detail and the session fields the feed already publishes. A poll that still fails names the schema path or the query error. The connector package is 1.0.2.
+- This release embeds official plug-in catalog 1.3.3, which adds activity-connector 1.0.2 and keeps the earlier packages.
+
+## [0.3.68-rc.1]
+
+Release candidate for 0.3.68, with the [same changes](#0368---2026-11-17).
 
 ## [0.3.67] - 2026-11-13
 

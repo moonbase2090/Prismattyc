@@ -215,6 +215,33 @@ the artifacts written before failure. A debug worker can spend longer than
 15 seconds compiling its first live view; the fixture allows 45 seconds for
 that view to appear.
 
+## Check seat states against a real pmuxd
+
+For changes to how the monitor derives a seat's state, run the scripted-seat
+fixture in a clean private proof environment (Unix only):
+
+```sh
+python3 scripts/test-plugin-runtime.py --feature seat-states \
+  --target-dir "$verify_target" --out "$verify_evidence/seat-states"
+```
+
+Use the default optimized native binaries. With `--debug`, a small machine can
+exceed the plug-in worker's one-second call limit (`wasm trap: interrupt:
+component call: wall=1000ms`); this happened on a 4-vCPU arm64 Linux VM, so
+that failure says nothing about the monitor.
+
+It builds candidate guests, starts a private `pmuxd`, and creates four seats:
+an agent-named process whose hooks keep reporting while its pane prints nothing,
+an agent with an open turn, one whose turn finished, and a shell loop that only
+prints output. It waits until pmuxd's own snapshot calls the quiet agent pane
+`stuck` (about six minutes of real time), then renders the monitor.
+
+Require exit 0, the seat-states PASS line, and `seat-states-result.json`.
+Inspect `seat-states-frame.txt` beside `seat-states-daemon.json`: the hooked
+seat is working although pmuxd says stuck, the open turn is stuck, the finished
+turn is idle, the output-only seat is working with `no events`, and every row
+names its source. The fixture destroys its sessions before the daemon stops.
+
 ## Verify webhook delivery locally
 
 Run the real-daemon integration fixture against its local receiver:

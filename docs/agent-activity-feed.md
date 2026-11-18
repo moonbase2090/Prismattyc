@@ -61,8 +61,11 @@ labels. Harness and project are set only when active agent panes agree; model
 comes only from an explicit structured hook field. Quota remains absent until a
 harness exposes a structured source. `idle` requires a positively detected
 shell prompt; `stuck` requires a detected agent process with no pane output for
-five minutes. An unreadable or unsupported process tree is never treated as an
-idle shell. Session names, pane titles, and screen contents stay outside the
+five minutes. The activity monitor treats this snapshot state as evidence about
+the process and combines it with hook events, so its own `stuck` also needs a
+turn in flight and no hook event for five minutes (see
+[activity-monitor-ui.md](activity-monitor-ui.md#state)). An unreadable or
+unsupported process tree is never treated as an idle shell. Session names, pane titles, and screen contents stay outside the
 feed. Reading this snapshot does not publish an event or advance the activity
 cursor.
 
@@ -486,8 +489,9 @@ rejects paths containing command expansion characters it cannot quote safely.
 The viewer polls every 250 ms on a background thread. A bounded channel separates
 network reads from rendering, and the cache keeps at most 128 seats. Timer frames
 make new events visible without keyboard input. Resets clear the cache before
-replay. Seats without an event for 30 seconds display as stale, which does not
-mean their processes died. Disconnection leaves cached rows visibly stale and
+replay. A row is stale when its source has gone quiet about it: its host is
+disconnected, or the session snapshot that vouches for it is 30 seconds old. A
+quiet seat is not stale. Disconnection leaves cached rows visibly stale and
 retries the endpoint. Press `q` to exit.
 
 `--snapshot` renders one 120 by 24 Lunatui grid as text. `--json` reads one bounded

@@ -806,15 +806,8 @@ impl Painter<'_, '_> {
         }
     }
 
-    fn lane(
-        &mut self,
-        area: Rect,
-        history: &std::collections::VecDeque<ActivityRecord>,
-        now: u64,
-        window: u64,
-        bg: Color,
-    ) {
-        let bins = model::lane(history, now, window, self.lane_width(area.width));
+    fn lane(&mut self, area: Rect, seat: &Seat, now: u64, window: u64, bg: Color) {
+        let bins = model::seat_lane(seat, now, window, self.lane_width(area.width));
         self.lane_bins(area, &bins, bg, None);
     }
 
@@ -1071,23 +1064,31 @@ fn draw_list(
     let overflow = rows.len() > ui.list_offset + height;
     let shown = if overflow { height - 1 } else { height };
     ui.list_lines = (area.y, shown);
-    let longest = hosts
-        .iter()
-        .flat_map(|host| host.seats.keys())
-        .map(|id| id.as_str().len())
-        .max()
-        .unwrap_or(8);
+    let widths = Widths {
+        name: hosts
+            .iter()
+            .flat_map(|host| host.seats.keys())
+            .map(|id| id.as_str().len())
+            .max()
+            .unwrap_or(8),
+        source: hosts
+            .iter()
+            .filter(|host| !host.seats.is_empty())
+            .map(|host| model::source_label(host).chars().count())
+            .max()
+            .unwrap_or(0),
+    };
     for (line, row) in rows.iter().skip(ui.list_offset).take(shown).enumerate() {
         let y = area.y + line as u16;
         match row {
-            Row::Host(index) => draw_host_row(paint, area, y, &hosts[*index], clock, tier, longest),
+            Row::Host(index) => draw_host_row(paint, area, y, &hosts[*index], clock, tier, widths),
             Row::Note(index) => draw_note(paint, area, y, &hosts[*index], ui.filter),
             Row::Seat(index, id) => {
                 let host = &hosts[*index];
                 if let Some(seat) = host.seats.get(id) {
                     let selected = ui.selected.as_ref() == Some(&(*index, id.clone()));
                     draw_seat_row(
-                        paint, area, y, host, id, seat, selected, ui.motion, clock, tier, longest,
+                        paint, area, y, host, id, seat, selected, ui.motion, clock, tier, widths,
                     );
                 }
             }
@@ -1106,21 +1107,36 @@ fn draw_list(
     }
 }
 
+/// Text widths that line columns up across every host's rows.
+#[derive(Clone, Copy)]
+struct Widths {
+    /// Longest seat name.
+    name: usize,
+    /// Longest source label.
+    source: usize,
+}
+
 struct Columns {
     name: u16,
+    /// Where the seat's facts come from, in the layouts with room for it.
+    source: Option<u16>,
     kind: Option<u16>,
     age: u16,
     flag: Option<u16>,
     lane: Option<(u16, u16)>,
 }
 
-fn columns(area: Rect, tier: Tier, longest: usize) -> Columns {
+/// Source labels longer than this are cut so the event column keeps its place.
+const SOURCE_WIDTH: u16 = 12;
+
+fn columns(area: Rect, tier: Tier, widths: Widths) -> Columns {
     let left = area.x + 3;
     let right = area.x + area.width;
-    let name_width = (longest as u16).clamp(8, 24);
+    let name_width = (widths.name as u16).clamp(8, 24);
     match tier {
         Tier::Tiny | Tier::Small => Columns {
             name: left,
+            source: None,
             kind: None,
             age: right.saturating_sub(1),
             flag: None,
@@ -1131,6 +1147,7 @@ fn columns(area: Rect, tier: Tier, longest: usize) -> Columns {
             let kind = left + name_width + 2;
             Columns {
                 name: left,
+                source: None,
                 kind: Some(kind),
                 age: (kind + KIND_WIDTH as u16 + 5).min(right.saturating_sub(1)),
                 flag: None,
@@ -1138,13 +1155,20 @@ fn columns(area: Rect, tier: Tier, longest: usize) -> Columns {
             }
         }
         Tier::Medium | Tier::Wide => {
-            let kind = left + name_width + 2;
+            let source = left + name_width + 2;
+            let source_width = (widths.source as u16).min(SOURCE_WIDTH);
+            let kind = if source_width == 0 {
+                source
+            } else {
+                source + source_width + 2
+            };
             let age = kind + KIND_WIDTH as u16 + 5;
             let flag = age + 2;
             let lane_x = flag + 6;
             let lane = (right > lane_x + 8).then(|| (lane_x, right - lane_x - 1));
             Columns {
                 name: left,
+                source: (source_width > 0).then_some(source),
                 kind: Some(kind),
                 age,
                 flag: Some(flag),
@@ -1161,7 +1185,7 @@ fn draw_host_row(
     host: &Host,
     clock: Clock,
     tier: Tier,
-    longest: usize,
+    widths: Widths,
 ) {
     let palette = *paint.palette;
     let limit = area.x + area.width;
@@ -1229,7 +1253,7 @@ fn draw_host_row(
         x = paint.text(x + 2, y, limit, "catching up", fg(palette.muted));
     }
     // A lane of the host's combined activity, aligned with the seat lanes.
-    if let Some((lane_x, lane_w)) = columns(area, tier, longest).lane {
+    if let Some((lane_x, lane_w)) = columns(area, tier, widths).lane {
         if x + 2 <= lane_x && !host.seats.is_empty() {
             let width = paint.lane_width(lane_w);
             let mut total = vec![
@@ -1374,7 +1398,7 @@ fn draw_seat_row(
     motion: bool,
     clock: Clock,
     tier: Tier,
-    longest: usize,
+    widths: Widths,
 ) {
     let palette = *paint.palette;
     let limit = area.x + area.width;
@@ -1405,7 +1429,7 @@ fn draw_seat_row(
         &seat.state.glyph().to_string(),
         base.fg(state_color),
     );
-    let cols = columns(area, tier, longest);
+    let cols = columns(area, tier, widths);
     let name_color = if matches!(seat.state, SeatState::Stopped | SeatState::NoAgent) {
         palette.muted
     } else {
@@ -1417,16 +1441,31 @@ fn draw_seat_row(
         base.fg(name_color)
     };
     let name_limit = cols
-        .kind
-        .map_or(cols.age.saturating_sub(5), |kind| kind - 1);
+        .source
+        .or(cols.kind)
+        .map_or(cols.age.saturating_sub(5), |next| next - 1);
     paint.text(cols.name, y, name_limit, id.as_str(), name_style);
-    let latest = seat.latest();
+    if let (Some(source), Some(kind)) = (cols.source, cols.kind) {
+        paint.text(
+            source,
+            y,
+            kind - 1,
+            model::source_label(host),
+            base.fg(palette.muted),
+        );
+    }
     if let Some(kind) = cols.kind {
+        // The report the state comes from, never the daemon's snapshot or its
+        // runtime events: the column cannot contradict the row's mark.
+        let text = seat.last_report().map_or_else(
+            || "no events".to_owned(),
+            |record| model::label(&record.event.kind),
+        );
         paint.text(
             kind,
             y,
             kind + KIND_WIDTH as u16,
-            &model::label(&latest.event.kind),
+            &text,
             base.fg(palette.muted),
         );
     }
@@ -1457,7 +1496,7 @@ fn draw_seat_row(
     if let Some((lane_x, lane_w)) = cols.lane {
         paint.lane(
             Rect::new(lane_x, y, lane_w, 1),
-            &seat.history,
+            seat,
             clock.wall_ms,
             LIST_LANE_WINDOW_MS,
             bg,
@@ -1575,7 +1614,7 @@ fn draw_timeline(
         y += u16::from(area.height >= 12);
         paint.lane(
             Rect::new(left, y, lane_width, 1),
-            &seat.history,
+            seat,
             clock.wall_ms,
             DETAIL_LANE_WINDOW_MS,
             Color::Default,
@@ -2388,12 +2427,12 @@ mod tests {
             "",
             r#"
  Activity monitor   ● 2 working  ◆ 1 waiting  ○ 0 idle  ! 0 stuck  ✕ 1 failed  ■ 0 down  !
- mac  connected  3 seats  2 need you                         ▂         ▂    ▂     ▂    ▂   ▂     ▂▂
-▌✕ builder    test_failed         2m stale                   ▃▁▁▁▁▁▁▁▁▁▃▁▁▁▁▃▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
- ◆ reviewer   turn_finished      41s stale                                        ▃▁▁▁▁▁▁▁▁▃▁▁▁▁▁▁▁
- ● worker-a   command_started     4s                                                   ▃▁▁▁▁▁▁▁▁▁▃▃
- windows  retrying for 12s  1 seat  cached
- ● win-agent  tool_started       19s stale                                                     ▃▁▁▁
+ mac  connected  3 seats  2 need you                               ▂       ▂    ▂   ▂    ▂  ▂    ▂▂
+▌✕ builder    mac      test_failed         2m                      ▃▁▁▁▁▁▁▁▃▁▁▁▁▃▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+ ◆ reviewer   mac      turn_finished      41s                                       ▃▁▁▁▁▁▁▁▃▁▁▁▁▁▁
+ ● worker-a   mac      command_started     4s                                            ▃▁▁▁▁▁▁▁▃▃
+ windows  retrying for 12s  1 seat  cached                                                      ▂
+ ● win-agent  windows  tool_started       19s stale                                             ▃▁▁
 
 
 
@@ -2440,12 +2479,12 @@ mod tests {
             "j",
             r#"
  Activity monitor   ● 2 working  ◆ 1 waiting  ○ 0 idle  ! 0 stuck  ✕ 1 failed  ■ 0 down  !
- mac  connected  3 seats  2 need you             ▂  ▂▂ ▂ ▂▂ ▂ │ reviewer on mac   ◆ waiting for 41s  stale
- ✕ builder    test_failed         2m stale       ▃▁▁▃▃▁▁▁▁▁▁▁ │ 2 events  1 task  0 failures  last 41s ago
-▌◆ reviewer   turn_finished      41s stale             ▃▁▁▃▁▁ │
- ● worker-a   command_started     4s                     ▃▁▁▅ │                                              ▃▁▁▁▁▃▁▁▁
- windows  retrying for 12s  1 seat  cached                    │ -10m                      -5m                      now
- ● win-agent  tool_started       19s stale                 ▃▁ │
+ mac  connected  3 seats  2 need you                   ▂▂▂▂▂▂ │ reviewer on mac   ◆ waiting for 41s
+ ✕ builder    mac      test_failed         2m          ▃▃▃▁▁▁ │ 2 events  1 task  0 failures  last 41s ago
+▌◆ reviewer   mac      turn_finished      41s             ▃▃▁ │
+ ● worker-a   mac      command_started     4s              ▃▅ │                                              ▃▁▁▁▁▃▁▁▁
+ windows  retrying for 12s  1 seat  cached                  ▂ │ -10m                      -5m                      now
+ ● win-agent  windows  tool_started       19s stale         ▃ │
                                                               │   41s +49s   ◆ turn_finished    hooks
                                                               │    1m        ● turn_started     hooks
                                                               │
@@ -2466,7 +2505,7 @@ mod tests {
             "jl",
             r#"
  Activity monitor   ● 2 working  ◆ 1 waiting  ○ 0 idle  ! 0 stuck  ✕ 1 failed  ■ 0 down  !
- ← reviewer on mac   ◆ waiting for 41s  stale
+ ← reviewer on mac   ◆ waiting for 41s
  2 events  1 task  0 failures  last 41s ago
 
                                                                            ▃▁▁▁▁▁▁▃▁▁▁▁▁▁
@@ -2514,7 +2553,7 @@ mod tests {
             "l",
             r#"
  Activity monitor   ●2 ◆1 ○0 !0 ✕1 ■0 !
- ← builder on mac   ✕ failed for 2m  stale
+ ← builder on mac   ✕ failed for 2m
  3 events  1 task  1 failure  last 2m ago
                              ▃▁▁▃▁▃▁▁▁▁▁▁▁▁
  -10m                -5m                now
@@ -2568,7 +2607,8 @@ mod tests {
                 seat: seat.clone(),
                 session_id: 42,
                 state,
-                last_output_at_ms: None,
+                // Fresh output: a live agent seat with no events is working.
+                last_output_at_ms: Some(1_000),
                 harness: None,
                 model: None,
                 quota: None,
@@ -3230,13 +3270,83 @@ mod tests {
     }
 
     #[test]
+    fn long_sources_and_names_are_cut_before_the_event_column() -> Result<()> {
+        let mut monitor = Monitor::new(vec!["build-farm-west-2".into()], Palette::DARK, 0);
+        monitor.now_ms = NOW;
+        monitor.hosts[0].apply(
+            page_in(
+                "e1",
+                vec![crate::model::tests::record_at(
+                    "seat-with-a-name-longer-than-its-column",
+                    1,
+                    "command_started",
+                    NOW - 4_000,
+                )?],
+                None,
+            )?,
+            0,
+        );
+        let (text, ..) = draw(&mut monitor, 100, 8);
+        // The name stops at its 24-cell column and the source at 12, each with an
+        // ellipsis, so the event kind keeps its place.
+        let row = line_of(&text, "seat-with");
+        assert!(
+            row.contains("● seat-with-a-name-longer-… build-farm-w… command_started"),
+            "{row}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_seat_without_events_shows_its_state_and_no_snapshot_guess() -> Result<()> {
+        use prismattyc_core::activity::{ActivitySession, ActivitySessionState, ActivitySessions};
+
+        // pmuxd calls the pane stuck, and no hook ever reported a turn: the seat
+        // is idle. The event column must echo neither the snapshot's "working"
+        // nor pmux's own runtime "working" event.
+        let mut monitor = Monitor::new(vec!["mac".into()], Palette::DARK, 0);
+        monitor.now_ms = NOW;
+        let mut runtime =
+            crate::model::tests::record_at("quiet-agent", 1, "working", NOW - 13 * 60_000)?;
+        runtime.event.source = prismattyc_core::activity::ActivitySource::Runtime;
+        let mut page = page_in("e1", vec![runtime], None)?;
+        page.sessions = Some(ActivitySessions {
+            observed_at_ms: NOW,
+            seats: vec![ActivitySession {
+                seat: AgentId::new("quiet-agent")?,
+                session_id: 7,
+                state: ActivitySessionState::Stuck,
+                last_output_at_ms: Some(NOW - 12 * 60_000),
+                harness: None,
+                model: None,
+                quota: None,
+                project: None,
+            }],
+        });
+        monitor.hosts[0].apply(page, 0);
+        let (text, ..) = draw(&mut monitor, 100, 8);
+        let row = line_of(&text, "quiet-agent");
+        assert!(row.contains("○ quiet-agent"), "{row}");
+        assert!(row.contains("no events"), "{row}");
+        assert!(row.contains("12m idle"), "{row}");
+        assert!(!row.contains("working"), "{row}");
+        Ok(())
+    }
+
+    #[test]
     fn stale_ages_are_amber_and_fresh_ages_are_muted() -> Result<()> {
         let mut monitor = fleet()?;
         let (text, grid, _) = draw(&mut monitor, 80, 24);
+        // win-agent's host is retrying, so its row is stale.
+        let row = line_of(&text, "win-agent");
+        let y = text.lines().position(|line| line == row).unwrap() as u16;
+        let x = column_of(row, "19s");
+        assert_eq!(grid.get(x, y).unwrap().style().fg, Palette::DARK.waiting);
+        // reviewer waits quietly on a connected host: quiet, not stale.
         let row = line_of(&text, "reviewer");
         let y = text.lines().position(|line| line == row).unwrap() as u16;
         let x = column_of(row, "41s");
-        assert_eq!(grid.get(x, y).unwrap().style().fg, Palette::DARK.waiting);
+        assert_eq!(grid.get(x, y).unwrap().style().fg, Palette::DARK.muted);
         let row = line_of(&text, "worker-a");
         let y = text.lines().position(|line| line == row).unwrap() as u16;
         let x = column_of(row, "4s ");

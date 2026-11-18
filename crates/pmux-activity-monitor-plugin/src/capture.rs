@@ -220,7 +220,8 @@ mod tests {
         for tile in content.tiles {
             assert_eq!(
                 (tile.pixel_width, tile.pixel_height, tile.rgba.len()),
-                (456, 16, 29184)
+                // 48 lane cells of 8x16 px: the source column takes the rest.
+                (384, 16, 24576)
             );
         }
         Ok(())

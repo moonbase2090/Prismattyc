@@ -7,7 +7,10 @@
 - The activity monitor shows a seat whose agent has exited as `no agent` instead of `idle`, and `x` hides that row without stopping its session; the row returns if an agent starts there. `R` rescans the live panes on demand.
 - `stuck` now means a turn started and nothing happened for five minutes. An agent that finished its turn and waits for mail shows as `idle`.
 - The `unknown` row for events with no seat disappears five minutes after its last event.
-- The Activity Monitor package is now 1.3.3 so its updated sources have a new immutable archive identity.
+- The activity monitor derives every seat's state from one rule. A seat is stuck only when its turn is in flight and neither an event nor pane output has followed for five minutes, so a seat whose hooks keep reporting no longer shows `stuck` beside a working lane. A finished turn settles to `idle` after five quiet minutes, and the lane always ends in the row's state.
+- `stale` now means a seat's source has gone quiet (its host is disconnected or its session snapshot is old), not that the seat is quiet, so a seat waiting for input is no longer stale after 30 seconds.
+- Medium and wide monitor layouts show each seat's source, and the event column shows the report the state comes from (or `no events`) instead of echoing pmuxd's snapshot or runtime events, which could contradict the row's state. A row's age is the time since its last progress.
+- The Activity Monitor package is now 1.3.4 so its updated sources have a new immutable archive identity.
 
 ### Added
 

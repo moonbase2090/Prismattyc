@@ -317,6 +317,11 @@ pub struct Host {
     pub evicted: u64,
     /// The newest time this host's source has reported, on the source's clock.
     pub observed_ms: u64,
+    /// The source's clock as the monitor last applied it: never earlier than
+    /// `observed_ms`, and moved on by [`Host::advance`] between reports.
+    pub clock_ms: u64,
+    /// The `observed_ms` that `advance` last saw, and the viewer's wall clock then.
+    anchor: Option<(u64, u64)>,
     pub seats: BTreeMap<AgentId, Seat>,
     dismissed: BTreeSet<(AgentId, Option<u64>)>,
 }
@@ -332,6 +337,8 @@ impl Host {
             reset: None,
             evicted: 0,
             observed_ms: 0,
+            clock_ms: 0,
+            anchor: None,
             seats: BTreeMap::new(),
             dismissed: BTreeSet::new(),
         }
@@ -381,7 +388,32 @@ impl Host {
         }
         // Time passes for every seat, including ones no event or snapshot
         // touched in this page: a turn in flight can become stuck.
-        let now_ms = self.observed_ms;
+        self.clock_ms = self.clock_ms.max(self.observed_ms);
+        let now_ms = self.clock_ms;
+        for seat in self.seats.values_mut() {
+            seat.classify(now_ms, fade_at);
+        }
+    }
+
+    /// Lets time pass between pages. A source that reports nothing new (an
+    /// empty poll, or a remote command between events) still ages its seats:
+    /// its clock is the newest time it reported plus the viewer's wall time
+    /// since the monitor learned that time. `wall_ms` is the viewer's wall
+    /// clock and `local_ms` its monotonic clock, used only for the fade.
+    pub fn advance(&mut self, wall_ms: u64, local_ms: u64) {
+        if self.observed_ms == 0 {
+            return;
+        }
+        let (source_ms, since_wall_ms) = match self.anchor {
+            Some(anchor) if anchor.0 == self.observed_ms => anchor,
+            _ => (self.observed_ms, wall_ms),
+        };
+        self.anchor = Some((source_ms, since_wall_ms));
+        self.clock_ms = self
+            .clock_ms
+            .max(source_ms + wall_ms.saturating_sub(since_wall_ms));
+        let now_ms = self.clock_ms;
+        let fade_at = (!self.more).then_some(local_ms);
         for seat in self.seats.values_mut() {
             seat.classify(now_ms, fade_at);
         }
@@ -1403,6 +1435,36 @@ pub(crate) mod tests {
             agent.last_report().map(|record| record.event.kind),
             Some(ActivityKind::ToolFailed)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn time_passes_for_a_quiet_source_between_pages() -> Result<()> {
+        let mut host = Host::new("remote");
+        host.apply(
+            page_in(
+                "e0",
+                vec![record_at("busy", 1, "tool_started", 1_000)?],
+                None,
+            )?,
+            0,
+        );
+        // The monitor learns the source's time at viewer wall time 50_000.
+        host.advance(50_000, 10);
+        assert_eq!(seat(&host, "busy").state, SeatState::Working);
+        // Empty polls bring no new time, but the viewer's clock moves on.
+        let empty = page_in("e0", vec![], None)?;
+        host.apply(empty.clone(), 20);
+        host.advance(50_000 + 5 * MIN - 1, 30);
+        assert_eq!(seat(&host, "busy").state, SeatState::Working);
+        host.advance(50_000 + 5 * MIN, 40);
+        let busy = seat(&host, "busy");
+        assert_eq!(busy.state, SeatState::Stuck);
+        assert_eq!(busy.state_since_ms, 1_000 + 5 * MIN);
+        assert_eq!(busy.changed_at, Some(40));
+        // A later empty page does not wind the clock back.
+        host.apply(empty, 50);
+        assert_eq!(seat(&host, "busy").state, SeatState::Stuck);
         Ok(())
     }
 

@@ -44,7 +44,7 @@ pmuxd's snapshot also carries its own coarse verdict, which calls an agent stuck
 
 A live session with no usable report (no hooks, or a hook session that ended while the session lives on) is judged by its pane output alone. It is working while output is under a minute old, waiting for the next four minutes, then idle. A session that never printed is idle. A seat named only by events, with nothing but mail, has no state yet.
 
-Time moves the state as well as events do. On every poll the monitor re-applies the rule at the source's clock, which is the newest snapshot or event time that host reported. So a turn left open becomes stuck even when nothing else about the seat changes, and ages from a host with a different clock stay consistent. A state that time brings dates from the moment its quiet period ran out, not from when the monitor noticed, so the lane and the details header (`stuck for 1m`) show when it happened.
+Time moves the state as well as events do. On every poll the monitor re-applies the rule at the source's clock: the newest snapshot or event time that host reported, plus the viewer's time since the monitor learned it. A poll that brings nothing new still moves that clock on, and a later report never moves it back. So a turn left open becomes stuck even when nothing else about the seat changes, and ages from a host with a different clock stay consistent. A state that time brings dates from the moment its quiet period ran out, not from when the monitor noticed, so the lane and the details header (`stuck for 1m`) show when it happened.
 
 Failed stays until the seat reports something else. `*_finished` means an operation ended, so the timeline never shows it as a success. Only `test_passed` gets a check mark.
 

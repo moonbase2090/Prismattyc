@@ -79,6 +79,7 @@ mod terminal_switcher;
 #[cfg(test)]
 mod test_support;
 mod transparency;
+mod update_check;
 mod update_flow;
 #[cfg(any(target_os = "macos", test))]
 mod update_notes;
@@ -2997,10 +2998,11 @@ impl MultiClick {
 
 /// `NewWindow` requests a bare later window. `OpenConfig` requests a bare later
 /// window whose only pane runs the user's editor.
-#[cfg(target_os = "macos")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UpdateCheckOrigin {
     Automatic,
+    /// Only the macOS menu starts a manual check.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Manual,
 }
 
@@ -3032,9 +3034,8 @@ enum UserAction {
     SafeRestartPlanned(Result<safe_restart::Plan, String>),
     #[cfg(target_os = "macos")]
     SafeRestartFinished(Result<String, String>),
-    #[cfg(target_os = "macos")]
     UpdateCheckFinished {
-        result: Result<macos_update::ReleaseCheck, String>,
+        result: Result<update_check::ReleaseCheck, String>,
     },
     #[cfg(target_os = "macos")]
     UpdateInstallFinished {
@@ -3123,7 +3124,6 @@ struct App {
     last_component_poll: Option<Instant>,
     restart_view: Option<PathBuf>,
     full_update: update_flow::Flow,
-    #[cfg(target_os = "macos")]
     automatic_update_checks: bool,
     /// A menu Restart is previewing or running; a second click is ignored.
     #[cfg(target_os = "macos")]
@@ -3131,10 +3131,11 @@ struct App {
     /// Captured once at startup; changing the config requires a restart.
     #[cfg(target_os = "macos")]
     macos_present: config::MacosPresent,
-    #[cfg(target_os = "macos")]
     next_automatic_update_check: Option<Instant>,
-    #[cfg(target_os = "macos")]
     update_check_inflight: Option<UpdateCheckOrigin>,
+    /// Releases the non-modal notice already named (Linux and Windows).
+    #[cfg(not(target_os = "macos"))]
+    update_announced: update_check::Announced,
     #[cfg(target_os = "macos")]
     update_restart_notice: Option<String>,
     #[cfg(windows)]
@@ -3183,7 +3184,6 @@ impl App {
             file_config.remote_destinations().unwrap_or_default(),
             wake.clone(),
         )));
-        #[cfg(target_os = "macos")]
         let automatic_update_checks = file_config.automatic_update_checks.unwrap_or(true);
         #[cfg(target_os = "macos")]
         let macos_present = match config::MacosPresent::parse(file_config.macos_present.as_deref())
@@ -3222,16 +3222,15 @@ impl App {
             last_component_poll: None,
             restart_view: None,
             full_update: update_flow::Flow::default(),
-            #[cfg(target_os = "macos")]
             automatic_update_checks,
             #[cfg(target_os = "macos")]
             safe_restart_inflight: false,
             #[cfg(target_os = "macos")]
             macos_present,
-            #[cfg(target_os = "macos")]
             next_automatic_update_check: automatic_update_checks.then(Instant::now),
-            #[cfg(target_os = "macos")]
             update_check_inflight: None,
+            #[cfg(not(target_os = "macos"))]
+            update_announced: update_check::Announced::default(),
             #[cfg(target_os = "macos")]
             update_restart_notice: None,
             #[cfg(windows)]
@@ -3302,12 +3301,12 @@ impl App {
                 sync_remote_rail(host, true);
             }
         }
-        #[cfg(target_os = "macos")]
         {
             let automatic_checks = self.file_config.automatic_update_checks.unwrap_or(true);
             if automatic_checks != self.automatic_update_checks {
                 self.automatic_update_checks = automatic_checks;
                 self.next_automatic_update_check = automatic_checks.then(Instant::now);
+                #[cfg(target_os = "macos")]
                 macos_menu::set_automatic_checks_enabled(automatic_checks);
             }
         }
@@ -3976,7 +3975,6 @@ impl App {
         let mut more = false;
         let mut closed: Vec<WindowId> = Vec::new();
         let mut next_deadline: Option<Instant> = None;
-        #[cfg(target_os = "macos")]
         if self.automatic_update_checks {
             let now = Instant::now();
             if self
@@ -3986,7 +3984,7 @@ impl App {
                 self.next_automatic_update_check = Some(now + Duration::from_secs(24 * 60 * 60));
                 if self.update_check_inflight.is_none() {
                     self.update_check_inflight = Some(UpdateCheckOrigin::Automatic);
-                    macos_update::start_check(self.event_proxy.clone());
+                    update_check::start_check(self.event_proxy.clone());
                 }
             }
             if let Some(deadline) = self.next_automatic_update_check {
@@ -22303,7 +22301,7 @@ impl ApplicationHandler<UserAction> for App {
             UserAction::CheckForUpdates => match self.update_check_inflight {
                 None => {
                     self.update_check_inflight = Some(UpdateCheckOrigin::Manual);
-                    macos_update::start_check(self.event_proxy.clone());
+                    update_check::start_check(self.event_proxy.clone());
                 }
                 Some(UpdateCheckOrigin::Automatic) => {
                     self.update_check_inflight = Some(UpdateCheckOrigin::Manual);
@@ -22381,6 +22379,25 @@ impl ApplicationHandler<UserAction> for App {
                     Ok(_) => {}
                     Err(error) if !automatic => {
                         macos_menu::show_update_message("Update Check Failed", &error)
+                    }
+                    Err(error) => {
+                        eprintln!("prismattyc-host: automatic update check failed: {error}")
+                    }
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            UserAction::UpdateCheckFinished { result } => {
+                self.update_check_inflight = None;
+                match result {
+                    Ok(check) => {
+                        if let Some(notice) = self
+                            .update_announced
+                            .notice(&check, self.automatic_update_checks)
+                        {
+                            for host in self.windows.values_mut() {
+                                status_toast(host, ToastKind::Notice, &notice);
+                            }
+                        }
                     }
                     Err(error) => {
                         eprintln!("prismattyc-host: automatic update check failed: {error}")

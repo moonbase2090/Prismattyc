@@ -13,6 +13,7 @@
 
 ### Added
 
+- On Linux and Windows the app checks for a new release on launch and daily, and shows a short notice when one exists. The notice only names the version and points to **Update and restart**; it never installs anything or stops a session. It is shown once per version, appears in Recent messages, and follows `automatic_update_checks`. It is hidden only by `toasts = "off"`.
 - The macOS app menu has **Restart…**. It previews what `pmux restart --plan` reports, saves a session configuration snapshot, then runs `pmux restart` without stopping any session. **Roll Back Last Update…** now saves a snapshot first too.
 - A seat can set, clear, and show its current ticket with `pmux activity ticket`. `activity-emit` attaches that marker to the seat's activity events.
 

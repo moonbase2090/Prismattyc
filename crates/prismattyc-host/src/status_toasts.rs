@@ -10,18 +10,21 @@ use std::time::{Duration, Instant};
 use crate::config::ToastLevel;
 
 /// `Info` confirms or reports progress. `Error` means a requested action did
-/// not happen or something broke.
+/// not happen or something broke. `Notice` is news the user did not ask for
+/// but would want, such as a new release; it shows at every level but `off`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToastKind {
     Info,
     Error,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    Notice,
 }
 
 /// Whether `level` shows a toast of `kind`.
 pub fn shows(level: ToastLevel, kind: ToastKind) -> bool {
     match level {
         ToastLevel::All => true,
-        ToastLevel::Errors => kind == ToastKind::Error,
+        ToastLevel::Errors => kind != ToastKind::Info,
         ToastLevel::Off => false,
     }
 }
@@ -123,6 +126,9 @@ mod tests {
         assert!(shows(ToastLevel::Errors, ToastKind::Error));
         assert!(!shows(ToastLevel::Off, ToastKind::Info));
         assert!(!shows(ToastLevel::Off, ToastKind::Error));
+        assert!(shows(ToastLevel::All, ToastKind::Notice));
+        assert!(shows(ToastLevel::Errors, ToastKind::Notice));
+        assert!(!shows(ToastLevel::Off, ToastKind::Notice));
     }
 
     #[test]

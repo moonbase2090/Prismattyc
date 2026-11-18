@@ -37,39 +37,47 @@ pub enum Presence {
 
 /// The one rule that turns a seat's evidence into its state, whatever the source.
 ///
-/// `hook` is the latest state-bearing event, `output_at_ms` the latest pane
+/// `hook` is the latest state-bearing report, `output_at_ms` the latest pane
 /// output, and `now_ms` the source's clock. Progress is the newer of the two.
 /// After [`STUCK_MS`] without progress, a turn in flight is stuck and a
 /// finished turn has settled to idle (the agent waits for mail). A live seat
-/// without a usable event report is judged by its pane output alone: working
-/// while output is fresh, waiting for a few quiet minutes, then idle.
+/// without a usable report is judged by its pane output alone: working while
+/// output is fresh, waiting for a few quiet minutes, then idle.
+///
+/// Also returns when the evidence says the state began, if it says: a report's
+/// time, or the moment a quiet threshold was crossed.
 pub fn classify(
     presence: Presence,
     hook: Option<&ActivityRecord>,
     output_at_ms: Option<u64>,
     now_ms: u64,
-) -> SeatState {
+) -> (SeatState, Option<u64>) {
     match presence {
-        Presence::Gone => return SeatState::Stopped,
-        Presence::Shell => return SeatState::NoAgent,
+        Presence::Gone => return (SeatState::Stopped, None),
+        Presence::Shell => return (SeatState::NoAgent, None),
         Presence::Reported | Presence::Live | Presence::Agent => {}
     }
-    let quiet_for = |at: Option<u64>| at.map(|at| now_ms.saturating_sub(at));
-    let progress = hook.map(|record| record.received_at_ms).max(output_at_ms);
-    let settled = quiet_for(progress).is_some_and(|quiet| quiet >= STUCK_MS);
+    let reported_at = hook.map(|record| record.received_at_ms);
+    let progress = reported_at.max(output_at_ms);
+    let settled_at = progress.map(|at| at + STUCK_MS).filter(|at| *at <= now_ms);
     match hook.map(|record| next_state(SeatState::Unknown, record.event.kind)) {
-        Some(SeatState::Working) if settled => SeatState::Stuck,
-        Some(SeatState::Working) => SeatState::Working,
-        Some(SeatState::Waiting) if settled => SeatState::Idle,
-        Some(SeatState::Waiting) => SeatState::Waiting,
-        Some(SeatState::Failed) => SeatState::Failed,
+        Some(SeatState::Working) if settled_at.is_some() => (SeatState::Stuck, settled_at),
+        Some(SeatState::Waiting) if settled_at.is_some() => (SeatState::Idle, settled_at),
+        Some(state @ (SeatState::Working | SeatState::Waiting | SeatState::Failed)) => {
+            (state, reported_at)
+        }
         // Only events vouch for this seat, so its last word stands.
-        Some(SeatState::Stopped) if presence == Presence::Reported => SeatState::Stopped,
-        _ if presence == Presence::Reported => SeatState::Unknown,
-        _ => match quiet_for(output_at_ms) {
-            Some(quiet) if quiet < ACTIVE_OUTPUT_MS => SeatState::Working,
-            Some(quiet) if quiet < STUCK_MS => SeatState::Waiting,
-            _ => SeatState::Idle,
+        Some(SeatState::Stopped) if presence == Presence::Reported => {
+            (SeatState::Stopped, reported_at)
+        }
+        _ if presence == Presence::Reported => (SeatState::Unknown, None),
+        _ => match output_at_ms {
+            Some(at) if now_ms.saturating_sub(at) < ACTIVE_OUTPUT_MS => (SeatState::Working, None),
+            Some(at) if now_ms.saturating_sub(at) < STUCK_MS => {
+                (SeatState::Waiting, Some(at + ACTIVE_OUTPUT_MS))
+            }
+            Some(at) => (SeatState::Idle, Some(at + STUCK_MS)),
+            None => (SeatState::Idle, None),
         },
     }
 }
@@ -211,24 +219,23 @@ impl Seat {
         })
     }
 
-    /// When the seat last made progress: its newest event or pane output.
+    /// When the seat last made progress: its last report or pane output.
     pub fn progress_ms(&self) -> Option<u64> {
-        self.history
-            .back()
+        self.last_report()
             .map(|record| record.received_at_ms)
             .max(self.output_at_ms)
     }
 
     /// Re-derives the state from the evidence, as of the source's `now_ms`.
     fn classify(&mut self, now_ms: u64, fade_at: Option<u64>) {
-        let state = classify(self.presence, self.last_report(), self.output_at_ms, now_ms);
+        let (state, since) = classify(self.presence, self.last_report(), self.output_at_ms, now_ms);
         if state != self.state {
             // The first state of a newly seen seat is not a transition worth a fade.
             if self.state != SeatState::Unknown {
                 self.changed_at = fade_at.or(self.changed_at);
             }
             self.state = state;
-            self.state_since_ms = now_ms;
+            self.state_since_ms = since.map_or(now_ms, |since| since.min(now_ms));
         }
     }
 }
@@ -1180,6 +1187,9 @@ pub(crate) mod tests {
         host.apply(later, 20);
         assert_eq!(seat(&host, "busy").state, SeatState::Stuck);
         assert_eq!(seat(&host, "done").state, SeatState::Idle);
+        // Each began the moment its five quiet minutes ran out.
+        assert_eq!(seat(&host, "busy").state_since_ms, 1_000 + 5 * MIN);
+        assert_eq!(seat(&host, "done").state_since_ms, 1_000 + 5 * MIN);
         Ok(())
     }
 
@@ -1196,6 +1206,17 @@ pub(crate) mod tests {
             let plain = seat(&host, "plain");
             Ok((plain.state, age_ms(plain, now)))
         };
+        let since = |output: u64| -> Result<u64> {
+            let mut page = page_in("e0", vec![], None)?;
+            page.sessions = Some(session("plain", Daemon::Waiting, Some(output), now));
+            let mut host = Host::new("local");
+            host.apply(page, 0);
+            Ok(seat(&host, "plain").state_since_ms)
+        };
+        // Waiting began when the output went a minute quiet; idle at five minutes.
+        assert_eq!(since(now - 2 * MIN)?, now - MIN);
+        assert_eq!(since(now - 6 * MIN)?, now - MIN);
+        assert_eq!(since(now - 10_000)?, now);
         assert_eq!(judged(Some(now - 10_000))?, (SeatState::Working, 10_000));
         // Output exactly a minute old is no longer fresh; five quiet minutes is idle.
         assert_eq!(judged(Some(now - MIN))?.0, SeatState::Waiting);
@@ -1220,13 +1241,13 @@ pub(crate) mod tests {
         );
         let busy = seat(&host, "busy");
         assert_eq!(busy.state, SeatState::Stuck);
+        // Stuck began five minutes after the tool started, not when it was observed.
+        assert_eq!(busy.state_since_ms, 5 * MIN);
         let bins = seat_lane(busy, 10 * MIN, 10 * MIN, 10);
-        // The tool start is working; from the moment the seat went stuck, the lane says so.
         assert_eq!(bins[0].state, Some(SeatState::Working));
-        assert_eq!(bins[4].state, Some(SeatState::Working));
         // The bin that ends the moment the seat went stuck is still before it.
-        assert_eq!(bins[5].state, Some(SeatState::Working));
-        assert_eq!(bins[6].state, Some(SeatState::Stuck));
+        assert_eq!(bins[4].state, Some(SeatState::Working));
+        assert_eq!(bins[5].state, Some(SeatState::Stuck));
         assert_eq!(bins[9].state, Some(SeatState::Stuck));
         Ok(())
     }

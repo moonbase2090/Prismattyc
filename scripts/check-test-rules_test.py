@@ -202,6 +202,33 @@ class FindsTestCode(Case):
         )
         self.assertEqual(self.repo.sleeps(), {"tests/a.rs": [2, 2]})
 
+    def test_renamed_imports_still_count(self):
+        self.repo.write(
+            "tests/a.rs",
+            """
+            use std::thread::sleep as pause;
+            use std::{thread::{self as th}, time::Duration};
+            use tokio::time::{sleep as nap, Instant};
+            use std::thread as worker;
+            fn a() {
+                pause(d);
+                th::sleep(d);
+                nap(d).await;
+                worker::sleep(d);
+                Duration::from_millis(5);
+            }
+            fn pause(d: u8) {}
+            """,
+        )
+        self.assertEqual(self.repo.sleeps(), {"tests/a.rs": [6, 7, 8, 9]})
+
+    def test_use_items_flatten_nested_trees(self):
+        code = "use a::{b::{self as c, d as e}, f::*, g};\nuse ::h::i as _;\n"
+        self.assertEqual(
+            rules.use_items(code),
+            [(["a", "b"], "c"), (["a", "b", "d"], "e"), (["a", "g"], "g")],
+        )
+
     def test_keep_alive_marker_exempts_a_fixture_child(self):
         self.repo.write(
             "tests/a.rs",
@@ -349,6 +376,26 @@ class Retries(Case):
         self.assertEqual(code, 1)
         self.assertIn(".github/workflows/ci.yml:2: test retries", err)
         self.assertIn("scripts/t.sh:1: test retries", err)
+
+    def test_retries_split_from_the_command_still_fail(self):
+        self.repo.write(
+            "scripts/t.sh",
+            "cargo nextest run \\\n  --workspace \\\n  --retries 2\n",
+        )
+        self.repo.write(
+            "scripts/t.py",
+            'CMD = [\n    "cargo", "nextest", "run",\n    "--retries=2",\n]\n',
+        )
+        self.repo.write("Makefile", "test:\n\tcargo nextest run $(ARGS) \\\n\t  --retries 1\n")
+        code, _, err = self.repo.run()
+        self.assertEqual(code, 1)
+        self.assertIn("scripts/t.sh:3: test retries", err)
+        self.assertIn("scripts/t.py:3: test retries", err)
+        self.assertIn("Makefile:3: test retries", err)
+
+    def test_retries_flag_without_nextest_passes(self):
+        self.repo.write("scripts/fetch.sh", "pip download --retries 5 pkg\n")
+        self.assertEqual(self.repo.run()[0], 0)
 
     def test_unrelated_retries_text_passes(self):
         self.repo.write("scripts/net.py", "MAX_RETRIES = 3  # http client\n")

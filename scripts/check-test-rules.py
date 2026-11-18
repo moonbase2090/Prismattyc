@@ -9,8 +9,10 @@ Rules checked:
     file declared from test code. A sleep that keeps a fixture child
     process alive is allowed when its line, or the line above, carries a
     `keep-alive: <reason>` comment.
-  * Test retries: a `retries` key in any nextest config, or
-    `NEXTEST_RETRIES` / `nextest ... --retries` in CI and scripts. These
+    Calls count through renamed imports too (`use std::thread::sleep as
+    pause;`, `use std::thread as t;`).
+  * Test retries: a `retries` key in any nextest config, `NEXTEST_RETRIES`
+    anywhere, or a `--retries` flag in any file that runs nextest. These
     always fail; the baseline cannot hold them.
   * Kill timeouts in nextest config (`slow-timeout` with
     `terminate-after`), measured as period x terminate-after seconds.
@@ -39,14 +41,17 @@ from pathlib import Path, PurePosixPath
 BASELINE = ".config/test-rules-baseline.toml"
 SELF_FILES = {"scripts/check-test-rules.py", "scripts/check-test-rules_test.py"}
 RETRY_SCAN_SUFFIXES = {".yml", ".yaml", ".sh", ".py", ".toml", ".ps1", ".bash"}
-RETRY_SCAN_DIRS = (".github/", ".cargo/", ".config/", "scripts/", "tools/")
+RETRY_SCAN_NAMES = {"Makefile", "justfile", "Justfile"}
 
-SLEEP_PATH = re.compile(r"\b(?:thread|time|task)\s*::\s*sleep(?:_until|_ms)?\s*\(")
-SLEEP_BARE = re.compile(r"(?<![\w:.])sleep(?:_until|_ms)?\s*\(")
-SLEEP_IMPORT = re.compile(r"\buse\s[^;]*\bsleep(?:_until|_ms)?\b[^;]*;")
+SLEEP_FNS = ("sleep", "sleep_until", "sleep_ms")
+SLEEP_MODULES = ("thread", "time", "task")
+USE_STMT = re.compile(r"\buse\s+([^;]*);")
+USE_TOKEN = re.compile(r"[A-Za-z_]\w*|::|[{},*]")
 FN_DEF_BEFORE = re.compile(r"\bfn\s*$")
 KEEP_ALIVE = re.compile(r"//.*\bkeep-alive:\s*\S")
-RETRY_TEXT = re.compile(r"NEXTEST_RETRIES|nextest\b[^\n]*\s--retries\b")
+RETRY_ENV = re.compile(r"NEXTEST_RETRIES")
+RETRY_FLAG = re.compile(r"(?<![\w-])--retries\b")
+NEXTEST = re.compile(r"\bnextest\b")
 ATTR_START = re.compile(r"#\s*(!?)\s*\[")
 MOD_DECL = re.compile(r"(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+(r#)?([A-Za-z_]\w*)\s*;")
 PATH_ATTR = re.compile(r'^path\s*=\s*"([^"]*)"$')
@@ -328,13 +333,81 @@ def in_tests_dir(path: str) -> bool:
     return "tests" in PurePosixPath(path).parts[:-1]
 
 
+def use_items(code: str) -> list[tuple[list[str], str]]:
+    """Flatten every `use` tree into (path segments, local name) pairs."""
+    items: list[tuple[list[str], str]] = []
+    for stmt in USE_STMT.finditer(code):
+        toks = USE_TOKEN.findall(stmt.group(1))
+        pos = 0
+
+        def tree(prefix: list[str]) -> None:
+            nonlocal pos
+            path = list(prefix)
+            if pos < len(toks) and toks[pos] == "::":
+                pos += 1
+            while pos < len(toks):
+                tok = toks[pos]
+                if tok == "{":
+                    pos += 1
+                    while pos < len(toks) and toks[pos] != "}":
+                        tree(path)
+                        if pos < len(toks) and toks[pos] == ",":
+                            pos += 1
+                    pos += 1
+                    return
+                if tok == "*":
+                    pos += 1
+                    return
+                if tok in ",}":
+                    return
+                path.append(tok)
+                pos += 1
+                if pos < len(toks) and toks[pos] == "::":
+                    pos += 1
+                    continue
+                break
+            name = path[-1] if path else ""
+            if pos + 1 < len(toks) and toks[pos] == "as":
+                name = toks[pos + 1]
+                pos += 2
+            if path and path[-1] == "self":
+                path = path[:-1]
+                name = name if name != "self" else (path[-1] if path else "")
+            if path and name and name != "_":
+                items.append((path, name))
+
+        try:
+            tree([])
+        except IndexError:
+            continue
+    return items
+
+
+def sleep_patterns(code: str) -> tuple[re.Pattern, re.Pattern | None]:
+    """Qualified and bare sleep-call patterns, including renamed imports."""
+    modules = set(SLEEP_MODULES)
+    names: set[str] = set()
+    for path, name in use_items(code):
+        if path[-1] in SLEEP_FNS:
+            names.add(name)
+        elif path[-1] in SLEEP_MODULES:
+            modules.add(name)
+    fns = "|".join(SLEEP_FNS)
+    qualified = re.compile(
+        r"\b(?:" + "|".join(sorted(map(re.escape, modules))) + r")\s*::\s*(?:" + fns + r")\s*\("
+    )
+    bare = None
+    if names:
+        bare = re.compile(r"(?<![\w:.])(?:" + "|".join(sorted(map(re.escape, names))) + r")\s*\(")
+    return qualified, bare
+
+
 def count_sleeps(code: str, src: str, regions, whole: bool) -> list[int]:
     """Line numbers of fixed sleeps inside test code."""
     lines = src.split("\n")
     hits: list[int] = []
-    patterns = [SLEEP_PATH]
-    if SLEEP_IMPORT.search(code):
-        patterns.append(SLEEP_BARE)
+    qualified, bare = sleep_patterns(code)
+    patterns = [qualified] + ([bare] if bare else [])
     seen: set[int] = set()
     for pat in patterns:
         for m in pat.finditer(code):
@@ -347,7 +420,7 @@ def count_sleeps(code: str, src: str, regions, whole: bool) -> list[int]:
                 continue
             # The bare pattern also matches inside `thread::sleep(`; the
             # qualified match already counted it.
-            if pat is SLEEP_BARE and re.search(r"::\s*$", code[max(0, at - 8) : at]):
+            if pat is bare and re.search(r"::\s*$", code[max(0, at - 8) : at]):
                 continue
             seen.add(at)
             line = code.count("\n", 0, at)
@@ -460,18 +533,26 @@ def scan_nextest(root: Path, configs: list[str]):
 
 
 def scan_retry_text(root: Path, files: list[str]) -> list[str]:
+    """Retries set through the environment or a nextest command line.
+
+    A file that mentions nextest is checked for a `--retries` flag anywhere,
+    so shell line continuations, argument lists and variables cannot split
+    the flag from the command.
+    """
     out = []
     for rel in files:
-        if rel in SELF_FILES or not rel.startswith(RETRY_SCAN_DIRS):
+        p = PurePosixPath(rel)
+        if rel in SELF_FILES or rel == BASELINE:
             continue
-        if PurePosixPath(rel).suffix not in RETRY_SCAN_SUFFIXES:
+        if p.suffix not in RETRY_SCAN_SUFFIXES and p.name not in RETRY_SCAN_NAMES:
             continue
         try:
             text = (root / rel).read_text(encoding="utf-8")
         except (UnicodeDecodeError, FileNotFoundError):
             continue
+        flag = RETRY_FLAG if NEXTEST.search(text) else None
         for no, line in enumerate(text.split("\n"), 1):
-            if RETRY_TEXT.search(line):
+            if RETRY_ENV.search(line) or (flag and flag.search(line)):
                 out.append(f"{rel}:{no}: test retries ({line.strip()[:80]})")
     return out
 

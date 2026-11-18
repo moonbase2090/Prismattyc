@@ -2459,6 +2459,129 @@ pub(super) fn session_naming_in_private_window() {
     std::fs::write(std::env::var_os(RESULT_ENV).unwrap(), b"complete").unwrap();
 }
 
+/// The daily update check, run through a stand-in `pmux`, shows one notice in a real window
+/// and does not repeat it when the same release is found again.
+#[test]
+fn update_notice_appears_once_in_a_private_window() {
+    if std::env::var_os(CHILD_ENV).is_none() {
+        run_in_private_display(
+            "render_window_tests::update_notice_appears_once_in_a_private_window",
+        );
+        return;
+    }
+    let runtime = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap());
+    let fake = runtime.join("fake-pmux");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\nprintf '{\"installed\":\"0.3.67\",\"available\":\"9.9.9\",\"update_available\":true}'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::env::set_var("PMUX", &fake);
+
+    struct NoticeProof {
+        app: App,
+        proxy: EventLoopProxy<UserAction>,
+        window: Option<WindowId>,
+        plain: Vec<u32>,
+        finished: u8,
+        completed: bool,
+    }
+    impl NoticeProof {
+        fn notices(&mut self) -> Vec<String> {
+            let host = self.app.windows.get_mut(&self.window.unwrap()).unwrap();
+            host.bell_toasts
+                .iter()
+                .filter(|toast| toast.status == Some(ToastKind::Notice))
+                .map(|toast| toast.label.clone())
+                .collect()
+        }
+    }
+    impl ApplicationHandler<UserAction> for NoticeProof {
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+            let id = self.app.open_window(event_loop, false).unwrap();
+            self.window = Some(id);
+            self.plain = frame(self.app.windows.get_mut(&id).unwrap());
+            update_check::start_check(self.proxy.clone());
+        }
+        fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserAction) {
+            let finished = matches!(event, UserAction::UpdateCheckFinished { .. });
+            self.app.user_event(event_loop, event);
+            if !finished {
+                return;
+            }
+            self.finished += 1;
+            let notices = self.notices();
+            let host = self.app.windows.get_mut(&self.window.unwrap()).unwrap();
+            if self.finished == 1 {
+                assert_eq!(
+                    notices.len(),
+                    1,
+                    "the first find shows a notice: {notices:?}"
+                );
+                assert!(notices[0].contains("9.9.9"), "{notices:?}");
+                let shown = frame(host);
+                assert_ne!(shown, self.plain, "the notice must be painted");
+                if let Some(dir) = std::env::var_os("NOTICE_ARTIFACT_DIR") {
+                    std::fs::create_dir_all(&dir).unwrap();
+                    let size = host.window.inner_size();
+                    write_present_png(
+                        &PathBuf::from(dir).join("update-notice.png"),
+                        &shown,
+                        size.width,
+                        size.height,
+                    )
+                    .unwrap();
+                }
+                host.bell_toasts.clear();
+                update_check::start_check(self.proxy.clone());
+            } else {
+                // The toast was cleared above, so a repeat announcement would bring it back.
+                assert!(
+                    notices.is_empty(),
+                    "the same release came back: {notices:?}"
+                );
+                assert_eq!(
+                    host.status_history.newest_first().count(),
+                    1,
+                    "the same release is announced once"
+                );
+                self.completed = true;
+                self.app.windows.clear();
+                event_loop.exit();
+            }
+        }
+        fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
+    }
+    let event_loop = EventLoop::<UserAction>::with_user_event()
+        .with_x11()
+        .with_any_thread(true)
+        .build()
+        .unwrap();
+    let cli = Cli::parse(["--no-splash", "/bin/cat"].into_iter().map(String::from)).unwrap();
+    let config = config::ConfigFile {
+        a11y: Some(config::A11ySection {
+            os_tree: Some(false),
+            announce: Some(false),
+        }),
+        // The stand-in answers the check below; the timer-driven one stays off.
+        automatic_update_checks: Some(false),
+        ..Default::default()
+    };
+    let app = App::new(cli, config, None, event_loop.create_proxy()).unwrap();
+    let mut proof = NoticeProof {
+        proxy: event_loop.create_proxy(),
+        app,
+        window: None,
+        plain: Vec::new(),
+        finished: 0,
+        completed: false,
+    };
+    event_loop.run_app(&mut proof).unwrap();
+    assert!(proof.completed);
+    std::fs::write(std::env::var_os(RESULT_ENV).unwrap(), b"complete").unwrap();
+}
+
 /// Issue #139: a press on the Graphite Space dropdown opens the picker, and
 /// the `+` and command field reach their actions the same way.
 #[test]

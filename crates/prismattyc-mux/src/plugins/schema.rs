@@ -137,4 +137,113 @@ mod tests {
         assert!(compile(r#"{"$ref":"https://example.invalid/schema"}"#).is_err());
         assert!(compile(r#"{"type":"string","pattern":"(a)\\1"}"#).is_err());
     }
+
+    #[test]
+    fn activity_poll_output_schema_accepts_a_bound_seat_page() {
+        use prismattyc_core::activity::{
+            ActivityCursor, ActivityDetail, ActivityInput, ActivityKind, ActivityPage,
+            ActivityRecord, ActivitySession, ActivitySessionState, ActivitySessions,
+            ActivitySource,
+        };
+        use prismattyc_core::AgentId;
+        use serde_json::json;
+
+        // The packaged connector schemas are the contract the daemon validates
+        // against, so read them from the sibling crate instead of copying them.
+        let package = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../pmux-activity-connector-plugin/package");
+        let output = std::fs::read_to_string(package.join("poll-output.json")).unwrap();
+        let schemas = Schemas::compile(BTreeMap::from([(
+            "poll".into(),
+            CommandSchema {
+                input: r#"{"type":"object"}"#.into(),
+                output,
+            },
+        )]))
+        .unwrap();
+
+        // One seat per published session state, every optional field set, plus a
+        // record carrying full event detail: the shape a bound seat produces.
+        let seat = |name: &str, session_id: u64, state: ActivitySessionState| ActivitySession {
+            seat: AgentId::new(name).unwrap(),
+            session_id,
+            state,
+            last_output_at_ms: Some(9_000),
+            harness: Some("codex".into()),
+            model: Some("model-x".into()),
+            quota: Some("80% left".into()),
+            project: Some("demo".into()),
+        };
+        let page = ActivityPage {
+            epoch: "a0".into(),
+            oldest_sequence: 1,
+            current_sequence: 1,
+            records: vec![ActivityRecord {
+                sequence: 1,
+                received_at_ms: 9_000,
+                event: ActivityInput {
+                    schema_version: 1,
+                    seat: AgentId::new("worker-a").unwrap(),
+                    run_id: "run-1".into(),
+                    event_id: "event-1".into(),
+                    source: ActivitySource::Hooks,
+                    kind: ActivityKind::ToolStarted,
+                    process_ids: vec![42],
+                    detail: Some(ActivityDetail {
+                        tool: Some("cargo".into()),
+                        file: Some("src/main.rs".into()),
+                        command: Some("cargo test".into()),
+                        duration_ms: Some(10),
+                        exit_code: Some(0),
+                        task: Some("ticket".into()),
+                        operation_id: Some("op-1".into()),
+                        model: Some("model-x".into()),
+                    }),
+                },
+            }],
+            cursor: ActivityCursor {
+                epoch: "a0".into(),
+                sequence: 1,
+            },
+            has_more: false,
+            reset: None,
+            sessions: Some(ActivitySessions {
+                observed_at_ms: 9_500,
+                seats: vec![
+                    seat("worker-a", 1, ActivitySessionState::Working),
+                    seat("worker-b", 2, ActivitySessionState::Waiting),
+                    seat("worker-c", 3, ActivitySessionState::Idle),
+                    seat("worker-d", 4, ActivitySessionState::Stuck),
+                    seat("worker-e", 5, ActivitySessionState::Stopped),
+                ],
+            }),
+        };
+        for seat_filter in [json!("worker-a"), Value::Null] {
+            let bound = json!({
+                "schema_version": 1,
+                "seat_filter": seat_filter,
+                "next_cursor": "a0:1",
+                "page": page,
+            });
+            schemas
+                .output("poll", &bound.to_string())
+                .unwrap_or_else(|e| panic!("bound-seat poll page rejected: {e:#}"));
+        }
+
+        // The schema stays closed: an undeclared seat field is a mismatch, and
+        // the error names where.
+        let mut rejected = json!({
+            "schema_version": 1,
+            "seat_filter": "worker-a",
+            "next_cursor": "a0:1",
+            "page": page,
+        });
+        rejected["page"]["sessions"]["seats"][0]["surprise"] = json!("x");
+        let mismatch = format!(
+            "{}",
+            schemas.output("poll", &rejected.to_string()).unwrap_err()
+        );
+        assert!(mismatch.contains("does not match its schema"), "{mismatch}");
+        assert!(mismatch.contains("/page/sessions/seats/0"), "{mismatch}");
+    }
 }

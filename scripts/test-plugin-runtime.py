@@ -927,7 +927,11 @@ else:
         frame = json.loads(probe.stdout)
         assert frame["cells"] == 2400 and "fixture-seat" in frame["text"]
         # The 12-column seat name leaves a 53-cell lane at 8 pixels per cell.
-        assert frame["rasters"] == [{"width":424,"height":16,"bytes":27136}] * 2, frame["rasters"]
+        # Monitor 1.3.4 adds a source column ("local" and a gap), leaving 46
+        # cells. The official pin still carries 1.3.3, so both are accepted
+        # until the pin moves; then only the 46-cell lane remains.
+        lanes = [[{"width":cells * 8,"height":16,"bytes":cells * 8 * 16 * 4}] * 2 for cells in (53, 46)]
+        assert frame["rasters"] in lanes, frame["rasters"]
         assert frame["failure_pixels"] > 0
         return frame
 

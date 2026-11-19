@@ -57,6 +57,7 @@ pub(crate) struct Service {
     socket: PathBuf,
     plane: Weak<Mutex<ControlPlane>>,
     manager: OnceLock<Arc<Manager>>,
+    startup_reconciliation: OnceLock<Reply>,
     initializing: Mutex<()>,
     stopped: AtomicBool,
 }
@@ -67,18 +68,21 @@ impl Service {
             socket,
             plane: Arc::downgrade(plane),
             manager: OnceLock::new(),
+            startup_reconciliation: OnceLock::new(),
             initializing: Mutex::new(()),
             stopped: AtomicBool::new(false),
         }
     }
 
     pub(crate) fn handle(&self, connection: &str, request: Request) -> Result<Reply> {
+        if matches!(request, Request::StartupReconciliation) {
+            return Ok(self.reconcile_startup().clone());
+        }
         self.manager()?.handle(connection, request)
     }
 
-    /// Install and enable the default plug-ins that have no saved state, on a
-    /// background thread. Failures are logged and never stop the daemon.
-    /// `PRISMATTYC_DEFAULT_PLUGINS=0` skips this.
+    /// Run startup reconciliation in the background. A restart caller can wait
+    /// for the same result through the plug-in service.
     pub(crate) fn seed_defaults(self: &Arc<Self>) {
         if std::env::var_os("PRISMATTYC_DEFAULT_PLUGINS").is_some_and(|value| value == "0") {
             return;
@@ -87,26 +91,39 @@ impl Service {
         let spawned = std::thread::Builder::new()
             .name("pmux-default-plugins".into())
             .spawn(move || {
-                let outcomes = match service.manager() {
-                    Ok(manager) => manager.seed_defaults(),
-                    Err(error) => {
-                        eprintln!("pmuxd: default plug-ins not set up: {error:#}");
-                        return;
-                    }
-                };
-                for (id, outcome) in outcomes {
-                    match outcome {
-                        Ok(true) => eprintln!("pmuxd: set up default plug-in {id}"),
-                        Ok(false) => {}
-                        Err(error) => {
-                            eprintln!("pmuxd: default plug-in {id} not enabled: {error:#}");
-                        }
-                    }
-                }
+                service.reconcile_startup();
             });
         if let Err(error) = spawned {
             eprintln!("pmuxd: default plug-ins not set up: {error}");
         }
+    }
+
+    fn reconcile_startup(&self) -> &Reply {
+        self.startup_reconciliation.get_or_init(|| {
+            let mut changed = Vec::new();
+            let mut failures = Vec::new();
+            if !std::env::var_os("PRISMATTYC_DEFAULT_PLUGINS").is_some_and(|value| value == "0") {
+                match self.manager() {
+                    Ok(manager) => {
+                        for (id, outcome) in manager.seed_defaults() {
+                            match outcome {
+                                Ok(true) => changed.push(id.to_owned()),
+                                Ok(false) => {}
+                                Err(error) => failures.push(format!("{id}: {error:#}")),
+                            }
+                        }
+                    }
+                    Err(error) => failures.push(format!("{error:#}")),
+                }
+            }
+            for id in &changed {
+                eprintln!("pmuxd: set up default plug-in {id}");
+            }
+            for failure in &failures {
+                eprintln!("pmuxd: plug-in reconciliation failed: {failure}");
+            }
+            Reply::StartupReconciliation { changed, failures }
+        })
     }
 
     fn manager(&self) -> Result<&Arc<Manager>> {
@@ -453,6 +470,7 @@ impl Manager {
                 inspection(&self.store, current, version.as_deref())
             }
             Request::Admin { retry_id, action } => self.admin(retry_id, action),
+            Request::StartupReconciliation => unreachable!("handled by the plug-in service"),
             Request::Invoke {
                 id,
                 contribution,
@@ -540,10 +558,8 @@ impl Manager {
 
     /// Install and enable each default plug-in that has no saved state, with
     /// local activity access. A saved selection, enabled or disabled, is a
-    /// decision already made and is left alone, except that an enabled default on an older
-    /// version than the bundled one moves forward with its grants. Only packages compiled into
-    /// this binary are used, so a build without the official bundle seeds
-    /// nothing. Returns whether each plug-in was enabled or moved to a newer version now.
+    /// decision already made. Enabled defaults advance to a compatible newer
+    /// bundled version with their saved grants. Disabled defaults stay disabled.
     fn seed_defaults(&self) -> Vec<(&'static str, Result<bool>)> {
         // Held across the check and both changes, so a disable sent while the
         // daemon starts is either seen here or applied after the seed.
@@ -572,46 +588,18 @@ impl Manager {
             .selections
             .get(id)
             .cloned();
-        if let Some(saved) = saved {
-            // A saved choice is never reseeded. An enabled default that sits on an older
-            // version than this core carries moves forward, keeping its grants, so a stale
-            // installed copy cannot hide what the bundled package provides.
-            let Desired::Enabled { selected, grants } = saved else {
-                return Ok(false);
-            };
-            let Ok(entry) = bundled.get(id, None) else {
-                return Ok(false);
-            };
-            if !is_older(&selected.version, &entry.entry.version) {
-                return Ok(false);
+        let (previous, grants) = match saved {
+            Some(Desired::Disabled { .. }) => return Ok(false),
+            Some(Desired::Enabled { selected, grants }) => {
+                (Some(selected.version), grants.into_iter().collect())
             }
-            let mut grants = grants;
-            if id == "org.moonbase.activity-monitor" && !grants.contains("activity.manage:local") {
-                grants.insert("activity.manage:local".into());
-            }
-            return Ok(self.move_to_compatible(id, &selected, &grants, true));
-        }
-        let Ok(entry) = bundled.get(id, None) else {
+            None => (None, default_grants(id)),
+        };
+        let Some(entry) = bundled.newest_compatible_bundle(id, previous.as_deref())? else {
             return Ok(false);
         };
-        let version = entry.entry.version.clone();
-        let Reply::Installed { package } = self.admin_held(
-            nonce()?,
-            AdminAction::Install {
-                id: id.to_owned(),
-                version: Some(version),
-            },
-        )?
-        else {
-            bail!("install returned an unexpected reply");
-        };
-        self.admin_held(
-            nonce()?,
-            AdminAction::Enable {
-                package,
-                grants: default_grants(id),
-            },
-        )?;
+        let package = self.store.install(&self.executable, entry)?;
+        self.admin_held(nonce()?, AdminAction::Enable { package, grants })?;
         Ok(true)
     }
 
@@ -1073,18 +1061,6 @@ struct Selection {
     grants: BTreeSet<String>,
 }
 
-/// Whether `selected` is a lower semantic version than `bundled`. Anything that does not parse
-/// is left where it is.
-fn is_older(selected: &str, bundled: &str) -> bool {
-    match (
-        semver::Version::parse(selected),
-        semver::Version::parse(bundled),
-    ) {
-        (Ok(selected), Ok(bundled)) => selected < bundled,
-        _ => false,
-    }
-}
-
 impl Manager {
     fn selection(&self, id: &str) -> Result<Selection> {
         let (installed, grants, generation, cached) = {
@@ -1123,7 +1099,7 @@ impl Manager {
             loaded
         };
         if let Err(error) = package.manifest.compatibility() {
-            if self.move_to_compatible(id, &installed, &grants, false) {
+            if self.move_to_compatible(id, &installed, &grants) {
                 return self.selection(id);
             }
             let mut state = self.state.lock().unwrap();
@@ -1147,21 +1123,12 @@ impl Manager {
 
     /// A selected package this core cannot run moves to the newest bundled version that it can,
     /// keeping the grants it had. Nothing moves when the bundle has no such version.
-    /// `held` is true when the caller already holds the administration lock.
     fn move_to_compatible(
         &self,
         id: &str,
         selected: &Installed,
         grants: &BTreeSet<String>,
-        held: bool,
     ) -> bool {
-        let admin = |retry: String, action: AdminAction| {
-            if held {
-                self.admin_held(retry, action)
-            } else {
-                self.admin(retry, action)
-            }
-        };
         let moved = (|| -> Result<bool> {
             let newest = self
                 .catalog
@@ -1183,7 +1150,7 @@ impl Manager {
                 id: id.into(),
                 version: Some(newest.clone()),
             };
-            let Reply::Installed { package } = admin(retry("install"), action)? else {
+            let Reply::Installed { package } = self.admin(retry("install"), action)? else {
                 return Ok(false);
             };
             if self.store.load(&package)?.manifest.compatibility().is_err() {
@@ -1193,7 +1160,7 @@ impl Manager {
                 package,
                 grants: grants.iter().cloned().collect(),
             };
-            admin(retry("enable"), action)?;
+            self.admin(retry("enable"), action)?;
             Ok(true)
         })();
         moved.unwrap_or(false)
@@ -1972,7 +1939,7 @@ mod tests {
             version: "1.0.0".into(),
             digest: "0".repeat(64),
         };
-        assert!(!manager.move_to_compatible(&selected.id, &selected, &BTreeSet::new(), false));
+        assert!(!manager.move_to_compatible(&selected.id, &selected, &BTreeSet::new()));
         drop(manager);
         std::fs::remove_dir_all(socket.parent().unwrap()).unwrap();
     }
@@ -2127,18 +2094,6 @@ mod tests {
         );
         drop(manager);
         std::fs::remove_dir_all(socket.parent().unwrap()).unwrap();
-    }
-
-    #[test]
-    fn only_a_lower_parsed_version_counts_as_older_than_the_bundled_one() {
-        assert!(is_older("1.1.0", "1.2.0"));
-        assert!(is_older("1.9.9", "2.0.0"));
-        assert!(is_older("1.2.0-rc.1", "1.2.0"));
-        assert!(!is_older("1.2.0", "1.2.0"));
-        assert!(!is_older("1.3.0", "1.2.0"));
-        assert!(!is_older("1.10.0", "1.9.0"), "compare numbers, not text");
-        assert!(!is_older("1.1", "1.2.0"));
-        assert!(!is_older("1.1.0", "latest"));
     }
 
     #[test]

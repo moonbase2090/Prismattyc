@@ -144,6 +144,10 @@ def build(args, scratch):
         connector = REPO / "crates/pmux-activity-connector-plugin/package"
         connector_module = target / "wasm32-unknown-unknown/release/pmux_activity_connector_plugin.wasm"
         run("run", "-p", "prismattyc-mux", "--example", "package_plugin", "--locked", "--", str(bundle), str(good), str(module), str(bad), str(module), str(monitor), str(monitor_module), str(connector), str(connector_module))
+    if args.feature == "restart-migration":
+        run("build", "-p", "prismattyc-mux", "--bin", "pmux", "--bin", "pmuxd", "--locked",
+            PRISMATTYC_PLUGIN_BUNDLE_DIR=str(bundle))
+        return target / ("release" if args.release else "debug")
     run("build", "-p", "prismattyc-mux", "--example", "plugin_frame_probe", "--locked")
     run("build", "-p", "prismattyc-mux", "--bin", "pmux", "--bin", "pmuxd", "--bin", "pmux-attach", "--locked", PRISMATTYC_PLUGIN_BUNDLE_DIR=str(bundle))
     run("build", "-p", "pmux-mcp", "--locked", PRISMATTYC_PLUGIN_BUNDLE_DIR=str(bundle))
@@ -201,6 +205,9 @@ def exercise(bins, scratch, feature="all", expected_catalog=None, frame_probe=No
     suffix = ".exe" if os.name == "nt" else ""
     pmux = bins / f"pmux{suffix}"
     pmuxd = bins / f"pmuxd{suffix}"
+    if feature == "restart-migration":
+        env["PMUX_SERVER"] = str(pmuxd)
+        env["XDG_STATE_HOME"] = str(runtime / "state")
     daemon = None
     connections = []
     log = (scratch / "daemon.log").open("wb")
@@ -262,6 +269,70 @@ def exercise(bins, scratch, feature="all", expected_catalog=None, frame_probe=No
         result = subprocess.run([str(pmux), "--socket", str(endpoint), *args], env=env, capture_output=True, text=True, encoding="utf-8", timeout=45)
         assert result.returncode == 0, result.stderr
         return result.stdout
+
+    def restart_migration():
+        monitor = "org.moonbase.activity-monitor"
+        connector = "org.moonbase.activity-connector"
+        older = "1.3.4"
+        newest = max(
+            (entry for entry in expected_catalog if entry["id"] == monitor),
+            key=lambda entry: tuple(map(int, entry["version"].split("."))),
+        )
+        assert newest["version"] != older, newest
+        catalog = cli("discover")["packages"]
+        assert sorted(entry["sha256"] for entry in catalog) == sorted(
+            entry["sha256"] for entry in expected_catalog
+        ), catalog
+        grants = ["activity.read:local"]
+        cli("install", monitor, "--version", older)
+        cli("enable", monitor, "--version", older, "--allow", grants[0])
+        cli("install", connector, "--version", "1.0.1")
+        cli("enable", connector, "--version", "1.0.1", "--allow", grants[0])
+        disabled = cli("disable", connector)["state"]
+
+        def selections():
+            return {state["id"]: state for state in cli("list")["states"]}
+
+        def record(name, data):
+            (scratch / f"restart-migration-{name}.json").write_text(json.dumps(data, indent=2) + "\n")
+
+        before = selections()
+        assert before[monitor]["enabled"] and before[monitor]["selected"]["version"] == older
+        assert before[monitor]["grants"] == grants
+        assert before[connector] == disabled and disabled["enabled"] is False
+        record("before", before)
+
+        session = "restart-proof"
+        program = ["cmd.exe", "/d", "/c", "pause > nul"] if os.name == "nt" else ["/bin/sh", "-c", "read -r line"]
+        core("new", "--headless", "--no-attach", session, "--", *program)
+        old_pid = json.loads(core("versions"))["daemon"]["pid"]
+        env.pop("PRISMATTYC_DEFAULT_PLUGINS")
+        try:
+            deferred = json.loads(core("restart", "--daemon", "--json"))
+            record("deferred", deferred)
+            assert [item["status"] for item in deferred["components"]] == ["deferred", "pending"], deferred
+            assert json.loads(core("versions"))["daemon"]["pid"] == old_pid
+            assert session in core("ls") and selections() == before
+            core("stop", session)
+
+            restarted = json.loads(core("restart", "--daemon", "--json"))
+            record("restart", restarted)
+            assert restarted["components"] == [
+                {"component": "daemon", "status": "restarted"},
+                {"component": "plugins", "status": "reconciled", "changed": [monitor], "failures": []},
+            ], restarted
+            after = selections()
+            record("after", after)
+            assert json.loads(core("versions"))["daemon"]["pid"] != old_pid
+            assert after[monitor]["selected"]["version"] == newest["version"], after
+            assert after[monitor]["selected"]["digest"] == newest["sha256"], after
+            assert after[monitor]["enabled"] and after[monitor]["grants"] == grants, after
+            assert after[connector] == disabled, after
+            print(f"PASS CLI restart: monitor {older} -> {newest['version']} with the same grant, "
+                  "connector 1.0.1 stays disabled, live session defers migration", flush=True)
+        finally:
+            core("stop")
+            assert json.loads(core("versions"))["daemon"]["status"] == "not_running"
 
     def cpu_seconds(pid):
         if os.name == "nt":
@@ -1088,6 +1159,9 @@ else:
         if feature == "graph-styles":
             graph_style_proof()
             return
+        if feature == "restart-migration":
+            restart_migration()
+            return
         if feature == "production":
             assert expected_catalog is not None
             assert {entry["id"] for entry in expected_catalog} == {monitor, "org.moonbase.activity-connector"}
@@ -1376,7 +1450,7 @@ def main():
     parser.add_argument("--toolchain", default="1.90.0")
     parser.add_argument("--release", action="store_true", dest="release", default=True, help="exercise optimized native binaries as shipped (default)")
     parser.add_argument("--debug", action="store_false", dest="release", help="use slower debug native binaries for local diagnostics")
-    parser.add_argument("--feature", choices=["all","activity-bench","endpoint-pressure","legacy-import","production","discovery","seat-states","remote-query","graph-styles"], default="all")
+    parser.add_argument("--feature", choices=["all","activity-bench","endpoint-pressure","legacy-import","production","discovery","seat-states","remote-query","graph-styles","restart-migration"], default="all")
     args = parser.parse_args()
     # A killed run (timeout, cancel, closed terminal) still runs the finally
     # blocks that stop each isolated daemon.
@@ -1385,8 +1459,8 @@ def main():
     for name in ("SIGTERM", "SIGHUP", "SIGBREAK"):
         if hasattr(signal, name):
             signal.signal(getattr(signal, name), interrupted)
-    if bool(args.bundle) != (args.feature in ("production", "remote-query")):
-        parser.error("--bundle is required with --feature production or remote-query")
+    if bool(args.bundle) != (args.feature in ("production", "remote-query", "restart-migration")):
+        parser.error("--bundle is required with --feature production, remote-query, or restart-migration")
     if args.fixture_bundle and args.feature != "graph-styles":
         parser.error("--fixture-bundle applies only to --feature graph-styles")
     if args.bins and (args.feature != "production" or not args.frame_probe):

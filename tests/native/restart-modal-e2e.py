@@ -138,6 +138,8 @@ def main():
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--sessions', type=int, default=30)
     parser.add_argument('--key-relay', type=Path)
+    parser.add_argument('--keyboard-only', action='store_true',
+                        help='skip the mouse checks (an input relay that has no pointer mapping)')
     args = parser.parse_args()
     bins, out = args.bins.resolve(), args.out.resolve()
     out.mkdir(parents=True, exist_ok=False)
@@ -251,14 +253,15 @@ def main():
         keys.key('Return')
         wait(lambda: modal() and not modal()['expanded'], 'keyboard Hide')
         record('keyboard Hide folds the list')
-        x, y, w, h = modal()['toggle_rect']
-        keys.click(x + w // 2, y + h // 2)
-        shown = capture('expanded-mouse', lambda: (lambda m: m if m and m['expanded'] else None)(modal()))
-        record('mouse Show lists every session')
-        x, y, w, h = shown['toggle_rect']
-        keys.click(x + w // 2, y + h // 2)
-        wait(lambda: modal() and not modal()['expanded'], 'mouse Hide')
-        record('mouse Hide folds the list')
+        if not args.keyboard_only:
+            x, y, w, h = modal()['toggle_rect']
+            keys.click(x + w // 2, y + h // 2)
+            shown = capture('expanded-mouse', lambda: (lambda m: m if m and m['expanded'] else None)(modal()))
+            record('mouse Show lists every session')
+            x, y, w, h = shown['toggle_rect']
+            keys.click(x + w // 2, y + h // 2)
+            wait(lambda: modal() and not modal()['expanded'], 'mouse Hide')
+            record('mouse Hide folds the list')
         keys.key('Escape')
         wait(lambda: window().get('restart_modal') is None, 'modal closed by Escape')
         after = [name for _, name in json.loads(cli('restart', '--plan', '--json'))['sessions']]

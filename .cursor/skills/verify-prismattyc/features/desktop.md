@@ -107,9 +107,12 @@ real update to the newest public release, so use a disposable machine only.
   `final_rows`.
 
 Require `status` PASS and `stages` in order (`Download`, `Verify`, `Install`,
-`Restart` for an update; `Download` for the failure drive), with at least two
-download lines whose byte counts rise. Inspect frames from each stage; the
-install bar must move without a percentage.
+`Restart` for an update; `Download` for the failure drive). `stages` comes from
+`step_log`, the app's own `update progress:` lines in `host.log`, because
+verify and install can finish between two render-status polls. Require at
+least two sampled download lines in `meter.json`. Inspect frames from each
+stage: the bar is drawn, not text, and the install bar moves without a
+percentage.
 
 ## Gotchas
 

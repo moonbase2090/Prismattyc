@@ -145,10 +145,14 @@ def main():
                       'install_agent_skills = false\nchrome_style = "graphite"\n'
                       f'[keys]\nupdate_restart = "{BINDING}"\n')
     env = {k: v for k, v in os.environ.items() if not k.startswith(('PMUX', 'PRISMATTYC_', 'XDG_'))}
-    socket_path = runtime / 'pmux.sock'
-    env.update(PMUX=str(bins / ('pmux' + EXE)), PMUX_SOCKET=str(socket_path),
+    # Windows requires a socket directory that pmux secures itself, so there the
+    # private LOCALAPPDATA below holds the default socket.
+    socket_path = None if os.name == 'nt' else runtime / 'pmux.sock'
+    env.update(PMUX=str(bins / ('pmux' + EXE)),
                PRISMATTYC_CONFIG=str(config), PRISMATTYC_NO_AGENT_SKILLS='1',
                PRISMATTYC_DUMP_PRESENT=str(out / 'present.png'))
+    if socket_path:
+        env['PMUX_SOCKET'] = str(socket_path)
     if os.name == 'nt':
         env.update(USERPROFILE=str(out / 'home'), LOCALAPPDATA=str(out / 'data'), APPDATA=str(out / 'config'))
     else:
@@ -181,7 +185,8 @@ exec {real} "$@"
     owned = []
 
     def cli(*words, timeout=60):
-        p = subprocess.run([str(bins / ('pmux' + EXE)), '--socket', str(socket_path), *words], env=env,
+        socket = ['--socket', str(socket_path)] if socket_path else []
+        p = subprocess.run([str(bins / ('pmux' + EXE)), *socket, *words], env=env,
                            cwd=out / 'project', capture_output=True, text=True, timeout=timeout)
         if p.returncode:
             raise AssertionError(f'pmux {" ".join(words)} exited {p.returncode}: {p.stdout}{p.stderr}')
@@ -263,10 +268,11 @@ exec {real} "$@"
             text=True, timeout=120).stdout or '{}')
         assert result['update_check'].get('update_available'), result['update_check']
         with (out / 'daemon.log').open('w') as log:
-            daemon = subprocess.Popen([str(bins / ('pmuxd' + EXE)), '--socket', str(socket_path)], env=env,
+            socket = ['--socket', str(socket_path)] if socket_path else []
+            daemon = subprocess.Popen([str(bins / ('pmuxd' + EXE)), *socket], env=env,
                                       cwd=out / 'project', stdout=log, stderr=log)
         owned.append(daemon)
-        wait(lambda: socket_path.exists() and cli('ls') is not None, 'private daemon')
+        wait(lambda: json.loads(cli('versions'))['daemon'].get('pid'), 'private daemon')
         cli('new', '--no-attach', 'work')
         started = time.monotonic()
         threading.Thread(target=copy_frames, args=(started,), daemon=True).start()

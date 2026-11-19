@@ -357,8 +357,8 @@ fn hermes_launch_prefix(args: &[String]) -> Option<usize> {
         .strip_suffix(".exe")
         .unwrap_or(&name)
         .strip_prefix("python")?;
-    if !version.is_empty()
-        && !(version.as_bytes()[0].is_ascii_digit()
+    if !(version.is_empty()
+        || version.as_bytes()[0].is_ascii_digit()
             && version
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || byte == b'.'))

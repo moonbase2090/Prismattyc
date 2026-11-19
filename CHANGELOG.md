@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Update and restart** no longer refuses to finish when macOS reports a warning about an unrelated mount, such as a Time Machine snapshot, while checking which processes still run the previous app. A real failure to inspect the app, or a warning about the volume the app lives on, still keeps the previous app.
+
 ## [0.3.70] - 2026-11-19
 
 ### Added

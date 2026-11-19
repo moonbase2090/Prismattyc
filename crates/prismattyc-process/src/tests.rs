@@ -208,8 +208,10 @@ mod descriptor {
         let (writer, reader) = fd::socket_pair().unwrap();
         let (source, peer) = fd::socket_pair().unwrap();
         send(writer.as_fd(), &[source.as_fd()]);
-        drop(source);
+        // Keep an external socket reference until rights leave the transit
+        // queue; Darwin's Unix-domain collector can otherwise flush it.
         let error = fd::receive(reader.as_fd(), &mut [0; 1], 0).unwrap_err();
+        drop(source);
         assert_eq!(
             error
                 .get_ref()
@@ -254,8 +256,8 @@ mod descriptor {
         let (one, one_peer) = fd::socket_pair().unwrap();
         let (two, two_peer) = fd::socket_pair().unwrap();
         send(writer.as_fd(), &[one.as_fd(), two.as_fd()]);
-        drop((one, two));
         let error = fd::receive(reader.as_fd(), &mut [0; 1], 1).unwrap_err();
+        drop((one, two));
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         eof(one_peer);
         eof(two_peer);
@@ -400,8 +402,8 @@ mod descriptor {
         let (writer, reader) = fd::socket_pair().unwrap();
         let (source, peer) = fd::socket_pair().unwrap();
         send(writer.as_fd(), &vec![source.as_fd(); 80]);
-        drop(source);
         let error = fd::receive(reader.as_fd(), &mut [0; 1], 16).unwrap_err();
+        drop(source);
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         eof(peer);
     }

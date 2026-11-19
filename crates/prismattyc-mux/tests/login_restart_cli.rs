@@ -667,6 +667,135 @@ fn a_saved_agent_resumes_instead_of_replaying_its_startup_prompt() {
 }
 
 #[test]
+fn hermes_saved_restart_does_not_replay_the_startup_query() {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixListener;
+
+    let root = temp_root("hermes-restart");
+    let socket = socket_path(&root);
+    let observations = root.join("argv.sock");
+    let listener = UnixListener::bind(&observations).unwrap();
+    let receive_argv = || {
+        let mut ready = libc::pollfd {
+            fd: listener.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert_eq!(
+            unsafe { libc::poll(&mut ready, 1, 20_000) },
+            1,
+            "no launch signal"
+        );
+        let (peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        serde_json::from_reader::<_, Vec<String>>(peer).unwrap()
+    };
+    let fixture = root.join("hermes");
+    std::fs::write(
+        &fixture,
+        r#"#!/usr/bin/env python3
+import json, os, socket, sys
+with socket.socket(socket.AF_UNIX) as peer:
+    peer.connect(os.environ["FIXTURE_ARGV_SOCKET"])
+    peer.sendall(json.dumps(sys.argv[1:]).encode())
+# Keep this fixture child alive until its owning private daemon stops it.
+os.execv("/bin/sleep", ["sleep", "999"])
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        &fixture,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let server = start_server_with_env(
+        &socket,
+        &root,
+        &[("FIXTURE_ARGV_SOCKET", observations.to_str().unwrap())],
+    );
+    ok(&pmux(
+        &socket,
+        &root,
+        &[],
+        &[
+            "new",
+            "--no-attach",
+            "--no-agent",
+            "work",
+            "--",
+            fixture.to_str().unwrap(),
+            "--profile",
+            "demo",
+            "chat",
+            "--resume",
+            "conversation-123",
+            "--model",
+            "model one",
+            "--provider",
+            "custom",
+            "-q",
+            "run the original task",
+        ],
+    ));
+    assert_eq!(
+        receive_argv(),
+        [
+            "--profile",
+            "demo",
+            "chat",
+            "--resume",
+            "conversation-123",
+            "--model",
+            "model one",
+            "--provider",
+            "custom",
+            "-q",
+            "run the original task",
+        ]
+    );
+    let file = root.join("configuration.json");
+    ok(&pmux(
+        &socket,
+        &root,
+        &[],
+        &["session-config", "save", file.to_str().unwrap()],
+    ));
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    let work = saved["space"]["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["name"] == "work")
+        .unwrap();
+    ok(&pmux(&socket, &root, &[], &["stop", "work"]));
+    ok(&pmux(
+        &socket,
+        &root,
+        &[],
+        &["session-config", "restore", file.to_str().unwrap()],
+    ));
+    assert_eq!(
+        receive_argv(),
+        [
+            "chat",
+            "--resume=conversation-123",
+            "--profile",
+            "demo",
+            "--model",
+            "model one",
+            "--provider",
+            "custom",
+        ]
+    );
+    assert_eq!(
+        work["windows"][0]["root"]["command"],
+        format!("{} chat --resume=conversation-123 --profile demo --model 'model one' --provider custom", fixture.display())
+    );
+    drop(server);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn session_configuration_replays_original_launch_arguments_after_exec() {
     let root = temp_root("original-launch-arguments");
     let socket = socket_path(&root);

@@ -30,17 +30,23 @@ also saves a snapshot first and reports where it was written or why it was not.
 
 ## Update and restart all components
 
-Choose **Update and restart all components** in the update panel. The panel
-checks the latest release and lists the running sessions. Continuing stops
-all programs in those sessions and restarts the app, including local terminals.
-Save unsaved work in your programs before continuing.
+Choose **Update and restart all components** in the update panel. The app
+checks the latest release and opens **Restart to update** with the installed
+and new versions (or **Restart components** when you already have the newest
+release). Restarting stops all programs in the running sessions and restarts
+the app, including local terminals. Save unsaved work in your programs first.
+
+The footer counts the running sessions. Choose **Show** (click it, or move to
+it and press Enter) to list their names, and **Hide** to fold the list again.
 
 Choose one of these actions:
 
-- **Save and continue** saves session names, working directories, foreground
-  commands, agent bindings, pane layouts, and Space ownership before updating.
-- **Continue without saving** updates and restarts without saving a session configuration.
-- **Cancel** leaves the sessions and running components alone.
+- **Save and restart** saves session names, working directories, foreground
+  commands, agent bindings, pane layouts, and Space ownership, so you can
+  recreate the sessions afterwards.
+- **Restart without saving** updates and restarts without saving a session
+  configuration. The sessions are discarded.
+- **Cancel** (or Esc) leaves the sessions and running components alone.
 
 The updater downloads and verifies the release before stopping sessions.
 It installs the release, restarts the daemon and supervised MCP adapters,

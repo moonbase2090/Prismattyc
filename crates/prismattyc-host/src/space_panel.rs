@@ -54,7 +54,11 @@ enum Page {
     Templates,
     Preview(String, String),
     Text(String),
-    Update(String, Vec<(String, update_flow::Action)>),
+    Update(
+        String,
+        Option<update_meter::Meter>,
+        Vec<(String, update_flow::Action)>,
+    ),
     /// Recent messages (#171): (message, age and state) rows, newest first.
     Messages(Vec<(String, String)>),
 }
@@ -593,7 +597,12 @@ impl Panel {
                 }
                 self.row("Back to team", "", Choice::Back);
             }
-            Page::Update(text, actions) => {
+            Page::Update(text, meter, actions) => {
+                if let Some(meter) = meter {
+                    for line in meter.lines(self.columns.max(12)) {
+                        self.row(line, "", Choice::None);
+                    }
+                }
                 for line in text.lines() {
                     self.row(line, "", Choice::None);
                 }
@@ -667,6 +676,16 @@ pub(super) fn update_page(
     text: &str,
     actions: &[(&str, update_flow::Action)],
 ) {
+    update_page_with_meter(host, text, None, actions);
+}
+
+/// The update page with a progress meter above its text.
+pub(super) fn update_page_with_meter(
+    host: &mut HostState,
+    text: &str,
+    meter: Option<&update_meter::Meter>,
+    actions: &[(&str, update_flow::Action)],
+) {
     if host.space_panel.is_none() {
         open_settings_menu(host);
     }
@@ -675,6 +694,7 @@ pub(super) fn update_page(
     panel.maintenance = true;
     panel.page = Page::Update(
         text.into(),
+        meter.cloned(),
         actions
             .iter()
             .map(|(label, action)| ((*label).into(), *action))
@@ -1760,6 +1780,45 @@ mod layout_tests {
             .iter()
             .map(|r| (r.label.clone(), r.detail.clone()))
             .collect()
+    }
+
+    #[test]
+    fn update_page_draws_the_meter_above_its_text_and_actions() {
+        let mut meter = update_meter::Meter::new(true);
+        meter.apply(
+            &prismattyc_mux::release_update::progress::Progress::Download {
+                item: "pmuxd".into(),
+                received: 3 * 1024 * 1024,
+                total: 12 * 1024 * 1024,
+            },
+        );
+        let mut page = panel(
+            Page::Update(
+                "Your sessions keep running.".into(),
+                Some(meter),
+                vec![("Check again".into(), update_flow::Action::Start)],
+            ),
+            None,
+        );
+        let rows = labels(&page);
+        assert_eq!(rows[0].0, "Step 1 of 4: Download");
+        assert_eq!(rows[1].0, "Downloading pmuxd: 3.0 of 12.0 MB");
+        assert!(rows[2].0.starts_with("[█"), "{}", rows[2].0);
+        assert!(rows[2].0.ends_with(" 25%"), "{}", rows[2].0);
+        assert_eq!(
+            rows[2].0.chars().count(),
+            99,
+            "the bar fills the panel width"
+        );
+        assert_eq!(rows[3].0, "Your sessions keep running.");
+        assert_eq!(rows[4].0, "Check again");
+        assert!(matches!(page.rows[4].choice, Choice::FullUpdate(_)));
+        page.columns = 40;
+        page.rebuild();
+        assert!(
+            page.rows.iter().all(|row| row.label.chars().count() <= 40),
+            "the meter rewraps to a narrower panel"
+        );
     }
 
     #[test]

@@ -81,6 +81,7 @@ mod test_support;
 mod transparency;
 mod update_check;
 mod update_flow;
+mod update_meter;
 #[cfg(any(target_os = "macos", test))]
 mod update_notes;
 // cargo-mutants 27.1 does not recognize nested cfg(all(test, ...)).

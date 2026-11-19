@@ -1,8 +1,16 @@
 // SPDX-License-Identifier: MIT
 //! One owner for the consent, installation, restart, and restoration flow.
 use super::*;
+use prismattyc_mux::release_update::progress::{self, Progress};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::io::{BufRead, BufReader, Read};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use update_meter::Meter;
+
+/// How often a step without a fraction moves its bar.
+const TICK: std::time::Duration = std::time::Duration::from_millis(150);
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Action {
@@ -24,6 +32,12 @@ pub(super) struct Plan {
 #[derive(Debug)]
 pub(super) enum Event {
     Prepared(Result<Plan, String>),
+    /// A stage reported by `pmux update --progress`.
+    Progress(Progress),
+    /// The app is restarting component `index` of `count`.
+    Restart(usize, usize, &'static str),
+    /// Move the bar of a step that has no fraction.
+    Tick,
     Installed(Result<Resume, String>),
     Restored(Result<String, String>),
 }
@@ -40,13 +54,35 @@ pub(super) enum Flow {
     Idle,
     Busy,
     Confirm(Plan),
+    /// Installing and restarting; the flag stops the meter's ticker.
+    Installing(Meter, Arc<AtomicBool>),
     Restore(Resume),
 }
+
+const INSTALLING: &str = "Your sessions keep running until the restart step.";
 
 fn show(app: &mut App, text: &str, actions: &[(&str, Action)]) {
     for host in app.windows.values_mut() {
         space_panel::update_page(host, text, actions);
     }
+}
+
+fn show_meter(app: &mut App, meter: &Meter, text: &str, actions: &[(&str, Action)]) {
+    for host in app.windows.values_mut() {
+        space_panel::update_page_with_meter(host, text, Some(meter), actions);
+    }
+}
+
+/// Redraw the meter after it changed, while the install is still running.
+fn refresh_meter(app: &mut App, change: impl FnOnce(&mut Meter) -> bool) {
+    let Flow::Installing(meter, _) = &mut app.full_update else {
+        return;
+    };
+    if !change(meter) {
+        return;
+    }
+    let meter = meter.clone();
+    show_meter(app, &meter, INSTALLING, &[]);
 }
 
 pub(super) fn action(app: &mut App, action: Action) {
@@ -69,13 +105,31 @@ pub(super) fn action(app: &mut App, action: Action) {
                 return;
             };
             let plan = plan.clone();
-            app.full_update = Flow::Busy;
-            show(app, "Downloading and verifying the release, then installing and restarting all components. Please wait.", &[]);
+            let meter = Meter::new(plan.update_available);
+            let stop = Arc::new(AtomicBool::new(false));
+            show_meter(app, &meter, INSTALLING, &[]);
+            app.full_update = Flow::Installing(meter, stop.clone());
+            let ticker = app.event_proxy.clone();
+            let ticking = stop.clone();
+            std::thread::spawn(move || {
+                while !ticking.load(Ordering::Relaxed) {
+                    std::thread::sleep(TICK);
+                    if ticker
+                        .send_event(UserAction::FullUpdate(Event::Tick))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            });
             let proxy = app.event_proxy.clone();
             std::thread::spawn(move || {
-                let result = install(plan, matches!(action, Action::SaveAndContinue))
+                let report = |event| {
+                    let _ = proxy.send_event(UserAction::FullUpdate(event));
+                };
+                let result = install(plan, matches!(action, Action::SaveAndContinue), &report)
                     .map_err(|e| format!("{e:#}"));
-                let _ = proxy.send_event(UserAction::FullUpdate(Event::Installed(result)));
+                report(Event::Installed(result));
             });
         }
         Action::Restore => {
@@ -136,7 +190,31 @@ pub(super) fn event(app: &mut App, event: Event) {
                 ],
             );
         }
+        Event::Progress(progress) => refresh_meter(app, |meter| {
+            meter.apply(&progress);
+            true
+        }),
+        Event::Restart(index, count, item) => refresh_meter(app, |meter| {
+            meter.restart(index, count, item);
+            true
+        }),
+        Event::Tick => refresh_meter(app, Meter::tick),
+        Event::Installed(Err(error)) => {
+            let text = format!("The operation could not finish.\n{error}");
+            let actions = [("Check again", Action::Start)];
+            match std::mem::take(&mut app.full_update) {
+                Flow::Installing(mut meter, stop) => {
+                    stop.store(true, Ordering::Relaxed);
+                    meter.fail();
+                    show_meter(app, &meter, &text, &actions);
+                }
+                _ => show(app, &text, &actions),
+            }
+        }
         Event::Installed(Ok(resume)) => {
+            if let Flow::Installing(_, stop) = &app.full_update {
+                stop.store(true, Ordering::Relaxed);
+            }
             if let Err(error) = relaunch(&resume) {
                 app.full_update = Flow::Restore(resume.clone());
                 show(app, &format!("{}\nCould not restart the app: {error:#}. Quit and reopen Prismattyc. Your session configuration is saved at {}.", resume.notice, resume.backup.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "no backup was requested".into())), &[]);
@@ -158,9 +236,7 @@ pub(super) fn event(app: &mut App, event: Event) {
             }
             show(app, &format!("{text}\nSession restoration finished. Open a saved Space or select a session to view it."), &[]);
         }
-        Event::Prepared(Err(error))
-        | Event::Installed(Err(error))
-        | Event::Restored(Err(error)) => {
+        Event::Prepared(Err(error)) | Event::Restored(Err(error)) => {
             app.full_update = Flow::Idle;
             show(
                 app,
@@ -230,13 +306,13 @@ pub(super) fn snapshot_path(prefix: &str) -> Result<PathBuf> {
     )))
 }
 
-fn install(plan: Plan, save: bool) -> Result<Resume> {
+fn install(plan: Plan, save: bool, report: &dyn Fn(Event)) -> Result<Resume> {
     let pmux = find_mux_bin();
     require_same_sessions(&plan, &pmux)?;
     let file = snapshot_path("update")?;
     run(&pmux, &["session-config", "save", &file.to_string_lossy()])?;
     let backup = save.then_some(file.clone());
-    let result = complete_install(&plan, &pmux, &file, !save);
+    let result = complete_install(&plan, &pmux, &file, !save, report);
     match result {
         Ok(notice) => Ok(Resume { notice, backup }),
         Err(error) => {
@@ -260,15 +336,16 @@ fn complete_install(
     pmux: &Path,
     consent: &Path,
     delete_consent: bool,
+    report: &dyn Fn(Event),
 ) -> Result<String> {
     if plan.update_available {
-        let report: Value = serde_json::from_str(&run(pmux, &["update", "--json"])?)?;
+        let installed: Value = serde_json::from_str(&update_with_progress(pmux, report)?)?;
         anyhow::ensure!(
-            report["status"] == "installed",
+            installed["status"] == "installed",
             "The release was not installed. {}",
-            space_panel::maintenance_result(&report.to_string())
+            space_panel::maintenance_result(&installed.to_string())
         );
-        anyhow::ensure!(report["version"].as_str() == Some(plan.available.as_str()), "The installed release changed during the update. No sessions were stopped. Check again.");
+        anyhow::ensure!(installed["version"].as_str() == Some(plan.available.as_str()), "The installed release changed during the update. No sessions were stopped. Check again.");
     }
     // Resolve the replacement after installation, so the daemon, CLI and
     // MCP supervisor all use the same activated release.
@@ -290,8 +367,10 @@ fn complete_install(
     }
     restart.extend(["--worker".to_string(), "--json".to_string()]);
     let restart_args = restart.iter().map(String::as_str).collect::<Vec<_>>();
+    report(Event::Restart(1, RESTARTS, "daemon and sessions"));
     run(&installed, &restart_args)
         .context("The files are installed, but the daemon restart failed")?;
+    report(Event::Restart(2, RESTARTS, "MCP adapter"));
     let mcp = run(&installed, &["restart", "--mcp", "--json"])
         .context("The daemon restarted, but the MCP restart failed")?;
     let mut versions: Value = serde_json::from_str(&run(&installed, &["versions"])?)?;
@@ -314,6 +393,7 @@ fn complete_install(
         "The running daemon is {actual}; expected {}. The app has not restarted.",
         plan.available
     );
+    report(Event::Restart(3, RESTARTS, "app"));
     Ok(format!(
         "Prismattyc {} is installed. The daemon restarted on {}.\n{}\n{}",
         plan.available,
@@ -322,6 +402,10 @@ fn complete_install(
         space_panel::maintenance_result(&versions.to_string())
     ))
 }
+
+/// Components the app restarts after installing: the daemon with its
+/// sessions, the MCP adapter, then the app itself.
+const RESTARTS: usize = 3;
 
 fn verify_installed_versions(value: &Value, expected: &str) -> Result<()> {
     let installed = value["installed"]
@@ -357,7 +441,7 @@ fn verify_installed_versions(value: &Value, expected: &str) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn run(pmux: &Path, args: &[&str]) -> Result<String> {
+fn command(pmux: &Path) -> std::process::Command {
     let mut cmd = prismattyc_mux::platform::hidden_command(pmux);
     if let Some(socket) = host_mux_socket() {
         cmd.arg("--socket").arg(socket);
@@ -368,7 +452,67 @@ pub(super) fn run(pmux: &Path, args: &[&str]) -> Result<String> {
             cmd.env("PMUX_SERVER", server);
         }
     }
-    let output = cmd
+    cmd
+}
+
+/// `pmux update --json`, with staged progress when the CLI supports it. A
+/// command-line tool from before progress reporting rejects the option before
+/// it downloads anything, so the update runs again without it.
+fn update_with_progress(pmux: &Path, report: &dyn Fn(Event)) -> Result<String> {
+    let mut forward = |progress| report(Event::Progress(progress));
+    match run_with_progress(pmux, &["update", "--json", "--progress"], &mut forward) {
+        Err(error) if format!("{error:#}").contains(r#"option "--progress""#) => {
+            run(pmux, &["update", "--json"])
+        }
+        result => result,
+    }
+}
+
+/// Run a command that reports progress lines on stderr. Each event goes to
+/// `on_progress` as it arrives; other stderr lines are kept for the error.
+fn run_with_progress(
+    pmux: &Path,
+    args: &[&str],
+    on_progress: &mut dyn FnMut(Progress),
+) -> Result<String> {
+    let mut child = command(pmux)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("run update command")?;
+    let mut stdout = child.stdout.take().context("update command output")?;
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stdout.read_to_string(&mut text);
+        text
+    });
+    let stderr = child.stderr.take().context("update command messages")?;
+    let messages = read_progress(BufReader::new(stderr), on_progress);
+    let status = child.wait().context("wait for update command")?;
+    let stdout = reader.join().unwrap_or_default();
+    anyhow::ensure!(status.success(), "{stdout}{messages}");
+    Ok(stdout.trim().into())
+}
+
+/// Hand each progress line to `on_progress` and return the other lines.
+fn read_progress(input: impl BufRead, on_progress: &mut dyn FnMut(Progress)) -> String {
+    let mut messages = String::new();
+    for line in input.lines().map_while(Result::ok) {
+        match progress::parse(&line) {
+            Some(event) => on_progress(event),
+            None => {
+                messages.push_str(&line);
+                messages.push('\n');
+            }
+        }
+    }
+    messages
+}
+
+pub(super) fn run(pmux: &Path, args: &[&str]) -> Result<String> {
+    let output = command(pmux)
         .args(args)
         .stdin(std::process::Stdio::null())
         .output()
@@ -452,6 +596,113 @@ mod tests {
             .to_string();
         assert!(error.contains("pmuxd 0.3.38"), "{error}");
         assert!(error.contains("expected 0.3.41"), "{error}");
+    }
+
+    #[test]
+    fn progress_lines_are_forwarded_in_order_and_other_lines_kept() {
+        let first = Progress::Download {
+            item: "pmux".into(),
+            received: 10,
+            total: 40,
+        };
+        let second = Progress::Verify {
+            item: "pmux".into(),
+            index: 1,
+            count: 6,
+        };
+        let input = format!(
+            "Downloading pmux 0.3.70\n{}\n{}\nwarning: slow mirror\n",
+            progress::line(&first),
+            progress::line(&second)
+        );
+        let mut seen = Vec::new();
+        let messages = read_progress(input.as_bytes(), &mut |event| seen.push(event));
+        assert_eq!(seen, [first, second]);
+        assert_eq!(messages, "Downloading pmux 0.3.70\nwarning: slow mirror\n");
+    }
+
+    #[cfg(unix)]
+    fn fake_pmux(name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "update-flow-{name}-{}-{}",
+            std::process::id(),
+            prismattyc_mux::host_render_status::unix_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pmux");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_running_update_streams_progress_and_returns_its_report() {
+        let event = Progress::Install {
+            item: "core binaries".into(),
+        };
+        let pmux = fake_pmux(
+            "stream",
+            &format!(
+                "echo 'Downloading pmux' >&2\necho '{}' >&2\necho '{{\"status\":\"installed\"}}'",
+                progress::line(&event)
+            ),
+        );
+        let seen = std::cell::RefCell::new(Vec::new());
+        let report = |event| seen.borrow_mut().push(event);
+        let output = update_with_progress(&pmux, &report).unwrap();
+        assert_eq!(output, r#"{"status":"installed"}"#);
+        let seen = seen.into_inner();
+        assert!(
+            matches!(seen.as_slice(), [Event::Progress(p)] if *p == event),
+            "{seen:?}"
+        );
+        std::fs::remove_dir_all(pmux.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_update_reports_its_messages_but_not_progress_lines() {
+        let pmux = fake_pmux(
+            "fail",
+            &format!(
+                "echo '{}' >&2\necho 'download digest mismatch for pmuxd' >&2\nexit 1",
+                progress::line(&Progress::Download {
+                    item: "pmuxd".into(),
+                    received: 1,
+                    total: 2
+                })
+            ),
+        );
+        let error = update_with_progress(&pmux, &|_| {})
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("download digest mismatch for pmuxd"),
+            "{error}"
+        );
+        assert!(!error.contains(progress::PREFIX), "{error}");
+        std::fs::remove_dir_all(pmux.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_older_cli_without_progress_still_updates() {
+        // The release CLI's wording for an option it does not know.
+        let pmux = fake_pmux(
+            "older",
+            r#"for arg in "$@"; do
+  if [ "$arg" = --progress ]; then
+    echo 'unknown release update option "--progress"; use --help' >&2
+    exit 1
+  fi
+done
+echo '{"status":"installed"}'"#,
+        );
+        let output = update_with_progress(&pmux, &|_| {}).unwrap();
+        assert_eq!(output, r#"{"status":"installed"}"#);
+        std::fs::remove_dir_all(pmux.parent().unwrap()).unwrap();
     }
 
     #[test]

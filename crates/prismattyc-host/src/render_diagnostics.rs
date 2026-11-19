@@ -362,6 +362,7 @@ impl App {
                 "tab_strip_y": host.mux.geom().tab_strip_y(),
                 "tab_strip_height": host.mux.geom().top_chrome_px,
                 "space_details": crate::space_panel::status(host),
+                "restart_modal": host.restart_modal.as_ref().map(crate::restart_modal::RestartModal::status),
                 "context_menu": host.context_menu.as_ref().map(|menu| serde_json::json!({
                     "selected": menu.selected,
                     "confirmation": menu.confirm,

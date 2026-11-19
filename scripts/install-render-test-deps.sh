@@ -12,6 +12,11 @@ privilege=()
 if [ "$(id -u)" -ne 0 ]; then
   privilege=(sudo)
 fi
-"${privilege[@]}" apt-get update -qq
+# A stalled mirror can hang apt for most of a CI job. Bound the network part
+# (index update and package download) and retry it; the install itself is local.
+fetch="$(dirname "$0")/fetch-with-time-limit.sh"
+"$fetch" 60 3 "${privilege[@]}" apt-get update -qq
+"$fetch" 180 3 "${privilege[@]}" apt-get install -y -qq --no-install-recommends \
+  --download-only "${packages[@]}"
 "${privilege[@]}" apt-get install -y -qq --no-install-recommends "${packages[@]}"
 command -v Xvfb >/dev/null

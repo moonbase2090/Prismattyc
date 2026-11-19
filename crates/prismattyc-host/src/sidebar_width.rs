@@ -293,7 +293,7 @@ pub fn harness_seat_from_argv0(basename: &str) -> Option<Seat> {
         prismattyc_mux::InjectAgent::Kiro => Some(Seat::Kiro),
         prismattyc_mux::InjectAgent::Muse => Some(Seat::Muse),
         prismattyc_mux::InjectAgent::Cursor => Some(Seat::Composer),
-        prismattyc_mux::InjectAgent::Unknown => None,
+        prismattyc_mux::InjectAgent::Hermes | prismattyc_mux::InjectAgent::Unknown => None,
     }
 }
 
@@ -306,7 +306,7 @@ pub fn harness_seat_from_agent(agent: prismattyc_mux::InjectAgent) -> Option<Sea
         prismattyc_mux::InjectAgent::Kiro => Some(Seat::Kiro),
         prismattyc_mux::InjectAgent::Muse => Some(Seat::Muse),
         prismattyc_mux::InjectAgent::Cursor => Some(Seat::Composer),
-        prismattyc_mux::InjectAgent::Unknown => None,
+        prismattyc_mux::InjectAgent::Hermes | prismattyc_mux::InjectAgent::Unknown => None,
     }
 }
 

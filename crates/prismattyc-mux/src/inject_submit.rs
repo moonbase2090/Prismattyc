@@ -8,6 +8,7 @@
 //! - Codex: first CR inserts; a second CR submits.
 //! - Claude: assumed one CR (not probed this session).
 //! - Kiro: assumed one CR (not probed).
+//! - Hermes: bracketed paste, then a separate CR past its rapid-input guard.
 //! - Muse: use Kitty Enter when the pane has Kitty keyboard flags, else CR.
 //!   A Muse 1.4.3 probe (2026-10-08) found flags `3`, modifyOtherKeys `0`;
 //!   raw CR and bare `CSI 13u` left `PMUX_MAIL` in the composer, while a
@@ -16,8 +17,6 @@
 
 #[cfg(not(windows))]
 use std::collections::{HashSet, VecDeque};
-#[cfg(not(windows))]
-use std::path::Path;
 
 use crate::PMUX_MAIL_NOTIFICATION;
 
@@ -30,6 +29,7 @@ pub enum InjectAgent {
     Codex,
     Kiro,
     Muse,
+    Hermes,
     Unknown,
 }
 
@@ -43,6 +43,7 @@ pub fn inject_agent_slug(agent: InjectAgent) -> Option<&'static str> {
         InjectAgent::Codex => Some("codex"),
         InjectAgent::Kiro => Some("kiro"),
         InjectAgent::Muse => Some("muse"),
+        InjectAgent::Hermes => Some("hermes"),
         InjectAgent::Unknown => None,
     }
 }
@@ -82,6 +83,9 @@ fn classify_agent_file_name(name: &str) -> Option<InjectAgent> {
     if agent_stem(&name, "muse") {
         return Some(InjectAgent::Muse);
     }
+    if agent_stem(&name, "hermes") {
+        return Some(InjectAgent::Hermes);
+    }
     None
 }
 
@@ -111,41 +115,23 @@ pub(crate) fn submit_writes(agent: InjectAgent, kitty_flags: u16) -> Vec<Vec<u8>
         | InjectAgent::Grok
         | InjectAgent::Kiro
         | InjectAgent::Muse
+        | InjectAgent::Hermes
         | InjectAgent::Unknown => vec![vec![b'\r']],
     }
 }
 
-/// Classify a `/proc` cmdline (NUL or space separated).
+/// Classify a `/proc` cmdline or a shell-rendered foreground command.
 #[must_use]
 #[cfg(not(windows))]
 pub fn classify_cmdline(cmd: &str) -> Option<InjectAgent> {
-    let normalized = cmd.replace('\0', " ");
-    let tokens: Vec<&str> = normalized.split_whitespace().collect();
-    let names: Vec<String> = tokens
-        .iter()
-        .map(|token| {
-            Path::new(token)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or(token)
-                .to_ascii_lowercase()
-        })
-        .collect();
-    // Family order matches the previous classifiers: cursor wins over a
-    // later token that names another agent.
-    const ORDER: [InjectAgent; 6] = [
-        InjectAgent::Cursor,
-        InjectAgent::Codex,
-        InjectAgent::Claude,
-        InjectAgent::Grok,
-        InjectAgent::Kiro,
-        InjectAgent::Muse,
-    ];
-    ORDER.into_iter().find(|&kind| {
-        names
-            .iter()
-            .any(|name| classify_agent_file_name(name) == Some(kind))
-    })
+    let args = if cmd.contains('\0') {
+        cmd.split('\0').map(str::to_owned).collect()
+    } else {
+        shlex::split(cmd)?
+    };
+    // An interpreter may precede the launcher. Once a family is found, model
+    // and prompt arguments must not change it.
+    args.iter().find_map(|arg| classify_agent_argv0(arg))
 }
 
 #[cfg(windows)]
@@ -232,6 +218,13 @@ pub(crate) fn inject_writes_for_mode(agent: InjectAgent, kitty_flags: u16) -> Ve
             let mut first = text.to_vec();
             first.extend_from_slice(&submit[0]);
             vec![first, submit[1].clone()]
+        }
+        InjectAgent::Hermes => {
+            let mut pasted = Vec::with_capacity(text.len() + 12);
+            pasted.extend_from_slice(b"\x1b[200~");
+            pasted.extend_from_slice(text);
+            pasted.extend_from_slice(b"\x1b[201~");
+            vec![pasted, submit[0].clone()]
         }
         InjectAgent::Muse if kitty_flags != 0 => {
             // Muse submits this token reliably when the paste terminator
@@ -377,6 +370,65 @@ mod tests {
             Some(InjectAgent::Kiro)
         );
         assert_eq!(classify_cmdline("kiro"), Some(InjectAgent::Kiro));
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn classify_hermes_launchers_and_python_entrypoint() {
+        for name in ["hermes", "HERMES", "/opt/bin/hermes", "hermes-agent"] {
+            assert_eq!(classify_agent_argv0(name), Some(InjectAgent::Hermes));
+        }
+        assert_eq!(
+            classify_cmdline("/opt/bin/python3\0/opt/bin/hermes\0chat"),
+            Some(InjectAgent::Hermes)
+        );
+        assert_eq!(
+            classify_cmdline("'/opt/Fixture Apps/bin/hermes' chat"),
+            Some(InjectAgent::Hermes)
+        );
+        assert_eq!(classify_agent_argv0("hermesaurus"), None);
+        assert_eq!(inject_agent_slug(InjectAgent::Hermes), Some("hermes"));
+    }
+
+    #[test]
+    fn hermes_doorbell_pastes_before_separate_enter() {
+        for flags in [0, 3] {
+            assert_eq!(
+                submit_writes(InjectAgent::Hermes, flags),
+                vec![b"\r".to_vec()]
+            );
+            assert_eq!(
+                inject_writes_for_mode(InjectAgent::Hermes, flags),
+                vec![b"\x1b[200~PMUX_MAIL\x1b[201~".to_vec(), b"\r".to_vec()]
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn launcher_family_precedes_model_and_prompt_names() {
+        assert_eq!(
+            classify_cmdline("hermes --model anthropic/claude-sonnet-4"),
+            Some(InjectAgent::Hermes)
+        );
+        assert_eq!(
+            classify_cmdline("/opt/bin/python3\0/opt/bin/hermes\0chat\0--model\0grok-4"),
+            Some(InjectAgent::Hermes)
+        );
+        assert_eq!(
+            classify_cmdline("codex 'ask cursor-agent for help'"),
+            Some(InjectAgent::Codex)
+        );
+        assert_eq!(
+            classify_cmdline("'/opt/Grok Apps/cursor-agent'"),
+            Some(InjectAgent::Cursor)
+        );
+        assert_eq!(
+            classify_cmdline("python3 '/opt/Claude Apps/bin/hermes' chat"),
+            Some(InjectAgent::Hermes)
+        );
+        assert_eq!(classify_cmdline("'hermes"), None);
+        assert_eq!(classify_cmdline("'hermes'\0chat"), None);
     }
 
     #[test]

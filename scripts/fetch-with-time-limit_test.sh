@@ -8,6 +8,9 @@ helper="$root/scripts/fetch-with-time-limit.sh"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 failures=0
+# Nothing ever opens this pipe for writing, so reading it blocks until the
+# helper stops the attempt: a download that never finishes, with no clock.
+mkfifo "$work/never"
 
 fail() {
   echo "FAIL: $*" >&2
@@ -31,8 +34,7 @@ fake() {
       case "$behavior" in
         ok) echo "  $i) exit 0 ;;" ;;
         fail) echo "  $i) exit 3 ;;" ;;
-        # keep-alive: stands in for a download that never finishes.
-        hang) echo "  $i) exec sleep 60 ;;" ;;
+        hang) echo "  $i) exec cat '$work/never' ;;" ;;
       esac
       i=$((i + 1))
     done
@@ -72,11 +74,7 @@ grep -q "exited 3 on attempt 1 of 3; starting again" "$work/retry.err" \
   || fail "failure is retried: no warning: $(cat "$work/retry.err")"
 
 cmd="$(fake stall hang ok)"
-start=$SECONDS
 check "stalled attempt is stopped and retried" 0 2 stall 1 3 "$cmd"
-if [ $((SECONDS - start)) -ge 30 ]; then
-  fail "stalled attempt is stopped and retried: took $((SECONDS - start))s"
-fi
 grep -q "ran past 1s on attempt 1 of 3" "$work/stall.err" \
   || fail "stalled attempt is stopped and retried: no warning: $(cat "$work/stall.err")"
 

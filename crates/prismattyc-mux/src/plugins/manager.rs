@@ -102,7 +102,7 @@ impl Service {
         self.startup_reconciliation.get_or_init(|| {
             let mut changed = Vec::new();
             let mut failures = Vec::new();
-            if !std::env::var_os("PRISMATTYC_DEFAULT_PLUGINS").is_some_and(|value| value == "0") {
+            if std::env::var_os("PRISMATTYC_DEFAULT_PLUGINS").is_none_or(|value| value != "0") {
                 match self.manager() {
                     Ok(manager) => {
                         for (id, outcome) in manager.seed_defaults() {

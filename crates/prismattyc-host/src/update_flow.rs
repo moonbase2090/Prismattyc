@@ -506,19 +506,63 @@ fn read_progress(input: impl BufRead, on_progress: &mut dyn FnMut(Progress)) -> 
     messages
 }
 
+/// Run a pmux command and return its standard output.
+///
+/// Output is collected in private files, not pipes. A daemon the command
+/// starts can end up holding a copy of a pipe's write end (Windows children
+/// inherit every inheritable handle), and then the end of output never comes,
+/// so waiting on a pipe could block until that daemon exits.
 pub(super) fn run(pmux: &Path, args: &[&str]) -> Result<String> {
-    let output = command(pmux)
+    let capture = Capture::new()?;
+    let status = command(pmux)
         .args(args)
         .stdin(std::process::Stdio::null())
-        .output()
+        .stdout(capture.create("stdout")?)
+        .stderr(capture.create("stderr")?)
+        .status()
         .context("run update command")?;
-    anyhow::ensure!(
-        output.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    Ok(String::from_utf8_lossy(&output.stdout).trim().into())
+    let stdout = capture.read("stdout")?;
+    anyhow::ensure!(status.success(), "{stdout}{}", capture.read("stderr")?);
+    Ok(stdout.trim().into())
+}
+
+/// A private directory for one command's output, removed when dropped.
+struct Capture {
+    dir: PathBuf,
+}
+
+impl Capture {
+    fn new() -> Result<Self> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "prismattyc-run-{}-{}-{}",
+            std::process::id(),
+            prismattyc_mux::host_render_status::unix_ms(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        prismattyc_mux::private_fs::create_dir(&dir).context("create command output directory")?;
+        Ok(Capture { dir })
+    }
+
+    fn create(&self, name: &str) -> Result<std::fs::File> {
+        prismattyc_mux::platform::private_options()
+            .write(true)
+            .create_new(true)
+            .open(self.dir.join(name))
+            .with_context(|| format!("create command {name} file"))
+    }
+
+    fn read(&self, name: &str) -> Result<String> {
+        let bytes =
+            std::fs::read(self.dir.join(name)).with_context(|| format!("read command {name}"))?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+}
+
+impl Drop for Capture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
 }
 
 fn relaunch(resume: &Resume) -> Result<()> {
@@ -574,6 +618,72 @@ pub(super) fn resume(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn fake_pmux(name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "update-flow-{name}-{}-{}",
+            std::process::id(),
+            prismattyc_mux::host_render_status::unix_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pmux");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_child_left_holding_the_output_does_not_block_the_result() {
+        // The command starts a background process that keeps its standard
+        // output open, as a started daemon could. Its pid is kept to end it.
+        let pmux = fake_pmux(
+            "held",
+            r#"sleep 30 &
+echo $! > "$(dirname "$0")/held.pid"
+echo done
+echo note >&2"#,
+        );
+        let started = std::time::Instant::now();
+        let output = run(&pmux, &[]).unwrap();
+        let elapsed = started.elapsed();
+        let pid = std::fs::read_to_string(pmux.parent().unwrap().join("held.pid")).unwrap();
+        let _ = std::process::Command::new("kill").arg(pid.trim()).status();
+        assert_eq!(output, "done");
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "returned when the command exited, not when its child did: {elapsed:?}"
+        );
+        std::fs::remove_dir_all(pmux.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_command_reports_both_outputs_and_leaves_no_files() {
+        let pmux = fake_pmux("fails", "echo out; echo err >&2; exit 3");
+        let before: std::collections::BTreeSet<_> = std::fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|entry| entry.file_name()))
+            .filter(|name| {
+                name.to_string_lossy()
+                    .starts_with(&format!("prismattyc-run-{}-", std::process::id()))
+            })
+            .collect();
+        let error = run(&pmux, &[]).unwrap_err().to_string();
+        assert!(error.contains("out") && error.contains("err"), "{error}");
+        let after: std::collections::BTreeSet<_> = std::fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|entry| entry.file_name()))
+            .filter(|name| {
+                name.to_string_lossy()
+                    .starts_with(&format!("prismattyc-run-{}-", std::process::id()))
+            })
+            .collect();
+        assert!(after.is_subset(&before), "output files removed: {after:?}");
+        std::fs::remove_dir_all(pmux.parent().unwrap()).unwrap();
+    }
     #[test]
     fn incomplete_or_mixed_installations_cannot_report_success() {
         let absent = serde_json::json!({"installed": []});
@@ -614,21 +724,6 @@ mod tests {
         let messages = read_progress(input.as_bytes(), &mut |event| seen.push(event));
         assert_eq!(seen, [first, second]);
         assert_eq!(messages, "Downloading pmux 0.3.70\nwarning: slow mirror\n");
-    }
-
-    #[cfg(unix)]
-    fn fake_pmux(name: &str, body: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!(
-            "update-flow-{name}-{}-{}",
-            std::process::id(),
-            prismattyc_mux::host_render_status::unix_ms()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("pmux");
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        path
     }
 
     #[cfg(unix)]

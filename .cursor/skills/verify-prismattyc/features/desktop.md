@@ -127,7 +127,15 @@ the link, and Escape cancels with every session still running. Binaries older
 than the newest release show "Restart to update OLD → NEW"; a proof build may
 lower the workspace version and must say so. Keys and clicks use xdotool on
 Linux and SendInput on Windows; a macOS guest without Accessibility uses
-`--key-relay DIR --keyboard-only` with input sent from the VM console. The
+`--key-relay DIR --keyboard-only` with input sent from the VM console.
+
+`--restart-without-saving` (disposable machines only) then reopens the dialog,
+chooses Restart without saving and waits for the app to relaunch; on Linux and
+Windows it first copies `--bins` into `OUT/install/bin`, because the updater
+refuses a build tree. With binaries older than the newest release this runs
+the real update; require the PASS line naming the relaunched daemon's version.
+This is the Windows proof that the app is not left waiting on the daemon
+restart step. The
 drive opens the menu with Ctrl+Shift+Y (Option+letter can be a dead key over a
 console) and follows render-status `space_details.selected` to the row it needs.
 

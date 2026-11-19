@@ -297,6 +297,9 @@ jobs:
           cargo tree -p prismattyc-host -i graphite-core | tee /tmp/graphite-core-tree.txt
           grep -F 'rev=2a59b055c72fe1a91379ffc0f071c85f5d81a284#2a59b05' /tmp/graphite-core-tree.txt
 
+      - name: Check the install download time limit
+        run: bash scripts/fetch-with-time-limit_test.sh
+
       - name: Check workspace
         run: |
           cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
@@ -322,7 +325,8 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # A normal run takes 13-17 minutes; the rest covers one slow install retry.
+    timeout-minutes: 30
     steps:
       - name: Check out repository
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -653,8 +657,11 @@ jobs:
           fi
           rustup toolchain install 1.90.0 --profile minimal
           rustup default 1.90.0
-          rustup target add x86_64-pc-windows-gnu
-          sudo apt-get update -qq
+          # A stalled download here used to hang until the job limit.
+          fetch=./scripts/fetch-with-time-limit.sh
+          "$fetch" 180 3 rustup target add x86_64-pc-windows-gnu
+          "$fetch" 60 3 sudo apt-get update -qq
+          "$fetch" 240 3 sudo apt-get install -y -qq --download-only gcc-mingw-w64-x86-64 wine64
           sudo apt-get install -y -qq gcc-mingw-w64-x86-64 wine64
           if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
             echo "error: x86_64-w64-mingw32-gcc is missing after install" >&2

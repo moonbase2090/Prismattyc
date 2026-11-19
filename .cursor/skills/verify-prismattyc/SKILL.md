@@ -75,6 +75,12 @@ The Ubuntu 26.04 preview job in `.github/workflows/ci.yml` is advisory
 (`continue-on-error: true`); record its actual result separately from required
 CI. A green aggregate does not establish that the preview suite passed.
 
+CI install steps run their downloads (apt index and packages, `rustup target
+add`) through `scripts/fetch-with-time-limit.sh SECONDS ATTEMPTS COMMAND...`, so
+a stalled mirror fails over in minutes instead of using up the job. Use it only
+for fetching tools and packages, never around a test. `bash
+scripts/fetch-with-time-limit_test.sh` checks it.
+
 ## Doctor
 
 The CLI helper performs a read-only doctor before the drive, after success, and after a failed drive when the daemon is still alive: check its owned process, check the private socket, run that build's `pmux --version` and `pmux ls`. Inspect `doctor.jsonl` and compare the version with `revision.txt`; a response from an unrelated installed binary is not proof.

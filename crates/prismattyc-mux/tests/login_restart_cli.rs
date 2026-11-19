@@ -668,16 +668,16 @@ fn a_saved_agent_resumes_instead_of_replaying_its_startup_prompt() {
 
 #[test]
 fn hermes_saved_restart_does_not_replay_the_startup_query() {
-    use std::os::fd::AsRawFd;
+    use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
     use std::os::unix::net::UnixListener;
 
     let root = temp_root("hermes-restart");
     let socket = socket_path(&root);
     let observations = root.join("argv.sock");
     let listener = UnixListener::bind(&observations).unwrap();
-    let receive_argv = || {
+    let await_readable = |fd: BorrowedFd<'_>| {
         let mut ready = libc::pollfd {
-            fd: listener.as_raw_fd(),
+            fd: fd.as_raw_fd(),
             events: libc::POLLIN,
             revents: 0,
         };
@@ -686,8 +686,11 @@ fn hermes_saved_restart_does_not_replay_the_startup_query() {
             1,
             "no launch signal"
         );
+    };
+    let receive_argv = || {
+        await_readable(listener.as_fd());
         let (peer, _) = listener.accept().unwrap();
-        peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        await_readable(peer.as_fd());
         serde_json::from_reader::<_, Vec<String>>(peer).unwrap()
     };
     let fixture = root.join("hermes");

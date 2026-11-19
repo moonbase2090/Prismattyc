@@ -21,10 +21,13 @@ DIR/NNNNN.req (JSON) and waits for DIR/NNNNN.ack from an outside source.
 import argparse
 import json
 import os
+import queue
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -140,9 +143,20 @@ def main():
     parser.add_argument('--key-relay', type=Path)
     parser.add_argument('--keyboard-only', action='store_true',
                         help='skip the mouse checks (an input relay that has no pointer mapping)')
+    parser.add_argument('--restart-without-saving', action='store_true',
+                        help='after the checks, choose Restart without saving and wait for the app to relaunch '
+                             '(disposable machines only: it updates or restarts every component)')
+    parser.add_argument('--timeout', type=int, default=600)
     args = parser.parse_args()
     bins, out = args.bins.resolve(), args.out.resolve()
     out.mkdir(parents=True, exist_ok=False)
+    if args.restart_without_saving and sys.platform != 'darwin':
+        # The updater refuses to replace a build tree; run from an installed copy.
+        install = out / 'install' / 'bin'
+        install.mkdir(parents=True)
+        for name in ('pmux', 'pmuxd', 'pmux-attach', 'pmux-mcp', 'prismattyc', 'prismattyc-host'):
+            shutil.copy2(bins / (name + EXE), install / (name + EXE))
+        bins = install
     for name in ('home', 'config', 'data', 'state', 'project'):
         (out / name).mkdir()
     runtime = Path(tempfile.mkdtemp(prefix='pmodal-'))
@@ -248,8 +262,23 @@ def main():
         for name in names:
             cli('new', '--no-attach', name)
         host = subprocess.Popen([str(bins / ('prismattyc-host' + EXE)), '--no-splash', '--attach-session', names[0]],
-                                env=env, stdout=(out / 'host.log').open('w'), stderr=subprocess.STDOUT)
+                                env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                errors='replace')
         owned.append(host)
+        # Every app start prints its font line. A relaunched app keeps this
+        # output (exec on Unix, an inheriting child on Windows), so the line
+        # arriving again is the relaunch signal; the reader also keeps the log.
+        starts = queue.Queue()
+
+        def read_host_output():
+            with (out / 'host.log').open('w') as log:
+                for line in host.stdout:
+                    log.write(line)
+                    log.flush()
+                    if line.startswith('prismattyc-host: font '):
+                        starts.put(line)
+
+        threading.Thread(target=read_host_output, daemon=True).start()
         wait(lambda: window()['last_raster']['present_succeeded'], 'first frame')
         # The modal lists what a restart would stop, including any session
         # the daemon or the window started on its own.
@@ -289,6 +318,29 @@ def main():
         result['sessions_after_cancel'] = len(after)
         assert sorted(after) == sorted(planned), after
         record('Escape cancels and every session keeps running')
+        if args.restart_without_saving:
+            first = json.loads(cli('render-status', '--json'))['host_instance']
+            # Cancel left its result in the update panel. Escape closes it; the
+            # app handles keys in order, so the menu shortcut after it opens
+            # the menu instead of closing the panel.
+            keys.key('Escape')
+            starts.get(timeout=60)  # the first start's line, read before the restart
+            keys.key('y', ctrl=True, shift=True)
+            choose(keys, 'Update and restart all components')
+            dialog = wait(modal, 'restart dialog', timeout=120)
+            index = next(i for i, x in enumerate(dialog['rows']) if x.startswith('Restart without saving:'))
+            keys.key('Home')
+            for _ in range(index):
+                keys.key('Down')
+            keys.key('Return')
+            try:
+                result['relaunch_line'] = starts.get(timeout=args.timeout).strip()
+            except queue.Empty:
+                raise AssertionError(f'the app did not relaunch within {args.timeout} s') from None
+            result['after'] = json.loads(cli('versions'))
+            result['host_instance_before'] = first
+            record('Restart without saving finished and the app relaunched on daemon '
+                   + str(result['after'].get('daemon', {}).get('version')))
         result['status'] = 'PASS'
     except BaseException as error:
         result['error'] = f'{type(error).__name__}: {error}'
@@ -299,6 +351,16 @@ def main():
             result['last_window'] = f'unavailable: {detail}'
         raise
     finally:
+        # A relaunched app and a restarted daemon are new processes; look each
+        # up on its own so one failed lookup cannot skip the other.
+        for lookup in (lambda: json.loads(cli('render-status', '--json')).get('host_pid'),
+                       lambda: json.loads(cli('versions'))['daemon'].get('pid')):
+            try:
+                pid = lookup()
+                if pid:
+                    os.kill(pid, signal.SIGTERM)
+            except Exception as detail:
+                result.setdefault('cleanup_errors', []).append(str(detail))
         for process in reversed(owned):
             if process.poll() is None:
                 process.terminate()

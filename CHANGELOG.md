@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- On Windows, **Update and restart** no longer stays on the daemon restart step after the update installs: the new daemon kept a copy of the app's output pipe, so the app never saw the restart finish. The app now reads command output from private files, and `pmux` no longer hands its standard handles to the programs it starts unless they ask.
+
 ## [0.3.70] - 2026-11-19
 
 ### Added

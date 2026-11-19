@@ -91,7 +91,8 @@ Windows replacement-host path; the CLI fixture above does not provide one.
 ## Update progress meter
 
 `tests/native/update-progress-e2e.py` drives Update and restart in a real
-window and keeps every change of the meter lines (`meter.json`), every
+window, chooses Restart without saving in the Restart to update dialog, and
+keeps every change of the meter lines the dialog shows (`meter.json`), every
 presented frame (`frames/` with `frames.jsonl`), and `result.json`. It runs a
 real update to the newest public release, so use a disposable machine only.
 
@@ -100,8 +101,11 @@ real update to the newest public release, so use a disposable machine only.
   than the newest release; a proof build may lower the workspace version and
   must say so.
 - On macOS the updater replaces the installed `Prismattyc.app`, which must be
-  older than the newest release; the host runs from `--bins`. Native keys need
-  Accessibility permission for the Python that runs the fixture.
+  older than the newest release. Put the branch binaries (built as that older
+  version) inside the installed app's `Contents/MacOS` and pass that folder as
+  `--bins`, so the app updates itself as a user's would; run from elsewhere,
+  the version check after install finds the wrong `pmux`. A guest without
+  Accessibility takes keys through `--key-relay DIR` from the VM console.
 - On Linux, `--fail-download NAME` cuts the download of one component's
   release file short. Require `Failed at step 1 of 4: Download`, the
   component's download line, its download error and `Check again` in

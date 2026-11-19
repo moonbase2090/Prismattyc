@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Update and restart** shows the update's progress in the Restart to update dialog: bytes downloaded of the whole release, each component as it is verified, the install step, and each component as it restarts, with what happens to your sessions. If the update fails, the dialog keeps the failed step and its error and offers **Check again** or **Close**. `pmux update --progress` reports the same stages on stderr for other tools.
+
 ### Fixed
 
 - On Windows, **Update and restart** no longer stays on the daemon restart step after the update installs: the new daemon kept a copy of the app's output pipe, so the app never saw the restart finish. The app now reads command output from private files, and `pmux` no longer hands its standard handles to the programs it starts unless they ask.

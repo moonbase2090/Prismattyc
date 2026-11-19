@@ -2647,9 +2647,8 @@ mod windows_update {
             .join(state.current)
             .join(crate::platform::executable_name(binary));
         complete(target.parent().context("version directory")?)?;
-        let status = Command::new(target)
-            .args(std::env::args_os().skip(1))
-            .status()?;
+        let status =
+            prismattyc_process::status(Command::new(target).args(std::env::args_os().skip(1)))?;
         std::process::exit(status.code().unwrap_or(1));
     }
 }

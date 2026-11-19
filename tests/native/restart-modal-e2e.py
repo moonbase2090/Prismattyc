@@ -320,10 +320,10 @@ def main():
         record('Escape cancels and every session keeps running')
         if args.restart_without_saving:
             first = json.loads(cli('render-status', '--json'))['host_instance']
-            # Cancel left the result in the update panel; close it first.
-            if window().get('space_details'):
-                keys.key('Escape')
-                wait(lambda: not window().get('space_details'), 'update panel closed')
+            # Cancel left its result in the update panel. Escape closes it; the
+            # app handles keys in order, so the menu shortcut after it opens
+            # the menu instead of closing the panel.
+            keys.key('Escape')
             starts.get(timeout=60)  # the first start's line, read before the restart
             keys.key('y', ctrl=True, shift=True)
             choose(keys, 'Update and restart all components')

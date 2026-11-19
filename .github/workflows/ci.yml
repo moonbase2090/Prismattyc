@@ -120,6 +120,7 @@ jobs:
       - name: Check process launch behavior and bypass controls
         run: |
           rustup component add clippy
+          cargo fetch --locked
           python scripts/check-process-boundary_test.py
           cargo test -p prismattyc-process --locked
 

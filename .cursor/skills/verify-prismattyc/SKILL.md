@@ -86,6 +86,7 @@ scripts/fetch-with-time-limit_test.sh` checks it.
 For changes to child launch, replacement, or native descriptor acquisition, run:
 
 ```sh
+cargo fetch --locked
 python3 scripts/check-process-boundary_test.py
 python3 scripts/check-process-boundary.py
 cargo +1.90.0 test -p prismattyc-process --locked

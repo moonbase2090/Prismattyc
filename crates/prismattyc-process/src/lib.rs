@@ -1,4 +1,9 @@
 // SPDX-License-Identifier: MIT
+//! Shared child-launch and descriptor acquisition boundary.
+//!
+//! A poisoned Darwin gate fails closed for every launch through this crate,
+//! including application update and restart. Recover by restarting the host
+//! process rather than continuing after an uncertain descriptor window.
 
 use std::ffi::OsStr;
 use std::io;

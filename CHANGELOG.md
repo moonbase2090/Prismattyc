@@ -2,10 +2,22 @@
 
 ## [Unreleased]
 
+## [0.3.70] - 2026-11-19
+
 ### Added
 
 - **Update and restart** asks in a new **Restart to update** dialog that names the installed and new versions and offers **Save and restart**, **Restart without saving** and **Cancel**, each with a one-line note. The running sessions are counted in the footer and listed only after **Show**; **Hide** folds them again, by keyboard or mouse. It replaces the long session list above the choices.
 - In the activity monitor's seat details, `Enter`, `Space` or a click expands the selected line in place so its full command or file name wraps onto the rows below, with the age, result and timing columns unchanged. `e` expands or collapses every line. It is on by default and uses the same already-redacted text as the collapsed line. `↑`/`↓` now move the selected line, and the list scrolls to keep it visible. The Activity Monitor package is now 1.3.5.
+- Pasted text in a Hermes pane is sent as a bracketed paste and submitted with a separate Enter after the pane's rapid-input guard. A quoted launcher path identifies the pane, and that launcher wins over a later model or prompt name.
+
+### Fixed
+
+- This release embeds official plug-in catalog 1.3.5, which adds activity-monitor 1.3.5 and keeps the earlier packages.
+- Updated Wasmtime to 36.0.21 for the November advisories.
+
+## [0.3.70-rc.1]
+
+Release candidate for 0.3.70, with the [same changes](#0370---2026-11-19).
 
 ## [0.3.69] - 2026-11-18
 

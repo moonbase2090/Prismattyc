@@ -158,12 +158,17 @@ fn blocking_stderr(stderr: &[u8], paths: &[std::path::PathBuf]) -> Option<String
     use std::os::unix::ffi::OsStrExt;
     const WARNING: &[u8] = b"lsof: WARNING: can't stat() ";
     const MARKER: &[u8] = b" file system ";
+    // The continuation lines only qualify the warning just above them; on
+    // their own they say nothing about which mount was skipped.
+    let mut after_unrelated_warning = false;
     for line in stderr.split(|&b| b == b'\n') {
         let text = line.trim_ascii();
-        if text.is_empty()
-            || text == b"Output information may be incomplete."
-            || (text.starts_with(b"assuming \"dev=") && text.ends_with(b"\" from mount table"))
-        {
+        if text.is_empty() {
+            continue;
+        }
+        let continuation = text == b"Output information may be incomplete."
+            || (text.starts_with(b"assuming \"dev=") && text.ends_with(b"\" from mount table"));
+        if continuation && after_unrelated_warning {
             continue;
         }
         let mount = line.strip_prefix(WARNING).and_then(|rest| {
@@ -174,7 +179,10 @@ fn blocking_stderr(stderr: &[u8], paths: &[std::path::PathBuf]) -> Option<String
             Some(mount)
                 if !paths
                     .iter()
-                    .any(|path| path.starts_with(std::ffi::OsStr::from_bytes(mount))) => {}
+                    .any(|path| path.starts_with(std::ffi::OsStr::from_bytes(mount))) =>
+            {
+                after_unrelated_warning = true;
+            }
             _ => return Some(String::from_utf8_lossy(text).into_owned()),
         }
     }
@@ -227,6 +235,37 @@ mod lsof_tests {
     fn an_exit_status_other_than_0_or_1_fails_even_with_only_warnings() {
         assert!(interpret_lsof(Some(2), b"", SNAPSHOT_WARNING, &app()).is_err());
         assert!(interpret_lsof(None, b"", b"", &app()).is_err());
+    }
+
+    #[test]
+    fn a_standalone_incomplete_output_line_fails() {
+        let err = interpret_lsof(
+            Some(1),
+            b"",
+            b"      Output information may be incomplete.\n",
+            &app(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("incomplete"), "{err}");
+    }
+
+    #[test]
+    fn a_standalone_assumed_device_line_fails() {
+        let stderr = b"      assuming \"dev=3200000d\" from mount table\n";
+        assert!(interpret_lsof(Some(1), b"", stderr, &app()).is_err());
+    }
+
+    #[test]
+    fn a_continuation_line_after_a_blocking_line_fails() {
+        let stderr = b"lsof: status error on /Applications/Demo.app: Permission denied\n      Output information may be incomplete.\n";
+        let err = interpret_lsof(Some(1), b"", stderr, &app()).unwrap_err();
+        assert!(err.to_string().contains("Permission denied"), "{err}");
+    }
+
+    #[test]
+    fn a_continuation_line_after_a_warning_for_the_requested_mount_fails() {
+        let stderr = b"lsof: WARNING: can't stat() apfs file system /Applications\n      Output information may be incomplete.\n";
+        assert!(interpret_lsof(Some(1), b"", stderr, &app()).is_err());
     }
 
     #[test]

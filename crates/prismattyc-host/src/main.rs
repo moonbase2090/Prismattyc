@@ -69,6 +69,7 @@ mod remote_rail;
 mod render_diagnostics;
 mod restart;
 mod restart_modal;
+mod restart_modal_lunatui;
 #[cfg(target_os = "macos")]
 mod safe_restart;
 mod sidebar_resize;

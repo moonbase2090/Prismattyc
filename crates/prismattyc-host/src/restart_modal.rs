@@ -2,7 +2,7 @@
 //! The Update and restart confirmation: a modal with the version change, the
 //! three choices, and the running sessions folded behind Show and Hide.
 use super::*;
-use graphite::{Face, Rect};
+use graphite::Rect;
 
 /// The choices, their hints, and what each one does.
 const OPTIONS: [(&str, &str, update_flow::Action); 3] = [
@@ -252,303 +252,58 @@ pub(super) fn hover_button(host: &HostState) -> Option<usize> {
     modal.hit(x as usize, y as usize)
 }
 
-/// Split `text` into lines no wider than `max` pixels.
-fn wrap(face: Face, px: f32, text: &str, max: f32) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut line = String::new();
-    for word in text.split_whitespace() {
-        let candidate = if line.is_empty() {
-            word.to_string()
-        } else {
-            format!("{line} {word}")
-        };
-        if !line.is_empty() && graphite::text_width(face, px, &candidate) > max {
-            lines.push(std::mem::replace(&mut line, word.to_string()));
-        } else {
-            line = candidate;
-        }
-    }
-    if !line.is_empty() {
-        lines.push(line);
-    }
-    lines
-}
-
-/// Lay names out left to right with `gap` pixels between them, wrapping at
-/// `max`. Returns each line's names with their x offsets.
-fn flow(face: Face, px: f32, names: &[String], gap: f32, max: f32) -> Vec<Vec<(f32, String)>> {
-    let mut lines: Vec<Vec<(f32, String)>> = vec![];
-    let mut x = 0.0;
-    for name in names {
-        let w = graphite::text_width(face, px, name);
-        if lines.is_empty() || (x > 0.0 && x + w > max) {
-            lines.push(vec![]);
-            x = 0.0;
-        }
-        lines.last_mut().unwrap().push((x, name.clone()));
-        x += w + gap;
-    }
-    lines
-}
-
-#[allow(clippy::too_many_arguments)]
-fn text(
-    buffer: &mut [u32],
-    stride: usize,
-    x: usize,
-    center_y: usize,
-    face: Face,
-    px: f32,
-    value: &str,
-    color: [u8; 3],
-    clip: (usize, usize),
-) {
-    graphite::draw_text(
-        buffer,
-        stride,
-        x as f32,
-        center_y as f32,
-        face,
-        px,
-        value,
-        color,
-        clip.0,
-        clip.1,
-    );
-}
-
+/// Draw the dialog: lunatui widgets render it into a cell grid (see
+/// [`restart_modal_lunatui`]) and the grid is painted centred over the window.
 pub(super) fn paint(host: &mut HostState, buffer: &mut [u32], width: usize, height: usize) {
     if host.restart_modal.is_none() {
         return;
     }
-    let chrome = host.mux.geom().chrome;
     let tok = graphite::theme_tokens(&host.theme);
-    let accent = graphite::accent(&tok, focus_border_rgb(host.focus_border));
-    let surface = host_overlay_surface(host);
-    let modal = host.restart_modal.as_mut().unwrap();
-    let s = |v: f32| chrome.px(v).max(1);
-    let title_px = s(18.0) as f32;
-    let body_px = s(13.5) as f32;
-    let label_px = s(14.0) as f32;
-    let small_px = s(12.0) as f32;
-    let pad = s(24.0);
-    let margin = s(16.0);
-    let panel_w = width
-        .saturating_sub(2 * margin)
-        .min(s(740.0))
-        .max(s(320.0).min(width));
-    let content_w = panel_w.saturating_sub(2 * pad);
-    let line_h = s(22.0);
-    let row_h = s(40.0);
-    let explanation = wrap(Face::Regular, body_px, EXPLANATION, content_w as f32);
-    let names = if modal.expanded {
-        flow(
-            Face::Mono,
-            body_px,
-            &modal.sessions,
-            s(14.0) as f32,
-            content_w as f32,
-        )
-    } else {
-        vec![]
+    let palette = restart_modal_lunatui::Palette {
+        panel: tok.bar,
+        border: tok.hairline,
+        text: tok.text,
+        strong: tok.text_strong,
+        muted: tok.muted,
+        accent: graphite::accent(&tok, focus_border_rgb(host.focus_border)),
+        selected: tok.tab_hover,
     };
-    // Title, explanation, divider, options, divider, footer, names, key hints.
-    let top_h = pad + s(26.0) + s(8.0) + explanation.len() * line_h + pad;
-    let options_h = s(8.0) + OPTIONS.len() * (row_h + s(2.0)) + s(8.0);
-    let mut footer_h = pad + line_h;
-    if !names.is_empty() {
-        footer_h += s(8.0) + names.len() * line_h;
-    }
-    footer_h += s(14.0) + line_h + s(16.0);
-    let panel_h = (top_h + options_h + footer_h).min(height.saturating_sub(2 * margin));
-    let x = width.saturating_sub(panel_w) / 2;
-    let y = height.saturating_sub(panel_h) / 2;
-    let right = x + panel_w;
-    let bottom = y + panel_h;
-    let clip = (x + pad, right.saturating_sub(pad));
-    graphite_overlays::modal_panel(
-        buffer,
-        width,
-        Rect::new(x, y, panel_w, panel_h),
-        &tok,
-        surface,
-    );
-
-    let mut cy = y + pad + s(13.0);
-    text(
-        buffer,
-        width,
-        x + pad,
-        cy,
-        Face::SemiBold,
-        title_px,
-        modal.title(),
-        tok.text_strong,
-        clip,
-    );
-    let title_w = graphite::text_width(Face::SemiBold, title_px, modal.title()).ceil() as usize;
-    text(
-        buffer,
-        width,
-        x + pad + title_w + s(14.0),
-        cy,
-        Face::Mono,
-        body_px,
-        &modal.version(),
-        tok.muted,
-        clip,
-    );
-    cy += s(13.0) + s(8.0) + line_h / 2;
-    for line in &explanation {
-        text(
-            buffer,
-            width,
-            x + pad,
-            cy,
-            Face::Regular,
-            body_px,
-            line,
-            tok.muted,
-            clip,
-        );
-        cy += line_h;
-    }
-    let mut ry = y + top_h;
-    graphite::fill_round_rect(
-        buffer,
-        width,
-        Rect::new(x + 1, ry, panel_w.saturating_sub(2), 1),
-        0.0,
-        tok.hairline,
-        255,
-    );
-    ry += s(8.0);
+    let (cw, ch) = (host.font.cell_w.max(1), host.font.cell_h.max(1));
+    let columns = u16::try_from((width / cw).saturating_sub(4).min(84)).unwrap_or(84);
+    let modal = host.restart_modal.as_mut().unwrap();
+    let options: Vec<(&str, &str)> = OPTIONS
+        .iter()
+        .map(|(label, hint, _)| (*label, *hint))
+        .collect();
+    let version = modal.version();
+    let summary = modal.summary();
+    let view = restart_modal_lunatui::View {
+        title: modal.title(),
+        version: &version,
+        explanation: EXPLANATION,
+        options: &options,
+        selected: modal.selected,
+        summary: &summary,
+        toggle: modal.toggle_label(),
+        expanded: modal.expanded,
+        sessions: &modal.sessions,
+        keys: KEYS,
+    };
+    let layout = restart_modal_lunatui::layout(&view, columns, palette);
+    let grid_w = usize::from(layout.grid.width()) * cw;
+    let grid_h = usize::from(layout.grid.height()) * ch;
+    let x = width.saturating_sub(grid_w) / 2;
+    let y = height.saturating_sub(grid_h) / 2;
+    restart_modal_lunatui::paint(&layout, buffer, width, x, y, &host.font, palette);
+    let rect = |cells| {
+        let [x, y, w, h] = restart_modal_lunatui::pixels(cells, x, y, (cw, ch));
+        Rect::new(x, y, w, h)
+    };
     let mut hits = Hits::default();
-    for (index, (label, hint, _)) in OPTIONS.iter().enumerate() {
-        let row = Rect::new(x + s(8.0), ry, panel_w.saturating_sub(s(16.0)), row_h);
-        if ry + row_h > bottom {
-            break;
-        }
-        if modal.selected == index {
-            graphite::fill_round_rect(buffer, width, row, s(6.0) as f32, tok.tab_hover, 255);
-            graphite::fill_round_rect(
-                buffer,
-                width,
-                Rect::new(row.x, row.y, s(3.0), row.h),
-                s(2.0) as f32,
-                accent,
-                255,
-            );
-        }
-        let mid = row.y + row.h / 2;
-        text(
-            buffer,
-            width,
-            x + pad,
-            mid,
-            Face::Regular,
-            label_px,
-            label,
-            tok.text_strong,
-            clip,
-        );
-        let hint_w = graphite::text_width(Face::Regular, body_px, hint).ceil() as usize;
-        text(
-            buffer,
-            width,
-            right.saturating_sub(pad + hint_w),
-            mid,
-            Face::Regular,
-            body_px,
-            hint,
-            tok.muted,
-            clip,
-        );
-        hits.options[index] = Some(row);
-        ry += row_h + s(2.0);
+    for (index, cells) in layout.options.iter().enumerate().take(3) {
+        hits.options[index] = Some(rect(*cells));
     }
-    let fy = y + top_h + options_h;
-    if fy < bottom {
-        graphite::fill_round_rect(
-            buffer,
-            width,
-            Rect::new(x + 1, fy, panel_w.saturating_sub(2), 1),
-            0.0,
-            tok.hairline,
-            255,
-        );
-    }
-    let mut cy = fy + pad + line_h / 2 - s(6.0);
-    if cy < bottom {
-        text(
-            buffer,
-            width,
-            x + pad,
-            cy,
-            Face::Regular,
-            body_px,
-            &modal.summary(),
-            tok.muted,
-            clip,
-        );
-    }
-    if let Some(label) = modal.toggle_label() {
-        let w = graphite::text_width(Face::Regular, body_px, label).ceil() as usize;
-        let lx = right.saturating_sub(pad + w);
-        let link = Rect::new(
-            lx.saturating_sub(s(6.0)),
-            cy.saturating_sub(line_h / 2),
-            w + s(12.0),
-            line_h,
-        );
-        if modal.selected == TOGGLE {
-            graphite::fill_round_rect(buffer, width, link, s(5.0) as f32, tok.tab_hover, 255);
-        }
-        text(
-            buffer,
-            width,
-            lx,
-            cy,
-            Face::Regular,
-            body_px,
-            label,
-            accent,
-            (clip.0, right),
-        );
-        hits.toggle = Some(link);
-    }
-    cy += s(8.0);
-    for line in &names {
-        cy += line_h;
-        if cy + line_h / 2 > bottom.saturating_sub(s(30.0)) {
-            break;
-        }
-        for (offset, name) in line {
-            text(
-                buffer,
-                width,
-                x + pad + *offset as usize,
-                cy,
-                Face::Mono,
-                body_px,
-                name,
-                tok.text,
-                clip,
-            );
-        }
-    }
-    let ky = bottom.saturating_sub(s(16.0) + line_h / 2);
-    text(
-        buffer,
-        width,
-        x + pad,
-        ky,
-        Face::Regular,
-        small_px,
-        KEYS,
-        tok.muted,
-        clip,
-    );
+    hits.toggle = layout.toggle.map(rect);
     modal.hits = hits;
 }
 
@@ -650,27 +405,5 @@ mod tests {
         assert_eq!(m.hit(5, 5), None);
         m.activate(TOGGLE);
         assert!(m.expanded, "a click on Show expands the list");
-    }
-
-    #[test]
-    fn long_text_wraps_and_names_flow_across_lines() {
-        let lines = wrap(Face::Regular, 13.0, EXPLANATION, 300.0);
-        assert!(lines.len() > 1);
-        assert!(lines
-            .iter()
-            .all(|line| graphite::text_width(Face::Regular, 13.0, line) <= 300.0));
-        assert_eq!(lines.join(" "), EXPLANATION);
-        let names: Vec<String> = (0..40).map(|i| format!("lunatui-{i}")).collect();
-        let rows = flow(Face::Mono, 13.0, &names, 14.0, 400.0);
-        assert!(rows.len() > 1);
-        assert_eq!(
-            rows.iter().map(Vec::len).sum::<usize>(),
-            40,
-            "every name shown"
-        );
-        for row in &rows {
-            let (x, name) = row.last().unwrap();
-            assert!(x + graphite::text_width(Face::Mono, 13.0, name) <= 400.0);
-        }
     }
 }

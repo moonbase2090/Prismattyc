@@ -4949,6 +4949,33 @@ fn draw_ray(
     }
 }
 
+/// Fill one cell-sized rectangle, for overlays drawn from a cell grid.
+pub(crate) fn fill_cell_rect(
+    buffer: &mut [u32],
+    stride: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    rgb: [u8; 3],
+) {
+    fill_rect(buffer, stride, x, y, w, h, rgb);
+}
+
+/// Draw one cell's text with the terminal font, for overlays drawn from a cell grid.
+pub(crate) fn draw_cell_text(
+    buffer: &mut [u32],
+    stride: usize,
+    font: &FontMetrics,
+    text: &str,
+    x: usize,
+    y: usize,
+    rgb: [u8; 3],
+) {
+    let right = x.saturating_add(font.cell_w.saturating_mul(text_cells(text).max(1)));
+    draw_theme_text(buffer, stride, font, text, x, y, rgb, right);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_theme_text(
     buffer: &mut [u32],

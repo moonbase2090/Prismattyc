@@ -25,6 +25,9 @@ fontdue = "0.9"
 memmap2 = "0.9"
 graphite-core = { git = "https://github.com/moonbase2090/graphite", rev = "2a59b055c72fe1a91379ffc0f071c85f5d81a284", features = ["motion"] }
 portable-pty.workspace = true
+lunatui-core.workspace = true
+lunatui-theme.workspace = true
+lunatui-widgets = { workspace = true, features = ["accordion"] }
 prismattyc-core = { path = "../prismattyc-core" }
 prismattyc-emulator = { path = "../prismattyc-emulator" }
 prismattyc-mux = { path = "../prismattyc-mux" }

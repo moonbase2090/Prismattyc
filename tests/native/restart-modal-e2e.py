@@ -22,6 +22,7 @@ import argparse
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -140,9 +141,20 @@ def main():
     parser.add_argument('--key-relay', type=Path)
     parser.add_argument('--keyboard-only', action='store_true',
                         help='skip the mouse checks (an input relay that has no pointer mapping)')
+    parser.add_argument('--restart-without-saving', action='store_true',
+                        help='after the checks, choose Restart without saving and wait for the app to relaunch '
+                             '(disposable machines only: it updates or restarts every component)')
+    parser.add_argument('--timeout', type=int, default=600)
     args = parser.parse_args()
     bins, out = args.bins.resolve(), args.out.resolve()
     out.mkdir(parents=True, exist_ok=False)
+    if args.restart_without_saving and sys.platform != 'darwin':
+        # The updater refuses to replace a build tree; run from an installed copy.
+        install = out / 'install' / 'bin'
+        install.mkdir(parents=True)
+        for name in ('pmux', 'pmuxd', 'pmux-attach', 'pmux-mcp', 'prismattyc', 'prismattyc-host'):
+            shutil.copy2(bins / (name + EXE), install / (name + EXE))
+        bins = install
     for name in ('home', 'config', 'data', 'state', 'project'):
         (out / name).mkdir()
     runtime = Path(tempfile.mkdtemp(prefix='pmodal-'))
@@ -289,6 +301,27 @@ def main():
         result['sessions_after_cancel'] = len(after)
         assert sorted(after) == sorted(planned), after
         record('Escape cancels and every session keeps running')
+        if args.restart_without_saving:
+            first = json.loads(cli('render-status', '--json'))['host_instance']
+            # Cancel left the result in the update panel; close it first.
+            for _ in range(3):
+                if not window().get('space_details'):
+                    break
+                keys.key('Escape')
+                time.sleep(.3)
+            keys.key('y', ctrl=True, shift=True)
+            choose(keys, 'Update and restart all components')
+            dialog = wait(modal, 'restart dialog', timeout=120)
+            index = next(i for i, x in enumerate(dialog['rows']) if x.startswith('Restart without saving:'))
+            keys.key('Home')
+            for _ in range(index):
+                keys.key('Down')
+            keys.key('Return')
+            wait(lambda: json.loads(cli('render-status', '--json'))['host_instance'] != first,
+                 'relaunched app', timeout=args.timeout)
+            result['after'] = json.loads(cli('versions'))
+            record('Restart without saving finished and the app relaunched on daemon '
+                   + str(result['after'].get('daemon', {}).get('version')))
         result['status'] = 'PASS'
     except BaseException as error:
         result['error'] = f'{type(error).__name__}: {error}'
@@ -299,6 +332,14 @@ def main():
             result['last_window'] = f'unavailable: {detail}'
         raise
     finally:
+        try:
+            # A relaunched app and a restarted daemon are new processes.
+            for pid in {json.loads(cli('render-status', '--json')).get('host_pid'),
+                        json.loads(cli('versions'))['daemon'].get('pid')}:
+                if pid:
+                    os.kill(pid, signal.SIGTERM)
+        except Exception:
+            pass
         for process in reversed(owned):
             if process.poll() is None:
                 process.terminate()

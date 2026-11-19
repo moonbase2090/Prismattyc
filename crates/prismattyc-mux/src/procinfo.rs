@@ -392,7 +392,7 @@ fn resume_hermes_args(args: Vec<String>, prefix: usize) -> Vec<String> {
         Named(String),
         Id(String),
     }
-    let mut session = Session::Latest;
+    let mut session = None;
     let mut options = Vec::new();
     let mut chat = false;
     let mut index = prefix;
@@ -415,6 +415,11 @@ fn resume_hermes_args(args: Vec<String>, prefix: usize) -> Vec<String> {
             "-q" | "--query" | "--query-file" | "-z" | "--image" | "--usage-file" | "--format"
         ) || (flag == "--oneshot" && !chat)
         {
+            if matches!(flag, "-q" | "--query" | "--query-file" | "-z")
+                || (flag == "--oneshot" && !chat)
+            {
+                session.get_or_insert(Session::Latest);
+            }
             if inline.is_none() {
                 index += 1;
             }
@@ -434,9 +439,9 @@ fn resume_hermes_args(args: Vec<String>, prefix: usize) -> Vec<String> {
             });
             if matches!(flag, "--resume" | "-r") {
                 let Some(value) = value else { break };
-                session = Session::Id(value);
-            } else if !matches!(session, Session::Id(_)) {
-                session = value.map_or(Session::Latest, Session::Named);
+                session = Some(Session::Id(value));
+            } else if !matches!(session, Some(Session::Id(_))) {
+                session = Some(value.map_or(Session::Latest, Session::Named));
             }
         } else if matches!(flag, "--help" | "-h" | "--version" | "-V") {
             return args;
@@ -506,9 +511,10 @@ fn resume_hermes_args(args: Vec<String>, prefix: usize) -> Vec<String> {
     let mut restored = args[..prefix].to_vec();
     restored.push("chat".into());
     match session {
-        Session::Latest => restored.push("--continue".into()),
-        Session::Named(name) => restored.push(format!("--continue={name}")),
-        Session::Id(id) => restored.push(format!("--resume={id}")),
+        Some(Session::Latest) => restored.push("--continue".into()),
+        Some(Session::Named(name)) => restored.push(format!("--continue={name}")),
+        Some(Session::Id(id)) => restored.push(format!("--resume={id}")),
+        None => {}
     }
     restored.extend(options);
     restored
@@ -1911,7 +1917,7 @@ mod tests {
         );
         assert_eq!(
             resume_args(args(&["hermes", "--profile", "demo", "chat"])),
-            args(&["hermes", "chat", "--continue", "--profile", "demo"])
+            args(&["hermes", "chat", "--profile", "demo"])
         );
         // Anything else is saved as it ran.
         assert_eq!(resume_args(args(&["sleep", "30"])), args(&["sleep", "30"]));
@@ -1967,6 +1973,15 @@ mod tests {
             assert_eq!(saved, expected);
             assert_eq!(resume_args(saved), expected);
         }
+    }
+
+    #[test]
+    fn hermes_resume_keeps_a_profile_without_history_interactive() {
+        let input = ["hermes", "--profile", "empty"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(resume_args(input), ["hermes", "chat", "--profile", "empty"]);
     }
 
     #[test]
@@ -2153,11 +2168,11 @@ mod tests {
                 "-q",
                 "task"
             ])),
-            args(&["hermes", "chat", "--continue", "--model", "one"])
+            args(&["hermes", "chat", "--model", "one"])
         );
         assert_eq!(
             resume_args(args(&["hermes", "chat", "--", "-q", "task"])),
-            args(&["hermes", "chat", "--continue"])
+            args(&["hermes", "chat"])
         );
     }
 

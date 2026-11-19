@@ -1,0 +1,9 @@
+Two app processes on one daemon, before choosing Update and restart all components (installed 0.3.69, running):
+
+Before: daemon 0.3.69
+  app process 706: 0.3.68
+  app process 744: 0.3.69
+
+After: daemon 0.3.69
+  app process 706: 0.3.69
+  app process 744: 0.3.69

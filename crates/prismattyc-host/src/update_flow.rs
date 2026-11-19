@@ -267,6 +267,23 @@ fn complete_install(
     let installed_versions: Value = serde_json::from_str(&run(&installed, &["versions"])?)?;
     verify_installed_versions(&installed_versions, &plan.available)?;
     require_same_sessions(plan, &installed)?;
+    // Every other open app process must restart too, or it keeps running the
+    // old release while this result reports success. They restart first, while
+    // their sessions still exist: a window whose sessions were already stopped
+    // cannot save its view and would defer.
+    let own = std::process::id();
+    let others_before: Value = serde_json::from_str(&run(&installed, &["versions"])?)?;
+    let others = other_host_pids(&others_before, own);
+    let host_restart = if others.is_empty() {
+        None
+    } else {
+        let own = own.to_string();
+        let args = ["restart", "--host", "--except-pid", own.as_str(), "--json"];
+        Some(
+            run(&installed, &args)
+                .context("The files are installed, but restarting the other app windows failed. No sessions were stopped")?,
+        )
+    };
     let consent = consent.to_string_lossy();
     let mut restart = vec![
         "restart".to_string(),
@@ -284,21 +301,6 @@ fn complete_install(
         .context("The files are installed, but the daemon restart failed")?;
     let mcp = run(&installed, &["restart", "--mcp", "--json"])
         .context("The daemon restarted, but the MCP restart failed")?;
-    // Every other open app process must restart too, or it keeps running the
-    // old release while this result reports success.
-    let own = std::process::id();
-    let others_before: Value = serde_json::from_str(&run(&installed, &["versions"])?)?;
-    let others = other_host_pids(&others_before, own);
-    let host_restart = if others.is_empty() {
-        None
-    } else {
-        let own = own.to_string();
-        let args = ["restart", "--host", "--except-pid", own.as_str(), "--json"];
-        Some(
-            run(&installed, &args)
-                .context("The daemon restarted, but restarting the other app windows failed")?,
-        )
-    };
     let mut versions: Value = serde_json::from_str(&run(&installed, &["versions"])?)?;
     verify_installed_versions(&versions, &plan.available)?;
     // This host is replaced next; do not present its old heartbeat as the

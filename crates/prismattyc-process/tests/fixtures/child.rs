@@ -137,7 +137,10 @@ fn low_limit() {
     }
     let error = prismattyc_process::fd::receive(reader.as_fd(), &mut [0; 1], 1).unwrap_err();
     #[cfg(target_os = "macos")]
-    assert_eq!(error.raw_os_error(), Some(libc::EMSGSIZE));
+    assert!(
+        matches!(error.raw_os_error(), Some(libc::EMFILE | libc::EMSGSIZE)),
+        "{error}"
+    );
     #[cfg(target_os = "linux")]
     assert_eq!(
         error

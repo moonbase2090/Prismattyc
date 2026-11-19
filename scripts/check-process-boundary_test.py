@@ -65,6 +65,9 @@ def main():
         raw = root / 'crates/raw/src'
         raw.mkdir(parents=True)
         source = raw / 'lib.rs'
+        source.write_bytes('// \u4f41\nfn ordinary() {}\n'.encode('utf-8'))
+        assert not guard.source_errors(root)
+        print('PASS UTF-8 source under platform text defaults', flush=True)
         for name, text in (
             ('raw-ffi', 'unsafe extern "C" { fn fork() -> i32; }'),
             ('renamed-ffi', 'unsafe extern "C" { #[link_name="fork"] fn launch() -> i32; }'),

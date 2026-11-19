@@ -25,7 +25,7 @@ def source_errors(root=ROOT):
             relative = path.relative_to(root)
             if 'target' in relative.parts:
                 continue
-            source = path.read_text()
+            source = path.read_text(encoding="utf-8")
             # Raw launch declarations are forbidden even behind inactive cfg.
             for match in RAW_LAUNCH.finditer(source):
                 errors.append(f'{relative}:{source.count(chr(10), 0, match.start()) + 1}: raw launch declaration; use prismattyc_process')

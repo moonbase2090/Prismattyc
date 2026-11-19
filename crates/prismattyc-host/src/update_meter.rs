@@ -5,6 +5,7 @@
 //! Verify and restart report "n of m" items, and the bar counts finished
 //! items. Installing has no measurable fraction, so its bar moves without a
 //! percentage instead of showing a made-up one.
+use crate::palette::MeterBar;
 use prismattyc_mux::release_update::progress::Progress;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -136,8 +137,22 @@ impl Meter {
         true
     }
 
-    /// The meter as panel lines, each at most `columns` cells wide.
-    pub(super) fn lines(&self, columns: usize) -> Vec<String> {
+    /// What happens to the user's sessions at this point.
+    pub(super) fn note(&self) -> &'static str {
+        if self.current() == Step::Restart {
+            "Stopping the running sessions and restarting each component."
+        } else {
+            "Your sessions keep running until the restart step."
+        }
+    }
+
+    /// The heading and the step's item, without byte counts.
+    pub(super) fn step_line(&self) -> String {
+        format!("{} | {}", self.lines()[0], self.detail)
+    }
+
+    /// The heading and the current step's detail, as panel lines.
+    pub(super) fn lines(&self) -> Vec<String> {
         let heading = format!(
             "{} {} of {}: {}",
             if self.failed {
@@ -158,12 +173,12 @@ impl Meter {
             ),
             _ => self.detail.clone(),
         };
-        vec![heading, detail, self.bar(columns)]
+        vec![heading, detail]
     }
 
-    fn bar(&self, columns: usize) -> String {
-        // "[" + cells + "]" + " 100%" fits in the panel width.
-        let width = columns.saturating_sub(7).max(4);
+    /// The bar and the text beside it: a percentage when the step has a
+    /// fraction, nothing when it does not.
+    pub(super) fn bar(&self) -> (MeterBar, String) {
         let fraction = match self.amount {
             Amount::Bytes { received, total } if total > 0 => {
                 Some(received.min(total) as f64 / total as f64)
@@ -175,32 +190,11 @@ impl Meter {
             _ => None,
         };
         match fraction {
-            Some(fraction) => {
-                let filled = ((fraction * width as f64).floor() as usize).min(width);
-                format!(
-                    "[{}{}] {:>3}%",
-                    "█".repeat(filled),
-                    "░".repeat(width - filled),
-                    (fraction * 100.0).floor() as usize
-                )
-            }
-            None => {
-                let block = (width / 5).max(2).min(width);
-                let span = width - block + 1;
-                // Sweep right, then back, so the block never jumps.
-                let position = self.frame % (2 * span.max(1));
-                let start = if position < span {
-                    position
-                } else {
-                    2 * span - 1 - position
-                };
-                format!(
-                    "[{}{}{}]",
-                    "░".repeat(start),
-                    "▓".repeat(block),
-                    "░".repeat(width - block - start)
-                )
-            }
+            Some(fraction) => (
+                MeterBar::Fraction((fraction * 1000.0).floor() as u16),
+                format!("{}%", (fraction * 100.0).floor() as usize),
+            ),
+            None => (MeterBar::Moving(self.frame), String::new()),
         }
     }
 }
@@ -208,10 +202,6 @@ impl Meter {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn cells(text: &str) -> usize {
-        text.chars().count()
-    }
 
     #[test]
     fn download_shows_bytes_of_the_total_and_a_matching_bar() {
@@ -221,14 +211,11 @@ mod tests {
             received: 5 * 1024 * 1024,
             total: 20 * 1024 * 1024,
         });
-        let lines = meter.lines(47);
-        assert_eq!(lines[0], "Step 1 of 4: Download");
-        assert_eq!(lines[1], "Downloading pmuxd: 5.0 of 20.0 MB");
         assert_eq!(
-            lines[2],
-            format!("[{}{}]  25%", "█".repeat(10), "░".repeat(30))
+            meter.lines(),
+            ["Step 1 of 4: Download", "Downloading pmuxd: 5.0 of 20.0 MB"]
         );
-        assert_eq!(cells(&lines[2]), 47);
+        assert_eq!(meter.bar(), (MeterBar::Fraction(250), "25%".into()));
     }
 
     #[test]
@@ -239,13 +226,11 @@ mod tests {
             index: 3,
             count: 4,
         });
-        let lines = meter.lines(27);
-        assert_eq!(lines[0], "Step 2 of 4: Verify");
-        assert_eq!(lines[1], "Verifying 3 of 4: pmux-attach");
         assert_eq!(
-            lines[2],
-            format!("[{}{}]  50%", "█".repeat(10), "░".repeat(10))
+            meter.lines(),
+            ["Step 2 of 4: Verify", "Verifying 3 of 4: pmux-attach"]
         );
+        assert_eq!(meter.bar(), (MeterBar::Fraction(500), "50%".into()));
     }
 
     #[test]
@@ -254,37 +239,26 @@ mod tests {
         meter.apply(&Progress::Install {
             item: "core binaries".into(),
         });
-        let first = meter.lines(27);
-        assert_eq!(first[0], "Step 3 of 4: Install");
-        assert_eq!(first[1], "Installing core binaries");
-        assert!(!first[2].contains('%'), "{}", first[2]);
-        assert!(first[2].contains('▓'), "{}", first[2]);
+        assert_eq!(
+            meter.lines(),
+            ["Step 3 of 4: Install", "Installing core binaries"]
+        );
+        let (first, label) = meter.bar();
+        assert_eq!(label, "", "no made-up percentage");
+        assert!(matches!(first, MeterBar::Moving(_)));
         assert!(meter.tick());
-        let second = meter.lines(27);
-        assert_ne!(first[2], second[2], "the bar moves on each tick");
-        assert_eq!(cells(&first[2]), cells(&second[2]));
-    }
-
-    #[test]
-    fn the_moving_bar_stays_inside_its_track() {
-        let mut meter = Meter::new(true);
-        meter.apply(&Progress::Install { item: "x".into() });
-        for _ in 0..200 {
-            let bar = &meter.lines(20)[2];
-            assert_eq!(cells(bar), 15, "{bar}");
-            assert_eq!(bar.matches('▓').count(), 2, "{bar}");
-            meter.tick();
-        }
+        assert_ne!(meter.bar().0, first, "the bar moves on each tick");
     }
 
     #[test]
     fn restart_only_has_a_single_step() {
         let mut meter = Meter::new(false);
         meter.restart(2, 3, "MCP adapter");
-        let lines = meter.lines(27);
-        assert_eq!(lines[0], "Step 1 of 1: Restart");
-        assert_eq!(lines[1], "Restarting 2 of 3: MCP adapter");
-        assert!(lines[2].ends_with(" 33%"), "{}", lines[2]);
+        assert_eq!(
+            meter.lines(),
+            ["Step 1 of 1: Restart", "Restarting 2 of 3: MCP adapter"]
+        );
+        assert_eq!(meter.bar(), (MeterBar::Fraction(333), "33%".into()));
     }
 
     #[test]
@@ -299,9 +273,49 @@ mod tests {
         meter.apply(&Progress::Install { item: "x".into() });
         meter.restart(1, 3, "daemon");
         assert!(!meter.tick());
-        let lines = meter.lines(27);
-        assert_eq!(lines[0], "Failed at step 2 of 4: Verify");
-        assert_eq!(lines[1], "Verifying 2 of 6: pmuxd");
+        assert_eq!(
+            meter.lines(),
+            ["Failed at step 2 of 4: Verify", "Verifying 2 of 6: pmuxd"]
+        );
+        assert_eq!(meter.bar(), (MeterBar::Fraction(166), "16%".into()));
+    }
+
+    #[test]
+    fn the_note_warns_when_sessions_stop() {
+        let mut meter = Meter::new(true);
+        assert_eq!(
+            meter.note(),
+            "Your sessions keep running until the restart step."
+        );
+        meter.restart(1, 3, "daemon and sessions");
+        assert_eq!(
+            meter.note(),
+            "Stopping the running sessions and restarting each component."
+        );
+    }
+
+    #[test]
+    fn the_step_line_changes_with_the_item_but_not_the_bytes() {
+        let mut meter = Meter::new(true);
+        let download = |received| Progress::Download {
+            item: "pmuxd".into(),
+            received,
+            total: 100,
+        };
+        meter.apply(&download(10));
+        let first = meter.step_line();
+        assert_eq!(first, "Step 1 of 4: Download | Downloading pmuxd");
+        meter.apply(&download(20));
+        assert_eq!(meter.step_line(), first);
+        meter.apply(&Progress::Verify {
+            item: "pmuxd".into(),
+            index: 1,
+            count: 6,
+        });
+        assert_eq!(
+            meter.step_line(),
+            "Step 2 of 4: Verify | Verifying 1 of 6: pmuxd"
+        );
     }
 
     #[test]
@@ -316,15 +330,13 @@ mod tests {
     }
 
     #[test]
-    fn narrow_panels_still_fit() {
+    fn a_full_download_reads_one_hundred_percent() {
         let mut meter = Meter::new(true);
         meter.apply(&Progress::Download {
             item: "pmux".into(),
-            received: 2,
+            received: 9,
             total: 2,
         });
-        let bar = &meter.lines(12)[2];
-        assert_eq!(bar, &format!("[{}] 100%", "█".repeat(5)));
-        assert!(cells(bar) <= 12);
+        assert_eq!(meter.bar(), (MeterBar::Fraction(1000), "100%".into()));
     }
 }

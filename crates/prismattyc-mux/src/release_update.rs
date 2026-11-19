@@ -1111,7 +1111,7 @@ fn is_help_flag(arg: &String) -> bool {
 }
 
 fn print_update_help() {
-    println!("pmux update [--check] [--json] [--pre] [--progress] [--bin-dir PATH]\nprismattyc update [--check] [--json] [--pre] [--progress] [--bin-dir PATH]\npmux update --rollback\npmux update --repair-monitor-launcher [--from-monitor-version VERSION] [--bin-dir PATH] [--check] [--json]\npmux update --source [--host|--mux|--all]\n\nDownload a complete stable release from {REPOSITORY} (0.2.0 onward).\n--pre includes immutable prereleases such as v0.3.0-rc.3. The default channel and the app menu stay on stable releases such as v0.3.0.\n--progress writes staged progress (download bytes, verify and install steps) to stderr as lines starting with \"pmux-progress \" followed by JSON.\nVerify immutable release metadata, asset sizes, and SHA-256 digests.\nOn Linux and Windows, stage all six binaries, then activate them together. --rollback restores that previous installation.\nOn macOS, verify SHA256SUMS-macos, Developer ID Team ID S24C53PD3Y, and Gatekeeper notarization. Keep the previous verified app for --rollback.\nThe explicit --repair-monitor-launcher operation verifies only the frontend matching the installed managed core, with a backup and independent receipt. --from-monitor-version establishes ownership of an unreceipted legacy frontend by its immutable official asset digest. --check verifies the plan without replacing the launcher, receipt, or backup. Core rollback remains a six-binary transaction. macOS uses normal app replacement.\nprismattyc update is the same command as pmux update.\nUpdating does not stop sessions. The app menu restarts the host and safely restarts the daemon when it has no active sessions.\n--source is an explicit development-only source build.");
+    println!("pmux update [--check] [--json] [--pre] [--progress] [--bin-dir PATH]\nprismattyc update [--check] [--json] [--pre] [--progress] [--bin-dir PATH]\npmux update --rollback\npmux update --repair-monitor-launcher [--from-monitor-version VERSION] [--bin-dir PATH] [--check] [--json]\npmux update --source [--host|--mux|--all]\n\nDownload a complete stable release from {REPOSITORY} (0.2.0 onward).\n--pre includes immutable prereleases such as v0.3.0-rc.3. The default channel and the app menu stay on stable releases such as v0.3.0.\n--progress writes staged progress (download bytes, verify and install steps) to stderr as lines starting with \"pmux-progress \" followed by JSON, in place of the human download lines.\nVerify immutable release metadata, asset sizes, and SHA-256 digests.\nOn Linux and Windows, stage all six binaries, then activate them together. --rollback restores that previous installation.\nOn macOS, verify SHA256SUMS-macos, Developer ID Team ID S24C53PD3Y, and Gatekeeper notarization. Keep the previous verified app for --rollback.\nThe explicit --repair-monitor-launcher operation verifies only the frontend matching the installed managed core, with a backup and independent receipt. --from-monitor-version establishes ownership of an unreceipted legacy frontend by its immutable official asset digest. --check verifies the plan without replacing the launcher, receipt, or backup. Core rollback remains a six-binary transaction. macOS uses normal app replacement.\nprismattyc update is the same command as pmux update.\nUpdating does not stop sessions. The app menu restarts the host and safely restarts the daemon when it has no active sessions.\n--source is an explicit development-only source build.");
 }
 
 /// Fetch the latest release, compare versions, and either report or install.
@@ -1411,7 +1411,7 @@ fn download_binary_set(staging: &Path, version: &Version, assets: &[&Asset]) -> 
     let total = assets.iter().map(|asset| asset.size).sum();
     let mut before = 0;
     for (binary, asset) in BINARIES.iter().zip(assets) {
-        eprintln!("Downloading {binary} {version}");
+        progress::say!("Downloading {binary} {version}");
         let path = staging.join(crate::platform::executable_name(binary));
         download_one_binary(
             &progress::Part {
@@ -2194,7 +2194,7 @@ fn download_macos_inputs(
     version: &Version,
 ) -> Result<PathBuf> {
     let total = checksums.size + zip.size + manifest.map_or(0, |asset| asset.size);
-    eprintln!("Downloading {MACOS_CHECKSUMS_NAME} {version}");
+    progress::say!("Downloading {MACOS_CHECKSUMS_NAME} {version}");
     download_asset(
         checksums,
         &progress::Part {
@@ -2204,7 +2204,7 @@ fn download_macos_inputs(
             total,
         },
     )?;
-    eprintln!("Downloading {} {version}", zip.name);
+    progress::say!("Downloading {} {version}", zip.name);
     let zip_path = staging.join(&zip.name);
     download_asset(
         zip,
@@ -2303,7 +2303,7 @@ fn download_macos_manifest(
     let Some(manifest) = manifest else {
         return Ok(());
     };
-    eprintln!("Downloading {MACOS_MANIFEST_NAME} {version}");
+    progress::say!("Downloading {MACOS_MANIFEST_NAME} {version}");
     download_asset(
         manifest,
         &progress::Part {

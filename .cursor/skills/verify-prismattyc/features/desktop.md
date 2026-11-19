@@ -8,6 +8,7 @@ The host presents terminals, space navigation, and naming overlays. Native input
 - `session-name`: naming and rename overlays preserve visible labels and derive mailbox addresses.
 - `host-restart`: terminal state survives a host restart and is presented again.
 - `complete-update`: session-stop consent, private configuration backup, full component restart, and an explicit restoration choice.
+- `update-progress`: the Update and restart progress meter (download bytes, verify and restart counts, an install bar without a percentage, and a held failed step).
 - `window-restore`: a Dock click restores a minimized macOS window, including when another window remains visible.
 - `plugin-settings`: install disabled, approve an exact package and endpoint grants, disable/revoke, and close a page with blocked socket work.
 
@@ -85,6 +86,30 @@ clean-VM UI proof. A guest with no active display can supply CLI evidence
 only; record the failed capture command and missing display prerequisite.
 A Windows desktop and a separate Windows driver are required to prove the
 Windows replacement-host path; the CLI fixture above does not provide one.
+
+## Update progress meter
+
+`tests/native/update-progress-e2e.py` drives Update and restart in a real
+window and keeps every change of the meter lines (`meter.json`), every
+presented frame (`frames/` with `frames.jsonl`), and `result.json`. It runs a
+real update to the newest public release, so use a disposable machine only.
+
+- On Linux and Windows the fixture copies `--bins` into `OUT/install/bin` (the
+  updater refuses a build tree). Those binaries must report a version older
+  than the newest release; a proof build may lower the workspace version and
+  must say so.
+- On macOS the updater replaces the installed `Prismattyc.app`, which must be
+  older than the newest release; the host runs from `--bins`. Native keys need
+  Accessibility permission for the Python that runs the fixture.
+- On Linux, `--fail-download NAME` cuts the download of one component's
+  release file short. Require `Failed at step 1 of 4: Download`, the
+  component's download line, its download error and `Check again` in
+  `final_rows`.
+
+Require `status` PASS and `stages` in order (`Download`, `Verify`, `Install`,
+`Restart` for an update; `Download` for the failure drive), with at least two
+download lines whose byte counts rise. Inspect frames from each stage; the
+install bar must move without a percentage.
 
 ## Gotchas
 

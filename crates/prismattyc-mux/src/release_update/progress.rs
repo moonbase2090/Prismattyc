@@ -41,8 +41,22 @@ pub(crate) fn enable() {
     ENABLED.store(true, Ordering::Relaxed);
 }
 
+/// Print a human status line, unless progress events already report it.
+macro_rules! say {
+    ($($arg:tt)*) => {
+        if !$crate::release_update::progress::enabled() {
+            eprintln!($($arg)*);
+        }
+    };
+}
+pub(crate) use say;
+
+pub(crate) fn enabled() -> bool {
+    ENABLED.load(Ordering::Relaxed)
+}
+
 pub(crate) fn emit(progress: &Progress) {
-    if ENABLED.load(Ordering::Relaxed) {
+    if enabled() {
         eprintln!("{}", line(progress));
     }
 }

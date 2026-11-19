@@ -3467,6 +3467,10 @@ fn palette_content_width(frame: &PaletteFrame<'_>, inset_cells: usize) -> usize 
         .flat_map(|section| section.rows)
         .map(|row| {
             let mut cells = text_cells(&row.name);
+            if row.meter.is_some() {
+                // A bar needs room to show its progress.
+                cells = cells.max(METER_MIN_CELLS);
+            }
             if !row.full_width {
                 if !row.describe.is_empty() {
                     cells = cells.saturating_add(2 + text_cells(&row.describe));
@@ -4134,6 +4138,33 @@ pub fn rasterize_palette_with_hover(
                 } else {
                     regular_name_cells
                 };
+                if let Some(bar) = row.meter {
+                    let left = text_x.saturating_add(font.cell_w.saturating_mul(name_c));
+                    let label_w = font.cell_w.saturating_mul(text_cells(&row.name) + 1);
+                    let right = text_right.saturating_sub(label_w);
+                    draw_meter_bar(
+                        buffer,
+                        stride_px,
+                        (left, right),
+                        text_y,
+                        font.cell_h,
+                        mix_rgb(theme.chrome_bg, theme.chrome_fg, 50),
+                        focus_rgb,
+                        bar,
+                    );
+                    draw_theme_text(
+                        buffer,
+                        stride_px,
+                        font,
+                        &row.name,
+                        right.saturating_add(font.cell_w),
+                        text_y,
+                        ink,
+                        text_right,
+                    );
+                    row_y = row_y.saturating_add(geom.row_pitch_px);
+                    continue;
+                }
                 let name = menu_row_text(&row.name, name_cells);
                 draw_theme_text(
                     buffer,
@@ -7782,6 +7813,65 @@ fn paint_cell_background(
         return;
     }
     fill_rect_blend(buffer, stride, x0, y0, w, h, rgb, alpha, bg_weight);
+}
+
+/// Steps for a moving bar to cross its track one way.
+const METER_SWEEP: usize = 24;
+/// The narrowest panel content that still shows a progress bar.
+const METER_MIN_CELLS: usize = 56;
+
+/// A progress track between `span.0` and `span.1`, centred in a text row at
+/// `y`, filled to a fraction or with a block that sweeps back and forth.
+#[allow(clippy::too_many_arguments)]
+fn draw_meter_bar(
+    buffer: &mut [u32],
+    stride_px: usize,
+    span: (usize, usize),
+    y: usize,
+    cell_h: usize,
+    track: [u8; 3],
+    fill: [u8; 3],
+    bar: crate::palette::MeterBar,
+) {
+    let (left, right) = span;
+    let width = right.saturating_sub(left);
+    let height = (cell_h / 3).max(2);
+    let top = y.saturating_add(cell_h.saturating_sub(height) / 2);
+    if width == 0 {
+        return;
+    }
+    fill_rect(buffer, stride_px, left, top, width, height, track);
+    let (start, length) = meter_fill(width, bar);
+    fill_rect(
+        buffer,
+        stride_px,
+        left.saturating_add(start),
+        top,
+        length,
+        height,
+        fill,
+    );
+}
+
+/// The filled part of a track `width` pixels wide, as (offset, length).
+pub(crate) fn meter_fill(width: usize, bar: crate::palette::MeterBar) -> (usize, usize) {
+    match bar {
+        crate::palette::MeterBar::Fraction(permille) => (
+            0,
+            width.saturating_mul(usize::from(permille.min(1000))) / 1000,
+        ),
+        crate::palette::MeterBar::Moving(frame) => {
+            let block = (width / 5).max(1).min(width);
+            let travel = width - block;
+            let step = frame % (2 * METER_SWEEP);
+            let step = if step <= METER_SWEEP {
+                step
+            } else {
+                2 * METER_SWEEP - step
+            };
+            (travel * step / METER_SWEEP, block)
+        }
+    }
 }
 
 fn paint_panel_shadow(
@@ -12329,6 +12419,62 @@ mod tests {
         let wrapped = wrap_lines("one two three four five", 9, 2);
         assert_eq!(wrapped, vec!["one two", "three fo…"]);
         assert_eq!(wrap_lines("short", 9, 2), vec!["short"]);
+    }
+
+    #[test]
+    fn a_meter_fills_its_fraction_of_the_track() {
+        use crate::palette::MeterBar;
+        assert_eq!(meter_fill(200, MeterBar::Fraction(0)), (0, 0));
+        assert_eq!(meter_fill(200, MeterBar::Fraction(250)), (0, 50));
+        assert_eq!(meter_fill(200, MeterBar::Fraction(1000)), (0, 200));
+        assert_eq!(meter_fill(200, MeterBar::Fraction(1400)), (0, 200));
+    }
+
+    #[test]
+    fn a_moving_meter_sweeps_inside_its_track_without_jumping() {
+        use crate::palette::MeterBar;
+        let mut previous = None;
+        for frame in 0..(4 * METER_SWEEP) {
+            let (start, length) = meter_fill(200, MeterBar::Moving(frame));
+            assert_eq!(length, 40);
+            assert!(start + length <= 200, "frame {frame}: {start}");
+            if let Some(before) = previous {
+                let moved = (start as isize - before as isize).unsigned_abs();
+                assert!(
+                    moved > 0 && moved <= 7,
+                    "frame {frame}: {before} -> {start}"
+                );
+            }
+            previous = Some(start);
+        }
+        assert_eq!(meter_fill(200, MeterBar::Moving(0)).0, 0);
+        assert_eq!(meter_fill(200, MeterBar::Moving(METER_SWEEP)).0, 160);
+    }
+
+    #[test]
+    fn a_meter_row_draws_its_track_and_fill_in_the_panel_colours() {
+        let mut buffer = vec![0u32; 100 * 12];
+        draw_meter_bar(
+            &mut buffer,
+            100,
+            (10, 90),
+            0,
+            12,
+            [1, 1, 1],
+            [9, 9, 9],
+            crate::palette::MeterBar::Fraction(500),
+        );
+        let row = &buffer[6 * 100..7 * 100];
+        let track = pack_argb(OPAQUE_ALPHA, [1, 1, 1]);
+        let fill = pack_argb(OPAQUE_ALPHA, [9, 9, 9]);
+        assert_eq!(row[9], 0, "nothing left of the track");
+        assert!(row[10..50].iter().all(|px| *px == fill));
+        assert!(row[50..90].iter().all(|px| *px == track));
+        assert_eq!(row[90], 0, "nothing right of the track");
+        assert!(
+            buffer[..100].iter().all(|px| *px == 0),
+            "centred, not full height"
+        );
     }
 
     fn assert_full_width_menu_row_fits(header: &str, label: &str) {

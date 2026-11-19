@@ -434,6 +434,47 @@ pub(crate) fn palette(
                         255,
                     );
                 }
+                if let Some(bar) = row.meter {
+                    let label_w =
+                        graphite::text_width(Face::Regular, px, &row.name).ceil() as usize;
+                    let gap = chrome.px(14.0);
+                    let right =
+                        text_right.saturating_sub(label_w + if label_w > 0 { gap } else { 0 });
+                    let track_w = right.saturating_sub(text_x);
+                    let track_h = chrome.px(6.0).max(3);
+                    let track_y = text_y.saturating_add(cell_h.saturating_sub(track_h) / 2);
+                    let radius = track_h as f32 / 2.0;
+                    graphite::fill_round_rect(
+                        buffer,
+                        width,
+                        Rect::new(text_x, track_y, track_w, track_h),
+                        radius,
+                        tok.tab_hover,
+                        255,
+                    );
+                    let (start, length) = raster::meter_fill(track_w, bar);
+                    graphite::fill_round_rect(
+                        buffer,
+                        width,
+                        Rect::new(text_x.saturating_add(start), track_y, length, track_h),
+                        radius,
+                        accent,
+                        255,
+                    );
+                    draw_text(
+                        buffer,
+                        width,
+                        Rect::new(text_right.saturating_sub(label_w), text_y, label_w, cell_h),
+                        Face::Regular,
+                        px,
+                        &row.name,
+                        tok.text,
+                        text_right.saturating_sub(label_w),
+                        text_right,
+                    );
+                    row_y = row_y.saturating_add(layout.geom.row_pitch_px);
+                    continue;
+                }
                 let chord_label = if row.full_width
                     || raster::palette_chord_fits(
                         text_right.saturating_sub(text_x) / cell_w,

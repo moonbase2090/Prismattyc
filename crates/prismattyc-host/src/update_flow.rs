@@ -59,8 +59,6 @@ pub(super) enum Flow {
     Restore(Resume),
 }
 
-const INSTALLING: &str = "Your sessions keep running until the restart step.";
-
 fn show(app: &mut App, text: &str, actions: &[(&str, Action)]) {
     for host in app.windows.values_mut() {
         space_panel::update_page(host, text, actions);
@@ -78,11 +76,17 @@ fn refresh_meter(app: &mut App, change: impl FnOnce(&mut Meter) -> bool) {
     let Flow::Installing(meter, _) = &mut app.full_update else {
         return;
     };
+    let before = meter.step_line();
     if !change(meter) {
         return;
     }
     let meter = meter.clone();
-    show_meter(app, &meter, INSTALLING, &[]);
+    let after = meter.step_line();
+    if after != before {
+        // Steps only, never byte counts, so the log stays short.
+        eprintln!("prismattyc-host: update progress: {after}");
+    }
+    show_meter(app, &meter, meter.note(), &[]);
 }
 
 pub(super) fn action(app: &mut App, action: Action) {
@@ -107,7 +111,7 @@ pub(super) fn action(app: &mut App, action: Action) {
             let plan = plan.clone();
             let meter = Meter::new(plan.update_available);
             let stop = Arc::new(AtomicBool::new(false));
-            show_meter(app, &meter, INSTALLING, &[]);
+            show_meter(app, &meter, meter.note(), &[]);
             app.full_update = Flow::Installing(meter, stop.clone());
             let ticker = app.event_proxy.clone();
             let ticking = stop.clone();
@@ -206,6 +210,7 @@ pub(super) fn event(app: &mut App, event: Event) {
                 Flow::Installing(mut meter, stop) => {
                     stop.store(true, Ordering::Relaxed);
                     meter.fail();
+                    eprintln!("prismattyc-host: update progress: {}", meter.step_line());
                     show_meter(app, &meter, &text, &actions);
                 }
                 _ => show(app, &text, &actions),

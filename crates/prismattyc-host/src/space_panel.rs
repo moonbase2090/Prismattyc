@@ -74,6 +74,7 @@ struct Row {
     label: String,
     detail: String,
     choice: Choice,
+    meter: Option<palette::MeterBar>,
 }
 enum Payload {
     Details(TeamDetails),
@@ -116,6 +117,7 @@ impl Panel {
                     label: line,
                     detail: String::new(),
                     choice: Choice::None,
+                    meter: None,
                 });
             }
         } else if space_rail::name_cells(&detail) > self.columns.saturating_sub(36).max(12) {
@@ -123,12 +125,14 @@ impl Panel {
                 label,
                 detail: String::new(),
                 choice,
+                meter: None,
             });
             for line in wrap_text(&detail, self.columns.max(12)) {
                 self.rows.push(Row {
                     label: line,
                     detail: String::new(),
                     choice: Choice::None,
+                    meter: None,
                 });
             }
         } else {
@@ -136,6 +140,7 @@ impl Panel {
                 label,
                 detail,
                 choice,
+                meter: None,
             });
         }
     }
@@ -458,6 +463,7 @@ impl Panel {
                         label: detail,
                         detail: message,
                         choice: Choice::Message,
+                        meter: None,
                     });
                 }
                 self.row("Back to settings", "", Choice::Settings);
@@ -599,9 +605,16 @@ impl Panel {
             }
             Page::Update(text, meter, actions) => {
                 if let Some(meter) = meter {
-                    for line in meter.lines(self.columns.max(12)) {
+                    for line in meter.lines() {
                         self.row(line, "", Choice::None);
                     }
+                    let (bar, label) = meter.bar();
+                    self.rows.push(Row {
+                        label,
+                        detail: String::new(),
+                        choice: Choice::None,
+                        meter: Some(bar),
+                    });
                 }
                 for line in text.lines() {
                     self.row(line, "", Choice::None);
@@ -962,6 +975,7 @@ pub(super) fn rows(host: &HostState) -> Option<(String, Vec<PaletteRow>)> {
             .map(|r| {
                 let mut row = PaletteRow::plain(r.label.clone(), r.detail.clone(), String::new());
                 row.full_width = matches!(r.choice, Choice::None);
+                row.meter = r.meter;
                 row
             })
             .collect()
@@ -1792,7 +1806,7 @@ mod layout_tests {
                 total: 12 * 1024 * 1024,
             },
         );
-        let mut page = panel(
+        let page = panel(
             Page::Update(
                 "Your sessions keep running.".into(),
                 Some(meter),
@@ -1803,21 +1817,15 @@ mod layout_tests {
         let rows = labels(&page);
         assert_eq!(rows[0].0, "Step 1 of 4: Download");
         assert_eq!(rows[1].0, "Downloading pmuxd: 3.0 of 12.0 MB");
-        assert!(rows[2].0.starts_with("[█"), "{}", rows[2].0);
-        assert!(rows[2].0.ends_with(" 25%"), "{}", rows[2].0);
-        assert_eq!(
-            rows[2].0.chars().count(),
-            99,
-            "the bar fills the panel width"
-        );
+        assert_eq!(rows[2].0, "25%");
+        assert_eq!(page.rows[2].meter, Some(palette::MeterBar::Fraction(250)));
         assert_eq!(rows[3].0, "Your sessions keep running.");
         assert_eq!(rows[4].0, "Check again");
         assert!(matches!(page.rows[4].choice, Choice::FullUpdate(_)));
-        page.columns = 40;
-        page.rebuild();
-        assert!(
-            page.rows.iter().all(|row| row.label.chars().count() <= 40),
-            "the meter rewraps to a narrower panel"
+        assert_eq!(
+            page.rows.iter().filter(|row| row.meter.is_some()).count(),
+            1,
+            "one bar"
         );
     }
 

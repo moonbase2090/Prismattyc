@@ -5,6 +5,7 @@ use super::{
     backing::ImageDescriptor,
     pool::ImagePool,
     profile::Dialect,
+    readiness::{Readiness, Wake},
     registry::RegistryError,
     ring::RingContext,
     scene::{NativeScene, SceneError, SessionFrames},
@@ -157,6 +158,7 @@ pub struct DesktopNative {
     last_end: EndReason,
     closed: bool,
     last_poll: Instant,
+    readiness: Option<Readiness>,
 }
 
 impl DesktopNative {
@@ -181,6 +183,7 @@ impl DesktopNative {
             last_end: EndReason::Release,
             closed: false,
             last_poll: now,
+            readiness: None,
         })
     }
 
@@ -197,6 +200,41 @@ impl DesktopNative {
     }
     pub fn available(&self) -> bool {
         !self.closed && AVAILABILITY.available()
+    }
+
+    pub fn start_watcher(&mut self, wake: Wake) -> io::Result<()> {
+        if self.readiness.is_some() {
+            return Err(io::ErrorKind::AlreadyExists.into());
+        }
+        let watcher = self.endpoint.watch(wake)?;
+        watcher.set_armed(self.can_receive())?;
+        self.readiness = Some(watcher);
+        Ok(())
+    }
+
+    fn rearm_readiness(&mut self) -> Result<(), AuthorityError> {
+        if let Some(watcher) = &self.readiness {
+            if let Err(error) = watcher.set_armed(self.can_receive()) {
+                self.close();
+                return Err(error.into());
+            }
+        }
+        Ok(())
+    }
+
+    fn can_receive(&self) -> bool {
+        self.available()
+            && self.after_reply.is_none()
+            && !self.offer.as_ref().is_some_and(|offer| {
+                matches!(
+                    offer.delivery,
+                    OfferDelivery::Waiting(_) | OfferDelivery::Ready(_)
+                )
+            })
+            && !self
+                .session
+                .as_ref()
+                .is_some_and(|session| matches!(session.phase, Phase::AwaitFrame(_)))
     }
 
     /// The application combines this deadline with control-socket readiness.
@@ -258,6 +296,7 @@ impl DesktopNative {
         });
         self.rearm_deadline = now + OPERATION;
         self.stale_records = 0;
+        self.rearm_readiness()?;
         Ok(PreparedOffer {
             capability_id,
             epoch: self.epoch,
@@ -320,10 +359,12 @@ impl DesktopNative {
         if legacy {
             self.close();
         }
+        self.rearm_readiness()?;
         Ok(removed)
     }
 
     pub fn close(&mut self) {
+        self.readiness = None;
         self.session = None;
         self.offer = None;
         self.after_reply = None;
@@ -334,7 +375,11 @@ impl DesktopNative {
     /// One bounded frame copy and at most one framed control request per turn.
     pub fn poll(&mut self, now: Instant) -> Result<bool, AuthorityError> {
         self.last_poll = now;
-        match self.poll_inner(now) {
+        let result = self.poll_inner(now).and_then(|changed| {
+            self.rearm_readiness()?;
+            Ok(changed)
+        });
+        match result {
             Ok(changed) => Ok(changed),
             Err(error) => {
                 self.close();
@@ -346,6 +391,9 @@ impl DesktopNative {
     fn poll_inner(&mut self, now: Instant) -> Result<bool, AuthorityError> {
         if !self.available() {
             return Err(AuthorityError::Protocol("native endpoint unavailable"));
+        }
+        if self.readiness.as_ref().is_some_and(Readiness::failed) {
+            return Err(AuthorityError::Protocol("native readiness watcher failed"));
         }
         let mut changed = false;
         if let Some(session) = &self.session {

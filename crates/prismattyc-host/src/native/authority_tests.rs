@@ -837,3 +837,105 @@ fn a_writer_receipt_schedules_an_already_received_hello_immediately() {
     drop(descriptor);
     assert_eq!(native.next_wakeup(), Some(now + Duration::from_millis(210)));
 }
+
+#[test]
+fn a_control_socket_hello_wakes_its_owner_without_any_pty_output() {
+    let now = Instant::now();
+    let (mut native, mut client) = owner(now);
+    let (wake_tx, wake_rx) = std::sync::mpsc::channel();
+    native
+        .start_watcher(Arc::new(move || {
+            let _ = wake_tx.send(());
+        }))
+        .unwrap();
+    let offer = native
+        .prepare_offer(NonZeroU32::new(1).unwrap(), now)
+        .unwrap();
+    native.authorize_written_offer(offer.receipt.clone());
+    client.write_all(&hello(&offer)).unwrap();
+    wake_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    native.poll(now).unwrap();
+    native.poll(now).unwrap();
+    let (setup, descriptor) = response(&client, 1);
+    assert_eq!((opcode(&setup), value(&setup, 8)), (9, 1));
+    assert!(descriptor.is_some());
+    assert!(native.scene().is_none());
+    native.close();
+    eof(client);
+}
+
+#[test]
+fn revocation_rearms_a_paused_reader_for_stale_control_without_a_timer() {
+    let now = Instant::now();
+    let (mut native, mut client) = owner(now);
+    let _producer = active(&mut native, &mut client, now);
+    let (wake_tx, wake_rx) = std::sync::mpsc::channel();
+    native
+        .start_watcher(Arc::new(move || {
+            let _ = wake_tx.send(());
+        }))
+        .unwrap();
+    client
+        .write_all(&control(literals::PING_IDLE, 1, 1, 3))
+        .unwrap();
+    wake_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    native.poll(now).unwrap();
+    assert!(!native.readiness.as_ref().unwrap().observed_socket_watched());
+    assert_eq!(
+        wake_rx.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    );
+    assert!(native.pty_bytes(now).unwrap());
+    assert_eq!(native.next_wakeup(), None);
+    assert!(native.readiness.as_ref().unwrap().observed_socket_watched());
+    client
+        .write_all(&control(literals::PING_IDLE, 1, 1, 4))
+        .unwrap();
+    wake_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    native.poll(now).unwrap();
+    native.poll(now).unwrap();
+    let (ended, descriptor) = response(&client, 0);
+    assert!(descriptor.is_none());
+    assert_eq!(
+        (opcode(&ended), value(&ended, 16), value(&ended, 32)),
+        (14, 4, 2)
+    );
+    native.close();
+    eof(client);
+}
+
+#[test]
+fn closing_the_owner_shuts_down_a_socket_retained_by_a_blocked_watcher() {
+    let now = Instant::now();
+    let (mut native, mut client) = owner(now);
+    let _producer = active(&mut native, &mut client, now);
+    let scene = Arc::downgrade(native.scene().unwrap());
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+    let finish = std::sync::Mutex::new(finish_rx);
+    native
+        .start_watcher(Arc::new(move || {
+            entered_tx.send(()).unwrap();
+            finish
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap();
+        }))
+        .unwrap();
+    client
+        .write_all(&control(literals::PING_IDLE, 1, 1, 3))
+        .unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    native.close();
+    assert!(scene.upgrade().is_none());
+    assert!(!native.available());
+    assert_eq!(native.next_wakeup(), None);
+    client.set_nonblocking(true).unwrap();
+    match client.read(&mut [0]) {
+        Ok(0) => {}
+        Err(error) if error.kind() == io::ErrorKind::ConnectionReset => {}
+        result => panic!("endpoint stayed open while the watcher retained it: {result:?}"),
+    }
+    finish_tx.send(()).unwrap();
+}

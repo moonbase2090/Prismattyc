@@ -10,6 +10,7 @@ pub(crate) mod launch;
 pub(crate) mod legacy;
 pub(crate) mod pool;
 pub(crate) mod profile;
+pub(crate) mod readiness;
 pub(crate) mod registry;
 pub(crate) mod retirement;
 pub(crate) mod ring;

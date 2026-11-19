@@ -16,7 +16,10 @@ use std::{
         fd::{AsFd, AsRawFd, OwnedFd},
         unix::net::UnixStream,
     },
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -94,7 +97,7 @@ struct Outgoing {
 }
 
 pub struct ControlEndpoint<'a> {
-    socket: Option<UnixStream>,
+    socket: Option<Arc<UnixStream>>,
     availability: &'a NativeAvailability,
     bytes: [u8; MAX_RECORD_BYTES],
     filled: usize,
@@ -127,7 +130,7 @@ impl<'a> ControlEndpoint<'a> {
         // host's distinct endpoint; its file status does not affect the peer.
         socket.set_nonblocking(true)?;
         Ok(Self {
-            socket: Some(socket),
+            socket: Some(Arc::new(socket)),
             availability,
             bytes: [0; MAX_RECORD_BYTES],
             filled: 0,
@@ -136,6 +139,11 @@ impl<'a> ControlEndpoint<'a> {
             started: None,
             outgoing: None,
         })
+    }
+
+    pub fn watch(&self, wake: super::readiness::Wake) -> io::Result<super::readiness::Readiness> {
+        let socket = self.socket.as_ref().ok_or(io::ErrorKind::NotConnected)?;
+        super::readiness::Readiness::new(Arc::clone(socket), wake)
     }
 
     pub fn deadline(&self) -> Option<Instant> {
@@ -668,8 +676,9 @@ pub(crate) mod tests {
         let first = endpoint.outgoing.as_ref().unwrap().bytes[0];
         endpoint
             .socket
-            .as_mut()
+            .as_ref()
             .unwrap()
+            .as_ref()
             .write_all(&[first])
             .unwrap();
         endpoint.outgoing.as_mut().unwrap().written = 1;

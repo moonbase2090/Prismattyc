@@ -36,7 +36,7 @@ NAMES = ['api', 'web', 'docs', 'build', 'release', 'review', 'notes', 'scratch',
 class Input:
     """Native keys and clicks for one host window."""
 
-    VK = {'u': 0x55, 'Down': 0x28, 'Up': 0x26, 'Home': 0x24, 'Return': 0x0D, 'Escape': 0x1B}
+    VK = {'y': 0x59, 'Down': 0x28, 'Up': 0x26, 'Home': 0x24, 'Return': 0x0D, 'Escape': 0x1B}
 
     def __init__(self, pid, relay=None):
         self.pid = pid
@@ -76,15 +76,15 @@ class Input:
         user32.SetForegroundWindow(found[0])
         return found[0]
 
-    def key(self, name, ctrl=False, alt=False):
+    def key(self, name, ctrl=False, shift=False):
         if self.relay:
-            self._relay({'key': name, 'ctrl': ctrl, 'alt': alt})
+            self._relay({'key': name, 'ctrl': ctrl, 'shift': shift})
         elif sys.platform.startswith('linux'):
             subprocess.check_call(['xdotool', 'windowfocus', '--sync', self._window()])
-            chord = '+'.join([*(['ctrl'] if ctrl else []), *(['alt'] if alt else []), name])
+            chord = '+'.join([*(['ctrl'] if ctrl else []), *(['shift'] if shift else []), name])
             subprocess.check_call(['xdotool', 'key', '--clearmodifiers', chord])
         else:
-            self._windows_input([*([0x11] if ctrl else []), *([0x12] if alt else []), self.VK[name]])
+            self._windows_input([*([0x11] if ctrl else []), *([0x10] if shift else []), self.VK[name]])
         time.sleep(.15)
 
     def click(self, x, y):
@@ -149,7 +149,8 @@ def main():
     config = out / 'config.toml'
     config.write_text('splash = false\nstart_at_login = false\nautomatic_update_checks = false\n'
                       'install_agent_skills = false\nchrome_style = "graphite"\n'
-                      '[keys]\nupdate_restart = "ctrl+alt+u"\n')
+                      # No Option/Alt: on macOS, Option+letter can be a dead key.
+                      '[keys]\nupdate_restart = "ctrl+shift+y"\n')
     env = {k: v for k, v in os.environ.items() if not k.startswith(('PMUX', 'PRISMATTYC_', 'XDG_'))}
     socket_path = None if os.name == 'nt' else runtime / 'pmux.sock'
     env.update(PMUX=str(bins / ('pmux' + EXE)), PRISMATTYC_CONFIG=str(config),
@@ -209,13 +210,33 @@ def main():
         return state
 
     def choose(keys, label):
-        rows = wait(lambda: (lambda r: r if any(x.startswith(label + ':') for x in r) else None)(
-            (window().get('space_details') or {}).get('rows', [])), 'row ' + label)
-        index = next(i for i, x in enumerate(rows) if x.startswith(label + ':'))
+        """Move the menu selection onto the row named `label`, then Enter.
+
+        The row index depends on how the panel wraps details at this window
+        width, so follow the reported selection instead of counting rows."""
+        def panel():
+            details = window().get('space_details') or {}
+            rows = details.get('rows', [])
+            return details if any(x.startswith(label + ':') for x in rows) else None
+
+        def selected_row():
+            details = wait(panel, 'row ' + label)
+            return details['selected'], details
+
         keys.key('Home')
-        for _ in range(index):
-            keys.key('Down')
-        keys.key('Return')
+        time.sleep(.3)
+        for step in ('Down', 'Up'):
+            for _ in range(40):
+                selected, details = selected_row()
+                if selected is not None and details['rows'][selected].startswith(label + ':'):
+                    keys.key('Return')
+                    return
+                keys.key(step)
+                try:
+                    wait(lambda: selected_row()[0] != selected, 'selection moves', timeout=3)
+                except AssertionError:
+                    break  # This end of the menu; try the other direction.
+        raise AssertionError(f'could not select {label}: {details}')
 
     try:
         daemon_cmd = [str(bins / ('pmuxd' + EXE)), *(['--socket', str(socket_path)] if socket_path else [])]
@@ -237,7 +258,7 @@ def main():
         result['sessions'] = total
         assert set(names) <= set(planned), planned
         keys = Input(host.pid, args.key_relay)
-        keys.key('u', ctrl=True, alt=True)
+        keys.key('y', ctrl=True, shift=True)
         choose(keys, 'Update and restart all components')
         first = capture('collapsed', lambda: (lambda m: m if m and m['toggle_rect'] and not m['expanded'] else None)(modal()))
         result['collapsed'] = first
@@ -271,6 +292,11 @@ def main():
         result['status'] = 'PASS'
     except BaseException as error:
         result['error'] = f'{type(error).__name__}: {error}'
+        try:
+            # What the window showed when the step gave up.
+            result['last_window'] = window()
+        except Exception as detail:
+            result['last_window'] = f'unavailable: {detail}'
         raise
     finally:
         for process in reversed(owned):

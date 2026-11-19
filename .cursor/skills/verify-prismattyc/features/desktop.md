@@ -99,7 +99,9 @@ the link, and Escape cancels with every session still running. Binaries older
 than the newest release show "Restart to update OLD → NEW"; a proof build may
 lower the workspace version and must say so. Keys and clicks use xdotool on
 Linux and SendInput on Windows; a macOS guest without Accessibility uses
-`--key-relay DIR` with input sent from the VM console.
+`--key-relay DIR --keyboard-only` with input sent from the VM console. The
+drive opens the menu with Ctrl+Shift+Y (Option+letter can be a dead key over a
+console) and follows render-status `space_details.selected` to the row it needs.
 
 ## Gotchas
 

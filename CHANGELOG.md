@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Update and restart all components** now restarts every open Prismattyc app process, not only the one you used, and the result lists any window that is still on the previous version with the exact next action. `pmux restart --host` accepts `--except-pid` to leave one app process for last.
+
 ## [0.3.70] - 2026-11-19
 
 ### Added

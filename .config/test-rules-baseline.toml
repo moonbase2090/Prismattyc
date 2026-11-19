@@ -1,0 +1,71 @@
+# Shrink-only baseline for scripts/check-test-rules.py.
+# Pins fixed sleeps in test code per file and nextest kill timeouts
+# (period x terminate-after, seconds). CI fails when a number rises,
+# when a new entry appears, and when one falls until this file is
+# lowered with `python3 scripts/check-test-rules.py --write`.
+
+[scan]
+exclude = ["third_party/"]
+
+[sleeps]
+"crates/pmux-mcp/src/plugins.rs" = 1
+"crates/pmux-mcp/tests/supervisor.rs" = 2
+"crates/prismattyc-emulator/src/lib.rs" = 2
+"crates/prismattyc-host/src/attach_log.rs" = 4
+"crates/prismattyc-host/src/config.rs" = 2
+"crates/prismattyc-host/src/font_fallback.rs" = 2
+"crates/prismattyc-host/src/main.rs" = 6
+"crates/prismattyc-host/src/mux.rs" = 32
+"crates/prismattyc-host/src/paste_job.rs" = 4
+"crates/prismattyc-host/src/pty_event_tests.rs" = 5
+"crates/prismattyc-host/src/raster.rs" = 1
+"crates/prismattyc-host/src/remote_catalog.rs" = 6
+"crates/prismattyc-host/src/remote_rail.rs" = 1
+"crates/prismattyc-host/src/render_window_tests.rs" = 5
+"crates/prismattyc-host/src/settings/tests.rs" = 4
+"crates/prismattyc-host/src/snapshot_client.rs" = 8
+"crates/prismattyc-host/src/space_client.rs" = 5
+"crates/prismattyc-host/src/space_open.rs" = 3
+"crates/prismattyc-host/src/space_open_window_tests.rs" = 13
+"crates/prismattyc-host/src/space_panel_input_tests.rs" = 4
+"crates/prismattyc-host/src/test_support.rs" = 1
+"crates/prismattyc-host/src/windows_scan.rs" = 3
+"crates/prismattyc-mux/src/activity_config.rs" = 2
+"crates/prismattyc-mux/src/bin/pmux-attach.rs" = 2
+"crates/prismattyc-mux/src/bin/pmux.rs" = 2
+"crates/prismattyc-mux/src/bin/pmux/activity_emit.rs" = 1
+"crates/prismattyc-mux/src/control.rs" = 34
+"crates/prismattyc-mux/src/host_register.rs" = 1
+"crates/prismattyc-mux/src/host_tabs.rs" = 1
+"crates/prismattyc-mux/src/live.rs" = 5
+"crates/prismattyc-mux/src/mailbox/watch.rs" = 2
+"crates/prismattyc-mux/src/pane_log_persist.rs" = 2
+"crates/prismattyc-mux/src/plugins/worker.rs" = 2
+"crates/prismattyc-mux/src/procinfo.rs" = 6
+"crates/prismattyc-mux/src/release_update.rs" = 2
+"crates/prismattyc-mux/tests/activity_config.rs" = 8
+"crates/prismattyc-mux/tests/activity_webhook.rs" = 10
+"crates/prismattyc-mux/tests/fixtures/detach-process.rs" = 1
+"crates/prismattyc-mux/tests/interactive_attach.rs" = 35
+"crates/prismattyc-mux/tests/login_restart_cli.rs" = 14
+"crates/prismattyc-mux/tests/mail_cli.rs" = 2
+"crates/prismattyc-mux/tests/mail_e2e.rs" = 5
+"crates/prismattyc-mux/tests/mail_restart.rs" = 2
+"crates/prismattyc-mux/tests/named_attach_cli.rs" = 1
+"crates/prismattyc-mux/tests/pane_log_restart.rs" = 15
+"crates/prismattyc-mux/tests/plugin_worker.rs" = 1
+"crates/prismattyc-mux/tests/remote_catalog_cli.rs" = 2
+"crates/prismattyc-mux/tests/remote_ssh.rs" = 5
+"crates/prismattyc-mux/tests/session_naming.rs" = 1
+"crates/prismattyc-mux/tests/space_monitor_cli.rs" = 3
+"crates/prismattyc-mux/tests/space_team_cli.rs" = 3
+"crates/prismattyc-mux/tests/umbrella_cli.rs" = 20
+"crates/prismattyc/src/main.rs" = 3
+"crates/prismattyc/tests/live_pty_fast_child.rs" = 5
+"crates/prismattyc/tests/nested_pty_ux.rs" = 11
+"crates/prismattyc/tests/support/mod.rs" = 5
+"crates/prismattyc/tests/transport_matrix.rs" = 5
+
+[timeouts]
+".config/nextest.toml profile.mutants-full" = 270
+".config/nextest.toml profile.mutants-slow" = 600

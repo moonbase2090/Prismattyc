@@ -62,6 +62,13 @@ A native-only toolchain otherwise reports missing `core` from fixture builds.
 Using prebuilt production guests does not require rebuilding them for native
 package runtime proof.
 
+The `check` job runs `scripts/check-test-rules.py` (with its
+`scripts/check-test-rules_test.py`) against `.config/test-rules-baseline.toml`.
+A PR that adds a fixed sleep to test code, a nextest retry, or a longer nextest
+kill timeout fails there. A PR that removes sleeps runs
+`python3 scripts/check-test-rules.py --write` and commits the lowered baseline.
+See [fixed sleeps and retries](../../../docs/testing-policy.md#fixed-sleeps-and-retries).
+
 For changes to process-detection fixtures or Linux test runners, follow the
 [session and mail portability checks](features/sessions-mail.md#linux-test-portability).
 The Ubuntu 26.04 preview job in `.github/workflows/ci.yml` is advisory

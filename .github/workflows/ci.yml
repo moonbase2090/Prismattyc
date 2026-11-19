@@ -286,6 +286,11 @@ jobs:
       - name: Check release checksum generation
         run: python3 scripts/release/write_checksums_test.py
 
+      - name: Check fixed sleeps and retries in tests
+        run: |
+          python3 scripts/check-test-rules_test.py
+          python3 scripts/check-test-rules.py
+
       - name: Check graphite-core dependency pin
         run: |
           set -euo pipefail

@@ -8263,6 +8263,7 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use prismattyc_mux::judge_mail_wait;
 
     #[cfg(unix)]

@@ -13,7 +13,7 @@ pmux-plugin-api = { path = "../pmux-plugin-api", features = ["host"] }
 prismattyc-core = { path = "../prismattyc-core" }
 serde.workspace = true
 serde_json = "1.0"
-wasmtime = { version = "=36.0.20", default-features = false, features = ["std", "runtime", "component-model", "cranelift", "pulley"] }
+wasmtime = { version = "=36.0.21", default-features = false, features = ["std", "runtime", "component-model", "cranelift", "pulley"] }
 
 [dev-dependencies]
 pmux-plugin-fixture = { path = "../pmux-plugin-fixture" }

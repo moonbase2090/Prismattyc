@@ -18,6 +18,13 @@ ignore = [
   # read-fonts/skrifa, which needs its own change.
   { id = "RUSTSEC-2026-0206", reason = "rustybuzz unmaintained, no fixed release; migration to harfrust tracked separately" },
   { id = "RUSTSEC-2026-0192", reason = "ttf-parser unmaintained, no fixed release; migration to skrifa tracked separately" },
+  # Both wasmtime advisories below were introduced after the pinned 36 line
+  # (GHSA ranges start at 39.0.0 and 47.0.0) and have no patched 36.x release;
+  # the RustSec entries carry no unaffected ranges, so 36.0.21 is flagged
+  # anyway. Reaching the patched 48 line also needs a toolchain bump past the
+  # pinned Rust 1.90. Remove both ignores when wasmtime next major-bumps.
+  { id = "RUSTSEC-2026-0567", reason = "abort in builds without the threads feature; introduced in wasmtime 39, pinned 36.0.21 predates it; no patched 36.x exists" },
+  { id = "RUSTSEC-2026-0573", reason = "GC heap reservation page-size abort; introduced in wasmtime 47, pinned 36.0.21 predates it; no patched 36.x exists" },
 ]
 
 [licenses]

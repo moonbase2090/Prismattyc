@@ -88,7 +88,18 @@ short notes. Turn starts and plain working pings add no lines. Activity without
 a task key is grouped under `no ticket`, and a result inherits the last task
 named in its run. Commands and file names arrive already shortened and
 redacted by pmux, and the view shortens them further to fit. Run and operation
-ids stay hidden unless you press `i`. `↑`/`↓`, `PgUp`/`PgDn` and `g`/`G` scroll.
+ids stay hidden unless you press `i`. `↑`/`↓`, `PgUp`/`PgDn` and `g`/`G` move the
+selected line, and the list scrolls to keep it on screen.
+
+A long command or file name is cut at the window edge. Press `Enter` or `Space` on
+the selected line, or click it, to expand it in place: the full text wraps onto the
+rows below, the age, result and timing columns stay where they were on the first
+row, and the other lines move down. Press the key or click again to collapse it.
+Press `e` to expand every line, or to collapse them all when every line is already
+open. Expansion is on by default and works the same for any seat the monitor can
+read, local or remote. The expanded text is the same string the collapsed line
+shortens, which pmux has already redacted, so expanding never reveals more than the
+collapsed line carried; the monitor still shows no terminal output.
 Press `Esc` to return to the list.
 
 ## Hosts

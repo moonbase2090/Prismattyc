@@ -24,6 +24,7 @@ pub(super) enum Action {
 
 #[derive(Debug, Deserialize, Clone)]
 pub(super) struct Plan {
+    installed: String,
     available: String,
     update_available: bool,
     sessions: Vec<(u64, String)>,
@@ -109,6 +110,7 @@ pub(super) fn action(app: &mut App, action: Action) {
                 return;
             };
             let plan = plan.clone();
+            restart_modal::close(app);
             let meter = Meter::new(plan.update_available);
             let stop = Arc::new(AtomicBool::new(false));
             show_meter(app, &meter, meter.note(), &[]);
@@ -160,6 +162,7 @@ pub(super) fn action(app: &mut App, action: Action) {
             });
         }
         Action::Cancel => {
+            restart_modal::close(app);
             app.full_update = Flow::Idle;
             show(
                 app,
@@ -182,17 +185,14 @@ pub(super) fn action(app: &mut App, action: Action) {
 pub(super) fn event(app: &mut App, event: Event) {
     match event {
         Event::Prepared(Ok(plan)) => {
-            let text = confirmation(&plan);
-            app.full_update = Flow::Confirm(plan);
-            show(
+            let names: Vec<String> = plan.sessions.iter().map(|(_, name)| name.clone()).collect();
+            restart_modal::open(
                 app,
-                &text,
-                &[
-                    ("Save and continue", Action::SaveAndContinue),
-                    ("Continue without saving", Action::Continue),
-                    ("Cancel", Action::Cancel),
-                ],
+                &plan.installed,
+                plan.update_available.then_some(plan.available.as_str()),
+                &names,
             );
+            app.full_update = Flow::Confirm(plan);
         }
         Event::Progress(progress) => refresh_meter(app, |meter| {
             meter.apply(&progress);
@@ -252,24 +252,14 @@ pub(super) fn event(app: &mut App, event: Event) {
     }
 }
 
-fn confirmation(plan: &Plan) -> String {
-    let release = if plan.update_available {
-        format!("Prismattyc {} is available. It will be downloaded, verified, and installed before anything is stopped.", plan.available)
-    } else {
-        format!("Prismattyc {} is already installed. Continue to restart all components on that version.", plan.available)
-    };
-    let mut text = format!("{release}\n{} sessions are running and will be stopped. All programs in them will end. Open app windows and local terminals will also restart.", plan.sessions.len());
-    for (_, name) in &plan.sessions {
-        text.push_str(&format!("\n{name}"));
-    }
-    text.push_str("\nSave the session configuration first? This keeps names, directories, launch commands, and pane layouts. After restart you can choose whether to recreate the sessions and relaunch their commands. Unsaved work inside programs is not saved.");
-    text
-}
-
 fn prepare() -> Result<Plan> {
     let check: Value =
         serde_json::from_str(&run(&find_mux_bin(), &["update", "--check", "--json"])?)?;
     Ok(Plan {
+        installed: check["installed"]
+            .as_str()
+            .context("update check omitted the installed version")?
+            .into(),
         available: check["available"]
             .as_str()
             .context("update check omitted release version")?
@@ -708,19 +698,5 @@ echo '{"status":"installed"}'"#,
         let output = update_with_progress(&pmux, &|_| {}).unwrap();
         assert_eq!(output, r#"{"status":"installed"}"#);
         std::fs::remove_dir_all(pmux.parent().unwrap()).unwrap();
-    }
-
-    #[test]
-    fn confirmation_names_every_session_and_requires_a_choice() {
-        let plan = Plan {
-            available: "0.3.41".into(),
-            update_available: true,
-            sessions: vec![(1, "work".into()), (2, "build".into())],
-        };
-        let text = confirmation(&plan);
-        assert!(text.contains("2 sessions are running and will be stopped."));
-        assert!(text.contains("\nwork\nbuild\n"));
-        assert!(text.contains("Unsaved work inside programs is not saved."));
-        assert!(text.contains("After restart you can choose"));
     }
 }

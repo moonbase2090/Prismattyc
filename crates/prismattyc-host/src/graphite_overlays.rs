@@ -46,6 +46,17 @@ fn draw_text(
     );
 }
 
+/// The rounded overlay panel, for modals that lay out their own content.
+pub(crate) fn modal_panel(
+    buffer: &mut [u32],
+    stride: usize,
+    panel: Rect,
+    tok: &graphite::Tokens,
+    surface: OverlaySurface,
+) {
+    draw_panel(buffer, stride, panel, tok, surface);
+}
+
 fn draw_panel(
     buffer: &mut [u32],
     stride: usize,

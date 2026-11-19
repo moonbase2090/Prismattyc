@@ -987,7 +987,8 @@ pub(super) fn status(host: &HostState) -> Option<serde_json::Value> {
     let (header, rows) = rows(host)?;
     Some(
         serde_json::json!({"header":header,"rows":rows.iter().map(|row| format!("{}: {}", row.name, row.describe)).collect::<Vec<_>>(),
-        "loading":host.space_panel.as_ref()?.pending.is_some()}),
+        "loading":host.space_panel.as_ref()?.pending.is_some(),
+        "selected":host.context_menu.as_ref().map(|menu| menu.selected)}),
     )
 }
 

@@ -9,6 +9,7 @@ The host presents terminals, space navigation, and naming overlays. Native input
 - `host-restart`: terminal state survives a host restart and is presented again.
 - `complete-update`: session-stop consent, private configuration backup, full component restart, and an explicit restoration choice.
 - `update-progress`: the Update and restart progress meter (download bytes, verify and restart counts, an install bar without a percentage, and a held failed step).
+- `restart-modal`: the Restart to update modal (version change, three choices, sessions hidden behind Show and Hide).
 - `window-restore`: a Dock click restores a minimized macOS window, including when another window remains visible.
 - `plugin-settings`: install disabled, approve an exact package and endpoint grants, disable/revoke, and close a page with blocked socket work.
 
@@ -69,7 +70,7 @@ and exact build executable paths, including replacement processes. SIGTERM
 and SIGHUP run the same teardown and retain the result file.
 
 - On Linux or macOS, run `python3 tests/native/full-update-restart-e2e.py --bins "$verify_bins" --out "$verify_evidence/update-cli"` for daemon replacement, restored directories and commands, retry behavior, and mailbox durability. The current-build drive also checks same-layout directory and resume-command autosave, then prunes a closed session from its saved Space. Inspect `binary_version` in `result.json` against the intended revision. This fixture rejects Windows.
-- On a logged-in macOS desktop with Accessibility permission, add `--native` with a separate output directory. The fixture sends native keys to its owned host PID, checks cancellation preserves sessions, chooses Save and continue, waits for the replacement app's restore offer, and restores sessions. Inspect the consent, offer, and result PNGs and JSON snapshots. Match each capture to the host instance, PID, and capture sequence in its frame sidecar; sequence numbers reset on exec. The PNGs show presented app pixels, not OS composition.
+- On a logged-in macOS desktop with Accessibility permission, add `--native` with a separate output directory. The fixture sends native keys to its owned host PID, checks cancellation preserves sessions, chooses Save and restart in the Restart to update modal, waits for the replacement app's restore offer, and restores sessions. Inspect the consent, offer, and result PNGs and JSON snapshots. Match each capture to the host instance, PID, and capture sequence in its frame sidecar; sequence numbers reset on exec. The PNGs show presented app pixels, not OS composition.
 - In a disposable clean macOS VM only, install the released 0.3.38 app and run the CLI fixture with `--upgrade-app /Applications/Prismattyc.app`. This performs a real release download, verification, and app replacement. It then restarts the private daemon from the installed app and restores the saved configuration. Retain the initial app checksum and actual updater output. This command changes that VM's app installation.
 
 Inspect `initial_daemon` and `replacement_daemon` in `result.json`. Their
@@ -113,6 +114,22 @@ verify and install can finish between two render-status polls. Require at
 least two sampled download lines in `meter.json`. Inspect frames from each
 stage: the bar is drawn, not text, and the install bar moves without a
 percentage.
+
+## Restart to update modal
+
+`python3 tests/native/restart-modal-e2e.py --bins "$verify_bins" --out "$verify_evidence/restart-modal"`
+opens Update and restart in a real window with a private daemon and
+`--sessions` sessions, then keeps `collapsed.png`, `expanded-keyboard.png` and
+`expanded-mouse.png` with their render-status JSON. It never installs or
+restarts. Require PASS: the modal opens collapsed with every session counted
+and none shown, Show and Hide work from the keyboard and from a mouse click on
+the link, and Escape cancels with every session still running. Binaries older
+than the newest release show "Restart to update OLD → NEW"; a proof build may
+lower the workspace version and must say so. Keys and clicks use xdotool on
+Linux and SendInput on Windows; a macOS guest without Accessibility uses
+`--key-relay DIR --keyboard-only` with input sent from the VM console. The
+drive opens the menu with Ctrl+Shift+Y (Option+letter can be a dead key over a
+console) and follows render-status `space_details.selected` to the row it needs.
 
 ## Gotchas
 

@@ -68,6 +68,7 @@ mod remote_catalog;
 mod remote_rail;
 mod render_diagnostics;
 mod restart;
+mod restart_modal;
 #[cfg(target_os = "macos")]
 mod safe_restart;
 mod sidebar_resize;
@@ -1248,6 +1249,7 @@ struct HostState {
     /// underneath, untouched, until the splash is dismissed.
     splash: Option<splash::Splash>,
     restore_prompt: Option<restore_prompt::RestorePrompt>,
+    restart_modal: Option<restart_modal::RestartModal>,
     session_prompt: Option<session_prompt::Prompt>,
     /// Job-only: `(start, deadline_ms)` for one Enter through `dispatch_splash_key`.
     e2e_dismiss_at: Option<(Instant, u64)>,
@@ -3959,7 +3961,9 @@ impl App {
         let actions = self
             .windows
             .values_mut()
-            .filter_map(space_panel::take_update_action)
+            .filter_map(|host| {
+                space_panel::take_update_action(host).or_else(|| restart_modal::take_action(host))
+            })
             .collect::<Vec<_>>();
         for action in actions {
             update_flow::action(self, action);
@@ -4647,6 +4651,7 @@ impl App {
                 find: FindMode::default(),
                 splash,
                 restore_prompt,
+                restart_modal: None,
                 session_prompt: None,
                 e2e_dismiss_at: e2e_dismiss_splash_ms().map(|ms| (Instant::now(), ms)),
                 dump_present: dump_present_path(),
@@ -5296,6 +5301,13 @@ fn chrome_overlay(host: &HostState) -> a11y::OverlayKind {
     }
     if let Some(prompt) = &host.session_prompt {
         return session_prompt::accessibility(prompt);
+    }
+    if let Some(modal) = &host.restart_modal {
+        return a11y::OverlayKind::Choices {
+            title: modal.title_text().into(),
+            rows: modal.rows(),
+            selected: modal.selected(),
+        };
     }
     if let Some(prompt) = &host.restore_prompt {
         return a11y::OverlayKind::RestorePrompt {
@@ -8284,6 +8296,7 @@ fn rasterize_frame(
         }
     }
     restore_prompt::paint(host, buffer, width as usize, height as usize);
+    restart_modal::paint(host, buffer, width as usize, height as usize);
     session_prompt::paint(host, buffer, width as usize, height as usize);
     if let Some(dialog) = host.transparency.as_ref() {
         let laid = transparency::layout(
@@ -12323,6 +12336,9 @@ fn hover_target_at_pointer(host: &HostState) -> Option<HoverTarget> {
         return Some(HoverTarget::DialogButton(button));
     }
     if let Some(button) = restore_prompt::hover_button(host) {
+        return Some(HoverTarget::DialogButton(button));
+    }
+    if let Some(button) = restart_modal::hover_button(host) {
         return Some(HoverTarget::DialogButton(button));
     }
     if let Some(picker) = host.theme_picker.as_ref() {
@@ -20984,6 +21000,9 @@ impl ApplicationHandler<UserAction> for App {
         if restore_prompt::handle_pointer(host, &event) {
             return;
         }
+        if restart_modal::handle_pointer(host, &event) {
+            return;
+        }
         if host.transparency.is_some()
             && matches!(
                 &event,
@@ -21235,6 +21254,10 @@ impl ApplicationHandler<UserAction> for App {
                 }
                 if host.restore_prompt.is_some() {
                     restore_prompt::dispatch_key(host, &event.logical_key, event.repeat);
+                    return;
+                }
+                if host.restart_modal.is_some() {
+                    restart_modal::dispatch_key(host, &event.logical_key, event.repeat);
                     return;
                 }
                 if host.space_rail.edit.is_some() {

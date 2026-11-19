@@ -46,6 +46,7 @@ Unit tests use a temp lock dir and do not append tokens to
 | Box e2e caption | `walkthrough-caption-e2e` | `tests/native/walkthrough-caption-e2e.sh` in the native test container; X11; double-click `[show me]` advances one step and does not skip; never skip the job |
 | Box e2e Wayland | `spaces-e2e-wayland` | `tests/native/spaces-e2e-wayland.sh`; weston headless `--socket=pt290-wayland`; native `wl_shm` ARGB8888 |
 | Render bench | `render-bench` | `tests/native/render-bench.sh` in the native test container; per-frame cells max/mean; archive under `build/render-bench/<version>` |
+| Test rules | `check` | `scripts/check-test-rules.py`: fixed sleeps in test code stay at or below the pinned per-file counts; no nextest retries; nextest kill timeouts only go down |
 CRAP and mutation are not merge gates. A new test must be able to fail:
 break the code it covers and watch it go red, and say so in the PR. The
 proof in the PR (commands run and their output, or a screenshot from a
@@ -53,6 +54,37 @@ clean VM of the relevant OS) and the end-to-end flows carry the weight.
 [Mutation testing](mutation-testing.md) describes a manual pass for
 critical crates; it is an aid, not a gate. Scorecard still reports CRAP as
 advice.
+
+## Fixed sleeps and retries
+
+Tests wait for the operation or a signal it emits, not for a fixed time.
+Advance time with a fake or paused clock. A test that fails now and then
+is fixed, not retried: CI and nextest config set no test retries, and
+nextest kill timeouts (`slow-timeout` with `terminate-after`) only go down.
+
+`scripts/check-test-rules.py` enforces this in the `check` job. It counts
+fixed sleeps (`thread::sleep`, `tokio::time::sleep` and similar) in test
+code: files under a `tests/` directory, items behind a `cfg` that needs
+`test`, `#[test]` functions, and module files declared from test code.
+`.config/test-rules-baseline.toml` pins the existing count per file and
+each nextest kill timeout. The check fails when a number goes up or a new
+entry appears. It also fails when a number goes down, until you lower the
+baseline:
+
+```sh
+python3 scripts/check-test-rules.py --write
+```
+
+`--write` only lowers the baseline. It refuses when a count went up.
+
+A fixture child process that sleeps to stay alive is the one exception.
+Mark the sleep with a `keep-alive:` comment that gives the reason, on the
+same line or on its own line just above:
+
+```rust
+// keep-alive: the parent test kills this child when it is done
+std::thread::sleep(Duration::from_secs(60));
+```
 
 ## Validate new work incrementally
 

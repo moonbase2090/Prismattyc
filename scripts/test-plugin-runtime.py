@@ -302,9 +302,8 @@ def exercise(bins, scratch, feature="all", expected_catalog=None, frame_probe=No
         assert before[connector] == disabled and disabled["enabled"] is False
         record("before", before)
 
-        session = "restart-proof"
-        program = ["cmd.exe", "/d", "/c", "pause > nul"] if os.name == "nt" else ["/bin/sh", "-c", "read -r line"]
-        core("new", "--headless", "--no-attach", session, "--", *program)
+        session = "default"
+        assert [item["name"] for item in baseline] == [session], baseline
         old_pid = json.loads(core("versions"))["daemon"]["pid"]
         env.pop("PRISMATTYC_DEFAULT_PLUGINS")
         try:

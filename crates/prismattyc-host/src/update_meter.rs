@@ -5,8 +5,40 @@
 //! Verify and restart report "n of m" items, and the bar counts finished
 //! items. Installing has no measurable fraction, so its bar moves without a
 //! percentage instead of showing a made-up one.
-use crate::palette::MeterBar;
 use prismattyc_mux::release_update::progress::Progress;
+
+/// A progress bar: filled to a fraction, or a block that sweeps across it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MeterBar {
+    /// Filled to this many thousandths.
+    Fraction(u16),
+    /// No measurable fraction: a block sweeps across the track, one step per frame.
+    Moving(usize),
+}
+
+/// Steps for a moving bar to cross its track one way.
+pub(super) const METER_SWEEP: usize = 24;
+
+/// The filled part of a track `width` pixels wide, as (offset, length).
+pub(super) fn meter_fill(width: usize, bar: MeterBar) -> (usize, usize) {
+    match bar {
+        MeterBar::Fraction(permille) => (
+            0,
+            width.saturating_mul(usize::from(permille.min(1000))) / 1000,
+        ),
+        MeterBar::Moving(frame) => {
+            let block = (width / 5).max(1).min(width);
+            let travel = width - block;
+            let step = frame % (2 * METER_SWEEP);
+            let step = if step <= METER_SWEEP {
+                step
+            } else {
+                2 * METER_SWEEP - step
+            };
+            (travel * step / METER_SWEEP, block)
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Step {
@@ -316,6 +348,34 @@ mod tests {
             meter.step_line(),
             "Step 2 of 4: Verify | Verifying 1 of 6: pmuxd"
         );
+    }
+
+    #[test]
+    fn a_meter_fills_its_fraction_of_the_track() {
+        assert_eq!(meter_fill(200, MeterBar::Fraction(0)), (0, 0));
+        assert_eq!(meter_fill(200, MeterBar::Fraction(250)), (0, 50));
+        assert_eq!(meter_fill(200, MeterBar::Fraction(1000)), (0, 200));
+        assert_eq!(meter_fill(200, MeterBar::Fraction(1400)), (0, 200));
+    }
+
+    #[test]
+    fn a_moving_meter_sweeps_inside_its_track_without_jumping() {
+        let mut previous = None;
+        for frame in 0..(4 * METER_SWEEP) {
+            let (start, length) = meter_fill(200, MeterBar::Moving(frame));
+            assert_eq!(length, 40);
+            assert!(start + length <= 200, "frame {frame}: {start}");
+            if let Some(before) = previous {
+                let moved = (start as isize - before as isize).unsigned_abs();
+                assert!(
+                    moved > 0 && moved <= 7,
+                    "frame {frame}: {before} -> {start}"
+                );
+            }
+            previous = Some(start);
+        }
+        assert_eq!(meter_fill(200, MeterBar::Moving(0)).0, 0);
+        assert_eq!(meter_fill(200, MeterBar::Moving(METER_SWEEP)).0, 160);
     }
 
     #[test]

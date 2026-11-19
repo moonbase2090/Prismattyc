@@ -154,15 +154,6 @@ fn digit_range(label: &str, first: char) -> String {
     out
 }
 
-/// A progress bar drawn across a row, with the row's name beside it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MeterBar {
-    /// Filled to this many thousandths.
-    Fraction(u16),
-    /// No measurable fraction: a block sweeps across the track, one step per frame.
-    Moving(usize),
-}
-
 /// One row displayed by the command palette.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaletteRow {
@@ -171,7 +162,6 @@ pub struct PaletteRow {
     pub describe: String,
     pub chord_label: String,
     pub full_width: bool,
-    pub meter: Option<MeterBar>,
 }
 
 impl PaletteRow {
@@ -182,7 +172,6 @@ impl PaletteRow {
             describe: entry.describe(),
             chord_label: entry.chord_label(keymap),
             full_width: false,
-            meter: None,
         }
     }
 
@@ -195,7 +184,6 @@ impl PaletteRow {
             describe,
             chord_label,
             full_width: false,
-            meter: None,
         }
     }
 }

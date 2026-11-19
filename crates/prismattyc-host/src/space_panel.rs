@@ -54,11 +54,7 @@ enum Page {
     Templates,
     Preview(String, String),
     Text(String),
-    Update(
-        String,
-        Option<update_meter::Meter>,
-        Vec<(String, update_flow::Action)>,
-    ),
+    Update(String, Vec<(String, update_flow::Action)>),
     /// Recent messages (#171): (message, age and state) rows, newest first.
     Messages(Vec<(String, String)>),
 }
@@ -74,7 +70,6 @@ struct Row {
     label: String,
     detail: String,
     choice: Choice,
-    meter: Option<palette::MeterBar>,
 }
 enum Payload {
     Details(TeamDetails),
@@ -117,7 +112,6 @@ impl Panel {
                     label: line,
                     detail: String::new(),
                     choice: Choice::None,
-                    meter: None,
                 });
             }
         } else if space_rail::name_cells(&detail) > self.columns.saturating_sub(36).max(12) {
@@ -125,14 +119,12 @@ impl Panel {
                 label,
                 detail: String::new(),
                 choice,
-                meter: None,
             });
             for line in wrap_text(&detail, self.columns.max(12)) {
                 self.rows.push(Row {
                     label: line,
                     detail: String::new(),
                     choice: Choice::None,
-                    meter: None,
                 });
             }
         } else {
@@ -140,7 +132,6 @@ impl Panel {
                 label,
                 detail,
                 choice,
-                meter: None,
             });
         }
     }
@@ -463,7 +454,6 @@ impl Panel {
                         label: detail,
                         detail: message,
                         choice: Choice::Message,
-                        meter: None,
                     });
                 }
                 self.row("Back to settings", "", Choice::Settings);
@@ -603,19 +593,7 @@ impl Panel {
                 }
                 self.row("Back to team", "", Choice::Back);
             }
-            Page::Update(text, meter, actions) => {
-                if let Some(meter) = meter {
-                    for line in meter.lines() {
-                        self.row(line, "", Choice::None);
-                    }
-                    let (bar, label) = meter.bar();
-                    self.rows.push(Row {
-                        label,
-                        detail: String::new(),
-                        choice: Choice::None,
-                        meter: Some(bar),
-                    });
-                }
+            Page::Update(text, actions) => {
                 for line in text.lines() {
                     self.row(line, "", Choice::None);
                 }
@@ -689,16 +667,6 @@ pub(super) fn update_page(
     text: &str,
     actions: &[(&str, update_flow::Action)],
 ) {
-    update_page_with_meter(host, text, None, actions);
-}
-
-/// The update page with a progress meter above its text.
-pub(super) fn update_page_with_meter(
-    host: &mut HostState,
-    text: &str,
-    meter: Option<&update_meter::Meter>,
-    actions: &[(&str, update_flow::Action)],
-) {
     if host.space_panel.is_none() {
         open_settings_menu(host);
     }
@@ -707,7 +675,6 @@ pub(super) fn update_page_with_meter(
     panel.maintenance = true;
     panel.page = Page::Update(
         text.into(),
-        meter.cloned(),
         actions
             .iter()
             .map(|(label, action)| ((*label).into(), *action))
@@ -975,7 +942,6 @@ pub(super) fn rows(host: &HostState) -> Option<(String, Vec<PaletteRow>)> {
             .map(|r| {
                 let mut row = PaletteRow::plain(r.label.clone(), r.detail.clone(), String::new());
                 row.full_width = matches!(r.choice, Choice::None);
-                row.meter = r.meter;
                 row
             })
             .collect()
@@ -1795,39 +1761,6 @@ mod layout_tests {
             .iter()
             .map(|r| (r.label.clone(), r.detail.clone()))
             .collect()
-    }
-
-    #[test]
-    fn update_page_draws_the_meter_above_its_text_and_actions() {
-        let mut meter = update_meter::Meter::new(true);
-        meter.apply(
-            &prismattyc_mux::release_update::progress::Progress::Download {
-                item: "pmuxd".into(),
-                received: 3 * 1024 * 1024,
-                total: 12 * 1024 * 1024,
-            },
-        );
-        let page = panel(
-            Page::Update(
-                "Your sessions keep running.".into(),
-                Some(meter),
-                vec![("Check again".into(), update_flow::Action::Start)],
-            ),
-            None,
-        );
-        let rows = labels(&page);
-        assert_eq!(rows[0].0, "Step 1 of 4: Download");
-        assert_eq!(rows[1].0, "Downloading pmuxd: 3.0 of 12.0 MB");
-        assert_eq!(rows[2].0, "25%");
-        assert_eq!(page.rows[2].meter, Some(palette::MeterBar::Fraction(250)));
-        assert_eq!(rows[3].0, "Your sessions keep running.");
-        assert_eq!(rows[4].0, "Check again");
-        assert!(matches!(page.rows[4].choice, Choice::FullUpdate(_)));
-        assert_eq!(
-            page.rows.iter().filter(|row| row.meter.is_some()).count(),
-            1,
-            "one bar"
-        );
     }
 
     #[test]

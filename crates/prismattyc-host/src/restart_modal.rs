@@ -23,6 +23,19 @@ const TOGGLE: usize = OPTIONS.len();
 const EXPLANATION: &str = "Save the session configuration to recreate your sessions after restart. Unsaved work inside programs is not saved.";
 const SAVED: &str = "names, directories, launch commands, pane layouts";
 const KEYS: &str = "Enter select · Esc close · ↑↓ move";
+/// The choices after an update fails.
+const FAILED_OPTIONS: [(&str, &str); 2] = [
+    ("Check again", "Run the update check again"),
+    ("Close", "Keep the installed version"),
+];
+const WORKING: &str = "Please wait. The app restarts when the update finishes.";
+
+/// The update running in the dialog after a restart choice.
+struct Running {
+    meter: update_meter::Meter,
+    /// Set when the update stopped; the meter holds the failed step.
+    failure: Option<String>,
+}
 
 pub(super) struct RestartModal {
     /// The installed version, and the release that replaces it when one does.
@@ -33,6 +46,9 @@ pub(super) struct RestartModal {
     selected: usize,
     chosen: Option<update_flow::Action>,
     hits: Hits,
+    running: Option<Running>,
+    /// Close was chosen after a failure.
+    dismissed: bool,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -51,10 +67,24 @@ impl RestartModal {
             selected: 0,
             chosen: None,
             hits: Hits::default(),
+            running: None,
+            dismissed: false,
         }
     }
 
+    fn failure(&self) -> Option<&str> {
+        self.running.as_ref()?.failure.as_deref()
+    }
+
     fn title(&self) -> &'static str {
+        match &self.running {
+            Some(Running {
+                failure: Some(_), ..
+            }) => return "Update did not finish",
+            Some(_) if self.available.is_some() => return "Updating",
+            Some(_) => return "Restarting components",
+            None => {}
+        }
         if self.available.is_some() {
             "Restart to update"
         } else {
@@ -97,6 +127,15 @@ impl RestartModal {
 
     /// Act on the selected row: choose an option or fold the session list.
     fn activate(&mut self, index: usize) {
+        if self.running.is_some() {
+            // Only the choices after a failure act; a running update has none.
+            match (self.failure().is_some(), index) {
+                (true, 0) => self.chosen = Some(update_flow::Action::Start),
+                (true, 1) => self.dismissed = true,
+                _ => {}
+            }
+            return;
+        }
         if index == TOGGLE {
             self.expanded = !self.expanded;
         } else if let Some((_, _, action)) = OPTIONS.get(index) {
@@ -105,6 +144,21 @@ impl RestartModal {
     }
 
     fn key(&mut self, key: &Key) {
+        if self.running.is_some() {
+            if self.failure().is_none() {
+                return;
+            }
+            match key {
+                Key::Named(NamedKey::ArrowUp | NamedKey::Home) => self.selected = 0,
+                Key::Named(NamedKey::ArrowDown | NamedKey::Tab | NamedKey::End) => {
+                    self.selected = 1
+                }
+                Key::Named(NamedKey::Enter | NamedKey::Space) => self.activate(self.selected),
+                Key::Named(NamedKey::Escape) => self.dismissed = true,
+                _ => {}
+            }
+            return;
+        }
         match key {
             Key::Named(NamedKey::ArrowUp) => self.selected = self.selected.saturating_sub(1),
             Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::Tab) => {
@@ -138,6 +192,25 @@ impl RestartModal {
 
     /// Rows for render status and accessibility: the choices, then the toggle.
     pub(super) fn rows(&self) -> Vec<String> {
+        if let Some(running) = &self.running {
+            let mut rows = running.meter.lines();
+            rows.push(running.meter.bar().1);
+            match &running.failure {
+                Some(error) => {
+                    rows.extend(error.lines().map(str::to_string));
+                    rows.extend(
+                        FAILED_OPTIONS
+                            .iter()
+                            .map(|(label, hint)| format!("{label}: {hint}")),
+                    );
+                }
+                None => {
+                    rows.push(running.meter.note().into());
+                    rows.push(WORKING.into());
+                }
+            }
+            return rows;
+        }
         let mut rows: Vec<String> = OPTIONS
             .iter()
             .map(|(label, hint, _)| format!("{label}: {hint}"))
@@ -156,6 +229,12 @@ impl RestartModal {
             "selected": self.selected,
             "expanded": self.expanded,
             "sessions_shown": if self.expanded { self.sessions.len() } else { 0 },
+            "running": self.running.as_ref().map(|running| serde_json::json!({
+                "meter": running.meter.lines(),
+                "bar": running.meter.bar().1,
+                "failed": running.failure.is_some(),
+                "error": running.failure,
+            })),
             // Physical pixels of the last frame, for pointer drivers.
             "option_rects": self.hits.options.iter().map(|r| r.map(|r| [r.x, r.y, r.w, r.h])).collect::<Vec<_>>(),
             "toggle_rect": self.hits.toggle.map(|r| [r.x, r.y, r.w, r.h]),
@@ -182,6 +261,44 @@ pub(super) fn open(app: &mut App, installed: &str, available: Option<&str>, sess
     }
 }
 
+/// Turn the open dialog in every window into the progress of the update.
+pub(super) fn show_progress(app: &mut App, meter: &update_meter::Meter) {
+    for host in app.windows.values_mut() {
+        if let Some(modal) = host.restart_modal.as_mut() {
+            modal.running = Some(Running {
+                meter: meter.clone(),
+                failure: None,
+            });
+            modal.selected = 0;
+            host.dirty = true;
+            host.window.request_redraw();
+        }
+    }
+}
+
+/// Hold the meter at the failed step, with the error and what to do next.
+pub(super) fn fail(app: &mut App, meter: &update_meter::Meter, error: &str) {
+    for host in app.windows.values_mut() {
+        if let Some(modal) = host.restart_modal.as_mut() {
+            modal.running = Some(Running {
+                meter: meter.clone(),
+                failure: Some(error.into()),
+            });
+            modal.selected = 0;
+            host.dirty = true;
+            host.window.request_redraw();
+        }
+    }
+}
+
+/// Whether any window still shows the dialog, for flows that fall back to
+/// the panel when it was closed.
+pub(super) fn is_open(app: &App) -> bool {
+    app.windows
+        .values()
+        .any(|host| host.restart_modal.is_some())
+}
+
 /// Close the modal in every window.
 pub(super) fn close(app: &mut App) {
     for host in app.windows.values_mut() {
@@ -200,6 +317,9 @@ pub(super) fn dispatch_key(host: &mut HostState, key: &Key, repeat: bool) {
     if let Some(modal) = host.restart_modal.as_mut() {
         if !(repeat && matches!(key, Key::Named(NamedKey::Enter | NamedKey::Escape))) {
             modal.key(key);
+        }
+        if modal.dismissed {
+            host.restart_modal = None;
         }
     }
     host.dirty = true;
@@ -231,6 +351,9 @@ pub(super) fn handle_pointer(host: &mut HostState, event: &WindowEvent) -> bool 
                 let modal = host.restart_modal.as_mut().unwrap();
                 modal.selected = row;
                 modal.activate(row);
+                if modal.dismissed {
+                    host.restart_modal = None;
+                }
                 host.suppress_left_release = true;
                 host.dirty = true;
             }
@@ -319,6 +442,14 @@ fn text(
 
 pub(super) fn paint(host: &mut HostState, buffer: &mut [u32], width: usize, height: usize) {
     if host.restart_modal.is_none() {
+        return;
+    }
+    if host
+        .restart_modal
+        .as_ref()
+        .is_some_and(|modal| modal.running.is_some())
+    {
+        paint_progress(host, buffer, width, height);
         return;
     }
     let chrome = host.mux.geom().chrome;
@@ -552,6 +683,256 @@ pub(super) fn paint(host: &mut HostState, buffer: &mut [u32], width: usize, heig
     modal.hits = hits;
 }
 
+/// The dialog while the update runs: the step, its bar and the note; after a
+/// failure, the held step, the error and the two choices.
+fn paint_progress(host: &mut HostState, buffer: &mut [u32], width: usize, height: usize) {
+    let chrome = host.mux.geom().chrome;
+    let tok = graphite::theme_tokens(&host.theme);
+    let accent = graphite::accent(&tok, focus_border_rgb(host.focus_border));
+    let surface = host_overlay_surface(host);
+    let modal = host.restart_modal.as_mut().unwrap();
+    let Some(running) = modal.running.as_ref() else {
+        return;
+    };
+    let s = |v: f32| chrome.px(v).max(1);
+    let title_px = s(18.0) as f32;
+    let body_px = s(13.5) as f32;
+    let label_px = s(14.0) as f32;
+    let small_px = s(12.0) as f32;
+    let pad = s(24.0);
+    let margin = s(16.0);
+    let panel_w = width
+        .saturating_sub(2 * margin)
+        .min(s(740.0))
+        .max(s(320.0).min(width));
+    let content_w = panel_w.saturating_sub(2 * pad);
+    let line_h = s(22.0);
+    let row_h = s(40.0);
+    let lines = running.meter.lines();
+    let (bar, label) = running.meter.bar();
+    let note = wrap(
+        Face::Regular,
+        body_px,
+        running.meter.note(),
+        content_w as f32,
+    );
+    let error: Vec<String> = running
+        .failure
+        .as_deref()
+        .map(|error| {
+            error
+                .lines()
+                .flat_map(|line| wrap(Face::Regular, body_px, line, content_w as f32))
+                .take(8)
+                .collect()
+        })
+        .unwrap_or_default();
+    let failed = running.failure.is_some();
+    // Title, step, detail, bar, note or error, choices, key hints.
+    let mut panel_h = pad + s(26.0) + s(14.0) + 3 * line_h + s(10.0);
+    panel_h += if failed {
+        error.len() * line_h + s(16.0) + FAILED_OPTIONS.len() * (row_h + s(2.0)) + s(8.0)
+    } else {
+        note.len() * line_h
+    };
+    panel_h += s(14.0) + line_h + s(16.0);
+    let panel_h = panel_h.min(height.saturating_sub(2 * margin));
+    let x = width.saturating_sub(panel_w) / 2;
+    let y = height.saturating_sub(panel_h) / 2;
+    let right = x + panel_w;
+    let bottom = y + panel_h;
+    let clip = (x + pad, right.saturating_sub(pad));
+    graphite_overlays::modal_panel(
+        buffer,
+        width,
+        Rect::new(x, y, panel_w, panel_h),
+        &tok,
+        surface,
+    );
+    let mut cy = y + pad + s(13.0);
+    text(
+        buffer,
+        width,
+        x + pad,
+        cy,
+        Face::SemiBold,
+        title_px,
+        modal.title(),
+        tok.text_strong,
+        clip,
+    );
+    let title_w = graphite::text_width(Face::SemiBold, title_px, modal.title()).ceil() as usize;
+    text(
+        buffer,
+        width,
+        x + pad + title_w + s(14.0),
+        cy,
+        Face::Mono,
+        body_px,
+        &modal.version(),
+        tok.muted,
+        clip,
+    );
+    cy += s(13.0) + s(14.0) + line_h / 2;
+    text(
+        buffer,
+        width,
+        x + pad,
+        cy,
+        Face::Regular,
+        label_px,
+        &lines[0],
+        tok.text_strong,
+        clip,
+    );
+    cy += line_h;
+    text(
+        buffer,
+        width,
+        x + pad,
+        cy,
+        Face::Regular,
+        body_px,
+        &lines[1],
+        tok.muted,
+        clip,
+    );
+    cy += line_h;
+    let label_w = graphite::text_width(Face::Regular, body_px, &label).ceil() as usize;
+    let track_w = content_w.saturating_sub(if label_w > 0 { label_w + s(12.0) } else { 0 });
+    let track_h = s(6.0).max(3);
+    let track = Rect::new(x + pad, cy.saturating_sub(track_h / 2), track_w, track_h);
+    let radius = track_h as f32 / 2.0;
+    graphite::fill_round_rect(buffer, width, track, radius, tok.tab_hover, 255);
+    let (start, length) = update_meter::meter_fill(track_w, bar);
+    let fill = if failed { tok.attention } else { accent };
+    graphite::fill_round_rect(
+        buffer,
+        width,
+        Rect::new(track.x + start, track.y, length, track_h),
+        radius,
+        fill,
+        255,
+    );
+    if label_w > 0 {
+        text(
+            buffer,
+            width,
+            right.saturating_sub(pad + label_w),
+            cy,
+            Face::Regular,
+            body_px,
+            &label,
+            tok.text,
+            clip,
+        );
+    }
+    cy += line_h + s(10.0);
+    let mut hits = Hits::default();
+    if failed {
+        for line in &error {
+            text(
+                buffer,
+                width,
+                x + pad,
+                cy,
+                Face::Regular,
+                body_px,
+                line,
+                tok.text,
+                clip,
+            );
+            cy += line_h;
+        }
+        let mut ry = cy.saturating_sub(line_h / 2) + s(16.0);
+        graphite::fill_round_rect(
+            buffer,
+            width,
+            Rect::new(
+                x + 1,
+                ry.saturating_sub(s(8.0)),
+                panel_w.saturating_sub(2),
+                1,
+            ),
+            0.0,
+            tok.hairline,
+            255,
+        );
+        for (index, (option, hint)) in FAILED_OPTIONS.iter().enumerate() {
+            let row = Rect::new(x + s(8.0), ry, panel_w.saturating_sub(s(16.0)), row_h);
+            if ry + row_h > bottom {
+                break;
+            }
+            if modal.selected == index {
+                graphite::fill_round_rect(buffer, width, row, s(6.0) as f32, tok.tab_hover, 255);
+                graphite::fill_round_rect(
+                    buffer,
+                    width,
+                    Rect::new(row.x, row.y, s(3.0), row.h),
+                    s(2.0) as f32,
+                    accent,
+                    255,
+                );
+            }
+            let mid = row.y + row.h / 2;
+            text(
+                buffer,
+                width,
+                x + pad,
+                mid,
+                Face::Regular,
+                label_px,
+                option,
+                tok.text_strong,
+                clip,
+            );
+            let hint_w = graphite::text_width(Face::Regular, body_px, hint).ceil() as usize;
+            text(
+                buffer,
+                width,
+                right.saturating_sub(pad + hint_w),
+                mid,
+                Face::Regular,
+                body_px,
+                hint,
+                tok.muted,
+                clip,
+            );
+            hits.options[index] = Some(row);
+            ry += row_h + s(2.0);
+        }
+    } else {
+        for line in &note {
+            text(
+                buffer,
+                width,
+                x + pad,
+                cy,
+                Face::Regular,
+                body_px,
+                line,
+                tok.muted,
+                clip,
+            );
+            cy += line_h;
+        }
+    }
+    let ky = bottom.saturating_sub(s(16.0) + line_h / 2);
+    let keys = if failed { KEYS } else { WORKING };
+    text(
+        buffer,
+        width,
+        x + pad,
+        ky,
+        Face::Regular,
+        small_px,
+        keys,
+        tok.muted,
+        clip,
+    );
+    modal.hits = hits;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -672,5 +1053,103 @@ mod tests {
             let (x, name) = row.last().unwrap();
             assert!(x + graphite::text_width(Face::Mono, 13.0, name) <= 400.0);
         }
+    }
+
+    fn running(m: &mut RestartModal, failure: Option<&str>) {
+        let mut meter = update_meter::Meter::new(true);
+        meter.apply(
+            &prismattyc_mux::release_update::progress::Progress::Verify {
+                item: "pmuxd".into(),
+                index: 2,
+                count: 6,
+            },
+        );
+        if failure.is_some() {
+            meter.fail();
+        }
+        m.running = Some(Running {
+            meter,
+            failure: failure.map(Into::into),
+        });
+        m.selected = 0;
+    }
+
+    #[test]
+    fn a_running_update_shows_its_step_and_ignores_keys() {
+        let mut m = modal(3);
+        running(&mut m, None);
+        assert_eq!(m.title(), "Updating");
+        let rows = m.rows();
+        assert_eq!(rows[0], "Step 2 of 4: Verify");
+        assert_eq!(rows[1], "Verifying 2 of 6: pmuxd");
+        assert_eq!(rows[2], "16%");
+        assert!(rows.contains(&WORKING.to_string()));
+        for key in [
+            NamedKey::Enter,
+            NamedKey::Escape,
+            NamedKey::ArrowDown,
+            NamedKey::Space,
+        ] {
+            m.key(&Key::Named(key));
+        }
+        assert!(
+            m.chosen.is_none() && !m.dismissed,
+            "nothing to choose while it runs"
+        );
+        m.activate(0);
+        assert!(m.chosen.is_none());
+    }
+
+    #[test]
+    fn a_failed_update_holds_the_step_and_offers_check_again_or_close() {
+        let mut m = modal(3);
+        running(
+            &mut m,
+            Some("download failed for pmuxd\ninstalled version unchanged"),
+        );
+        assert_eq!(m.title(), "Update did not finish");
+        let rows = m.rows();
+        assert_eq!(rows[0], "Failed at step 2 of 4: Verify");
+        assert!(
+            rows.contains(&"download failed for pmuxd".to_string()),
+            "{rows:?}"
+        );
+        assert_eq!(
+            &rows[rows.len() - 2..],
+            [
+                "Check again: Run the update check again",
+                "Close: Keep the installed version"
+            ]
+        );
+        m.key(&Key::Named(NamedKey::Enter));
+        assert!(matches!(m.chosen, Some(update_flow::Action::Start)));
+
+        let mut m = modal(3);
+        running(&mut m, Some("x"));
+        m.key(&Key::Named(NamedKey::ArrowDown));
+        m.key(&Key::Named(NamedKey::Enter));
+        assert!(m.dismissed && m.chosen.is_none(), "Close only closes");
+
+        let mut m = modal(3);
+        running(&mut m, Some("x"));
+        m.key(&Key::Named(NamedKey::Escape));
+        assert!(m.dismissed);
+    }
+
+    #[test]
+    fn a_click_on_a_failed_update_choice_acts_on_it() {
+        let mut m = modal(3);
+        running(&mut m, Some("x"));
+        m.hits.options[0] = Some(Rect::new(10, 100, 200, 40));
+        m.hits.options[1] = Some(Rect::new(10, 142, 200, 40));
+        assert_eq!(m.hit(20, 150), Some(1));
+        m.activate(1);
+        assert!(m.dismissed);
+        let status = m.status();
+        assert_eq!(status["running"]["failed"], true);
+        assert_eq!(
+            status["running"]["meter"][0],
+            "Failed at step 2 of 4: Verify"
+        );
     }
 }

@@ -6643,7 +6643,12 @@ fn rasterize_frame(
     let overlay_state = TransientOverlayState {
         footer_visible,
         splash: host.splash.is_some(),
-        restore_prompt: host.restore_prompt.is_some() || host.session_prompt.is_some(),
+        // Modal prompts the host draws over the panes. The Restart to update
+        // dialog also changes without input while an update runs, with no
+        // pane damage, so it must force full frames like the others.
+        restore_prompt: host.restore_prompt.is_some()
+            || host.session_prompt.is_some()
+            || host.restart_modal.is_some(),
         palette: host.palette.is_some(),
         theme_picker: host.theme_picker.is_some(),
         space_picker: host.space_picker.is_some(),

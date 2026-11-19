@@ -224,7 +224,13 @@ exec {real} "$@"
         return json.loads(cli('render-status', '--json'))
 
     def rows():
-        panel = render_status()['windows'][0].get('space_details') or {}
+        """The meter's lines: the Restart to update dialog shows them once a
+        restart is chosen; the update panel holds any text after it closes."""
+        window = render_status()['windows'][0]
+        dialog = window.get('restart_modal') or {}
+        if dialog.get('running'):
+            return dialog['rows']
+        panel = window.get('space_details') or {}
         return [row.removesuffix(': ') for row in panel.get('rows', [])]
 
     def panel():
@@ -335,7 +341,7 @@ exec {real} "$@"
             assert final[0] == 'Failed at step 1 of 4: Download', final
             assert final[1].startswith(f'Downloading {args.fail_download}: '), final
             assert f'download failed for {args.fail_download}' in ' '.join(final), final
-            assert 'Check again' in final, final
+            assert any(x.startswith('Check again') for x in final), final
             record('meter held step 1 of 4 with the download error and offered Check again')
         else:
             wait(lambda: render_status()['host_instance'] != first_instance, 'relaunched app', timeout=args.timeout)

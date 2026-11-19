@@ -66,12 +66,6 @@ fn show(app: &mut App, text: &str, actions: &[(&str, Action)]) {
     }
 }
 
-fn show_meter(app: &mut App, meter: &Meter, text: &str, actions: &[(&str, Action)]) {
-    for host in app.windows.values_mut() {
-        space_panel::update_page_with_meter(host, text, Some(meter), actions);
-    }
-}
-
 /// Redraw the meter after it changed, while the install is still running.
 fn refresh_meter(app: &mut App, change: impl FnOnce(&mut Meter) -> bool) {
     let Flow::Installing(meter, _) = &mut app.full_update else {
@@ -87,12 +81,14 @@ fn refresh_meter(app: &mut App, change: impl FnOnce(&mut Meter) -> bool) {
         // Steps only, never byte counts, so the log stays short.
         eprintln!("prismattyc-host: update progress: {after}");
     }
-    show_meter(app, &meter, meter.note(), &[]);
+    restart_modal::show_progress(app, &meter);
 }
 
 pub(super) fn action(app: &mut App, action: Action) {
     match action {
         Action::Start if !matches!(app.full_update, Flow::Busy) => {
+            // Check again after a failed update closes its dialog first.
+            restart_modal::close(app);
             app.full_update = Flow::Busy;
             show(
                 app,
@@ -110,10 +106,10 @@ pub(super) fn action(app: &mut App, action: Action) {
                 return;
             };
             let plan = plan.clone();
-            restart_modal::close(app);
             let meter = Meter::new(plan.update_available);
             let stop = Arc::new(AtomicBool::new(false));
-            show_meter(app, &meter, meter.note(), &[]);
+            // The dialog turns into the update's progress.
+            restart_modal::show_progress(app, &meter);
             app.full_update = Flow::Installing(meter, stop.clone());
             let ticker = app.event_proxy.clone();
             let ticking = stop.clone();
@@ -211,7 +207,11 @@ pub(super) fn event(app: &mut App, event: Event) {
                     stop.store(true, Ordering::Relaxed);
                     meter.fail();
                     eprintln!("prismattyc-host: update progress: {}", meter.step_line());
-                    show_meter(app, &meter, &text, &actions);
+                    if restart_modal::is_open(app) {
+                        restart_modal::fail(app, &meter, &error);
+                    } else {
+                        show(app, &text, &actions);
+                    }
                 }
                 _ => show(app, &text, &actions),
             }

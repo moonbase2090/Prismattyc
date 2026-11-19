@@ -20,24 +20,50 @@ The monitor puts its visual weight in one place: a lane for each seat. A lane is
 | Selection / focus | `#1c2330` / `#5aa2ff` | `#eaf1fc` / `#2f6fd0` | Focused title row / focus color |
 | Hairline | `#262a32` | `#d5d9df` | Graphite hairline |
 
-Shape carries state as well as color, so the states stay distinct without color: `●` working, `◆` waiting, `○` idle, `!` stuck, `✕` failed, `■` down, `–` no agent and `·` no state yet. `–` no agent means the pmux session is alive but no agent process runs under its shell (the agent exited); it is counted in the header only when a row has it. `○` idle means an agent is running and waiting for input, including one that finished its turn and waits for mail. `!` stuck means a turn started (a tool, command or edit began) and nothing has happened for five minutes. A seat that never reported a turn is idle, not stuck. The row for events that name no seat (`unknown`) disappears five minutes after its last event. The theme follows the terminal background reported by the probe and falls back to dark. `--theme light|dark` overrides it.
+Shape carries state as well as color, so the states stay distinct without color: `●` working, `◆` waiting, `○` idle, `!` stuck, `✕` failed, `■` down, `–` no agent and `·` no state yet. `–` no agent means the pmux session is alive but no agent process runs under its shell (the agent exited); it is counted in the header only when a row has it. `○` idle means an agent is running and waiting for input, including one that finished its turn and waits for mail. `!` stuck means a turn started (a tool, command or edit began) and neither an event nor pane output has followed for five minutes. A seat that never reported a turn is idle, not stuck. The row for events that name no seat (`unknown`) disappears five minutes after its last event. The theme follows the terminal background reported by the probe and falls back to dark. `--theme light|dark` overrides it.
 
 ## State
 
-Activity events and the daemon's live session snapshot set a seat state. Mail events leave the state unchanged.
+One rule turns a seat's evidence into its state, whatever the seat's source. The row mark, the header counts, the filters and the end of the seat's lane all read that one state, so they cannot disagree. The evidence is:
 
-| State | Kinds |
+- **Presence**: what the source says about the seat's process. pmuxd's session snapshot says whether the session is live, whether its shell owns the terminal (no agent), or whether it is gone. A seat named only by events has no presence evidence.
+- **The last report**: the newest state-bearing event. Mail never sets a state. Once a session snapshot vouches for the seat, pmuxd's own runtime events give way to it.
+- **Progress**: the newer of the last event and the last pane output pmuxd saw.
+
+pmuxd's snapshot also carries its own coarse verdict, which calls an agent stuck after five minutes without pane output. The monitor uses that verdict only as presence evidence. A seat whose hooks keep reporting while its pane stays quiet is working, not stuck.
+
+| State | Rule |
 | --- | --- |
-| Working | `working`, `turn_started`, any `*_started`, `*_finished`, `test_passed` |
-| Waiting | `waiting`, `turn_finished`, `session_started` (a new session waits for its first prompt) |
-| Failed | `tool_failed`, `command_failed`, `edit_failed`, `test_failed` |
-| Idle | pmuxd positively detects the shell prompt and no foreground agent |
-| Stuck | pmuxd detects a foreground agent with no pane output for five minutes |
-| Down | `stopped`, `session_finished`, or no live pane child |
+| Down | The session is gone, or a seat named only by events last reported `stopped` or `session_finished` |
+| No agent | The session is live and its shell owns the terminal |
+| Failed | The last report is `tool_failed`, `command_failed`, `edit_failed` or `test_failed` |
+| Working | The last report is `working`, `turn_started`, any `*_started`, `*_finished` or `test_passed`, and there was progress within five minutes |
+| Stuck | The same turn in flight, with no progress for five minutes |
+| Waiting | The last report is `waiting`, `turn_finished` or `session_started` (a new session waits for its first prompt), and there was progress within five minutes |
+| Idle | The same finished turn after five minutes without progress: the agent waits for mail |
+
+A live session with no usable report (no hooks, or a hook session that ended while the session lives on) is judged by its pane output alone. It is working while output is under a minute old, waiting for the next four minutes, then idle. A session that never printed is idle. A seat named only by events, with nothing but mail, has no state yet.
+
+Time moves the state as well as events do. On every poll the monitor re-applies the rule at the source's clock: the newest snapshot or event time that host reported, plus the viewer's time since the monitor learned it. A poll that brings nothing new still moves that clock on, and a later report never moves it back. So a turn left open becomes stuck even when nothing else about the seat changes, and ages from a host with a different clock stay consistent. A state that time brings dates from the moment its quiet period ran out, not from when the monitor noticed, so the lane and the details header (`stuck for 1m`) show when it happened.
 
 Failed stays until the seat reports something else. `*_finished` means an operation ended, so the timeline never shows it as a success. Only `test_passed` gets a check mark.
 
-A row is stale when its last event is 30 seconds old, or when its host is disconnected. A stale row shows its age in amber, and in wider layouts it also says `stale`. Staleness never changes a seat's state. Idle requires a positive shell-prompt detection; unreadable process information stays unknown. Stuck requires a recognized foreground agent and five minutes without pane output. Down means the session has no live pane child.
+The event column shows the report the state comes from: the last report described above. A seat with none says `no events`. The column never echoes pmuxd's snapshot verdict or its runtime events for a seat the snapshot vouches for, so it cannot contradict the row's mark. The age is the time since the seat's last progress.
+
+Stale means the seat's source has gone quiet about it. It never means the seat is quiet: a seat waiting for input is not stale. A row is stale when its host is disconnected, or when the host's session snapshot that vouches for the seat is 30 seconds old. A seat named only by events has no snapshot, so it is stale only while its host is disconnected; a turn it leaves open becomes stuck instead. A stale row shows its age in amber, and in wider layouts it also says `stale`. Staleness never changes a seat's state.
+
+### Sources
+
+Every row says where its facts come from. In the medium and wide layouts, a source column after the seat name shows the source label: today that is the pmuxd host label, such as `mac` or `windows`. Narrower layouts drop the column, and the host heading above the rows names the source.
+
+Seats reached through the pod hub use the same rule and the same columns. The hub keeps no per-seat state. For each pod it stores a `status` check-in that the pod agent sends every 30 seconds when its session list changes, and at least every 300 seconds otherwise. The check-in lists the pod's session names and its self-reported ticket. For a hub seat:
+
+- the source label is the pod, under a hub heading;
+- presence comes from the newest check-in: a listed session is live, and a session that leaves the list is down. The hub's activity feed does not say that a pod ended, so a pod whose check-ins stop goes stale rather than down;
+- progress is unknown until pod activity events reach the hub, so a hub seat shows no state yet rather than a guess;
+- the seat is stale when no check-in has arrived for ten minutes, which is two missed 300-second check-ins and the same line the hub dashboard uses for an idle pod. A quiet seat in a pod that keeps checking in is never stale.
+
+The monitor shows only session names, the ticket and check-in times from the hub. It never shows the check-in's free-text summary or branch. Check-ins will reach the monitor through `--hub-cmd LABEL JSON_ARGV`: a vetted command, like `--host-cmd`, that prints the hub's existing `GET /v1/activity` JSON. Credentials stay with that command and never reach the monitor. That transport is a separate change, built and tested against a fixture producer.
 
 Select a seat and press `d` to open its details. The top lines say who the seat
 is: its harness, model, quota and project, its ticket, and how long ago it last
@@ -96,16 +122,16 @@ The layout is recomputed from the pane size on every frame, so splitting or resi
 ```
 Wide (>= 110 cols, >= 14 rows): list and timeline side by side
  Activity monitor   ● 5 working  ◆ 2 waiting  ○ 1 idle  ! 1 stuck  ✕ 1 failed  ■ 1 down
- mac  connected  7 seats  ▁▂▅▇▅▂▁▂▃  │ worker-a  mac  ● working for 41s
-▌● worker-a      command_started   4s ▁▂▅▇▆▃│ ▁▁▂▅▇▆▃▂▅▇▇▆▅▃▁▂▃▅▆▇▅▃
- ◆ reviewer-2    turn_finished    41s ▅▃▁▁▁▁│   4s  +0.4s ▸ command_started hooks  run 3fa2c1e0
- ✕ builder       test_failed       2m ▇▇▅   │  12s  +8.1s · edit_finished   hooks  run 3fa2c1e0
- windows  retrying for 12s  3 seats cached   │ ── run 77ab01c2
- ● win-agent-1   tool_started     19s stale │ ...
+ mac  connected  7 seats  ▁▂▅▇▅▂▁▂▃          │ worker-a  mac  ● working for 41s
+▌● worker-a      mac      command_started   4s ▁▂▅▇▆▃│ ▁▁▂▅▇▆▃▂▅▇▇▆▅▃▁▂▃▅▆▇▅▃
+ ◆ reviewer-2    mac      turn_finished    41s ▅▃▁▁▁▁│   4s  +0.4s ▸ command_started hooks  run 3fa2c1e0
+ ✕ builder       mac      test_failed       2m ▇▇▅   │  12s  +8.1s · edit_finished   hooks  run 3fa2c1e0
+ windows  retrying for 12s  3 seats cached          │ ── run 77ab01c2
+ ● win-agent-1   windows  tool_started     19s stale │ ...
  ↑↓ move  ⏎ timeline  ⇥ host  f filter  s sort  p pixels  ? keys  q quit
 
-Medium (72 to 109 cols): list with kind, age and lane; Enter opens the timeline full screen
-Narrow (40 to 71 cols): glyph, seat, kind and age; no lane
+Medium (72 to 109 cols): list with source, kind, age and lane; Enter opens the timeline full screen
+Narrow (40 to 71 cols): glyph, seat, kind and age; no source column or lane
 Small (< 40 cols): glyph, seat and age; header shows counts only (●5 ◆2 ✕1 ■2)
 Tiny (< 24 cols or < 4 rows): one line of counts
 ```

@@ -13,8 +13,74 @@ use prismattyc_core::AgentId;
 pub const MAX_SEATS: usize = 128;
 /// Events kept per seat for the timeline and lanes.
 pub const HISTORY: usize = 256;
-/// A seat with no event for this long is shown as stale.
+/// A seat whose source has not vouched for it for this long is shown as stale.
 pub const STALE_MS: u64 = 30_000;
+/// A turn in flight with no progress (hook event or pane output) for this long is stuck.
+pub const STUCK_MS: u64 = 5 * 60 * 1000;
+/// Pane output this recent means an agent without hooks is working.
+pub const ACTIVE_OUTPUT_MS: u64 = 60_000;
+
+/// What the seat's source says about the seat's process, apart from its events.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Presence {
+    /// Only activity events name the seat; no session snapshot vouches for it.
+    Reported,
+    /// A live session; its foreground may or may not be an agent.
+    Live,
+    /// A live session with a recognized agent in the foreground.
+    Agent,
+    /// A live session whose shell owns the terminal: no agent runs.
+    Shell,
+    /// The session is gone.
+    Gone,
+}
+
+/// The one rule that turns a seat's evidence into its state, whatever the source.
+///
+/// `hook` is the latest state-bearing report, `output_at_ms` the latest pane
+/// output, and `now_ms` the source's clock. Progress is the newer of the two.
+/// After [`STUCK_MS`] without progress, a turn in flight is stuck and a
+/// finished turn has settled to idle (the agent waits for mail). A live seat
+/// without a usable report is judged by its pane output alone: working while
+/// output is fresh, waiting for a few quiet minutes, then idle.
+///
+/// Also returns when the evidence says the state began, if it says: a report's
+/// time, or the moment a quiet threshold was crossed.
+pub fn classify(
+    presence: Presence,
+    hook: Option<&ActivityRecord>,
+    output_at_ms: Option<u64>,
+    now_ms: u64,
+) -> (SeatState, Option<u64>) {
+    match presence {
+        Presence::Gone => return (SeatState::Stopped, None),
+        Presence::Shell => return (SeatState::NoAgent, None),
+        Presence::Reported | Presence::Live | Presence::Agent => {}
+    }
+    let reported_at = hook.map(|record| record.received_at_ms);
+    let progress = reported_at.max(output_at_ms);
+    let settled_at = progress.map(|at| at + STUCK_MS).filter(|at| *at <= now_ms);
+    match hook.map(|record| next_state(SeatState::Unknown, record.event.kind)) {
+        Some(SeatState::Working) if settled_at.is_some() => (SeatState::Stuck, settled_at),
+        Some(SeatState::Waiting) if settled_at.is_some() => (SeatState::Idle, settled_at),
+        Some(state @ (SeatState::Working | SeatState::Waiting | SeatState::Failed)) => {
+            (state, reported_at)
+        }
+        // Only events vouch for this seat, so its last word stands.
+        Some(SeatState::Stopped) if presence == Presence::Reported => {
+            (SeatState::Stopped, reported_at)
+        }
+        _ if presence == Presence::Reported => (SeatState::Unknown, None),
+        _ => match output_at_ms {
+            Some(at) if now_ms.saturating_sub(at) < ACTIVE_OUTPUT_MS => (SeatState::Working, None),
+            Some(at) if now_ms.saturating_sub(at) < STUCK_MS => {
+                (SeatState::Waiting, Some(at + ACTIVE_OUTPUT_MS))
+            }
+            Some(at) => (SeatState::Idle, Some(at + STUCK_MS)),
+            None => (SeatState::Idle, None),
+        },
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SeatState {
@@ -116,12 +182,90 @@ pub struct Seat {
     pub changed_at: Option<u64>,
     /// Who the seat is, for the details header.
     pub info: SeatInfo,
+    pub presence: Presence,
+    /// Latest pane output the source reported, on the source's clock.
+    pub output_at_ms: Option<u64>,
     discovery: Option<(u64, ActivityRecord)>,
+    /// The latest state-bearing event of any source, and the latest from hooks
+    /// or notifications. Kept apart from `history`, so a run of mail that
+    /// pushes them out of the retained events cannot erase the seat's state.
+    report: Option<ActivityRecord>,
+    hook_report: Option<ActivityRecord>,
 }
 
 impl Seat {
+    fn new(at_ms: u64) -> Self {
+        Self {
+            history: VecDeque::new(),
+            state: SeatState::Unknown,
+            state_since_ms: at_ms,
+            changed_at: None,
+            info: SeatInfo::default(),
+            presence: Presence::Reported,
+            output_at_ms: None,
+            discovery: None,
+            report: None,
+            hook_report: None,
+        }
+    }
+
     pub fn session_id(&self) -> Option<u64> {
         self.discovery.as_ref().map(|(id, _)| *id)
+    }
+
+    /// The latest event that can set a state. Mail never does, and once a
+    /// session snapshot vouches for the seat, the daemon's own runtime events
+    /// give way to that snapshot.
+    pub fn last_report(&self) -> Option<&ActivityRecord> {
+        if self.presence == Presence::Reported {
+            self.report.as_ref()
+        } else {
+            self.hook_report.as_ref()
+        }
+    }
+
+    /// Adds a retained event and keeps the latest reports current.
+    fn record(&mut self, record: ActivityRecord) {
+        if !matches!(
+            record.event.kind,
+            ActivityKind::MailSent | ActivityKind::MailReceived
+        ) {
+            if record.event.source != ActivitySource::Runtime {
+                self.hook_report = Some(record.clone());
+            }
+            self.report = Some(record.clone());
+        }
+        if self.history.len() == HISTORY {
+            self.history.pop_front();
+        }
+        self.history.push_back(record);
+    }
+
+    /// Forgets a previous session's events and reports.
+    fn forget(&mut self) {
+        self.history.clear();
+        self.report = None;
+        self.hook_report = None;
+    }
+
+    /// When the seat last made progress: its last report or pane output.
+    pub fn progress_ms(&self) -> Option<u64> {
+        self.last_report()
+            .map(|record| record.received_at_ms)
+            .max(self.output_at_ms)
+    }
+
+    /// Re-derives the state from the evidence, as of the source's `now_ms`.
+    fn classify(&mut self, now_ms: u64, fade_at: Option<u64>) {
+        let (state, since) = classify(self.presence, self.last_report(), self.output_at_ms, now_ms);
+        if state != self.state {
+            // The first state of a newly seen seat is not a transition worth a fade.
+            if self.state != SeatState::Unknown {
+                self.changed_at = fade_at.or(self.changed_at);
+            }
+            self.state = state;
+            self.state_since_ms = since.map_or(now_ms, |since| since.min(now_ms));
+        }
     }
 }
 
@@ -171,6 +315,13 @@ pub struct Host {
     pub more: bool,
     pub reset: Option<String>,
     pub evicted: u64,
+    /// The newest time this host's source has reported, on the source's clock.
+    pub observed_ms: u64,
+    /// The source's clock as the monitor last applied it: never earlier than
+    /// `observed_ms`, and moved on by [`Host::advance`] between reports.
+    pub clock_ms: u64,
+    /// The `observed_ms` that `advance` last saw, and the viewer's wall clock then.
+    anchor: Option<(u64, u64)>,
     pub seats: BTreeMap<AgentId, Seat>,
     dismissed: BTreeSet<(AgentId, Option<u64>)>,
 }
@@ -185,6 +336,9 @@ impl Host {
             more: false,
             reset: None,
             evicted: 0,
+            observed_ms: 0,
+            clock_ms: 0,
+            anchor: None,
             seats: BTreeMap::new(),
             dismissed: BTreeSet::new(),
         }
@@ -223,11 +377,45 @@ impl Host {
                 continue;
             }
             self.sequence = record.sequence;
+            self.observed_ms = self.observed_ms.max(record.received_at_ms);
             self.insert(record, live.then_some(local_ms));
         }
         self.sequence = self.sequence.max(page.cursor.sequence);
+        let fade_at = live.then_some(local_ms);
         if let Some(sessions) = page.sessions {
-            self.discover(sessions, live.then_some(local_ms));
+            self.observed_ms = self.observed_ms.max(sessions.observed_at_ms);
+            self.discover(sessions, fade_at);
+        }
+        // Time passes for every seat, including ones no event or snapshot
+        // touched in this page: a turn in flight can become stuck.
+        self.clock_ms = self.clock_ms.max(self.observed_ms);
+        let now_ms = self.clock_ms;
+        for seat in self.seats.values_mut() {
+            seat.classify(now_ms, fade_at);
+        }
+    }
+
+    /// Lets time pass between pages. A source that reports nothing new (an
+    /// empty poll, or a remote command between events) still ages its seats:
+    /// its clock is the newest time it reported plus the viewer's wall time
+    /// since the monitor learned that time. `wall_ms` is the viewer's wall
+    /// clock and `local_ms` its monotonic clock, used only for the fade.
+    pub fn advance(&mut self, wall_ms: u64, local_ms: u64) {
+        if self.observed_ms == 0 {
+            return;
+        }
+        let (source_ms, since_wall_ms) = match self.anchor {
+            Some(anchor) if anchor.0 == self.observed_ms => anchor,
+            _ => (self.observed_ms, wall_ms),
+        };
+        self.anchor = Some((source_ms, since_wall_ms));
+        self.clock_ms = self
+            .clock_ms
+            .max(source_ms + wall_ms.saturating_sub(since_wall_ms));
+        let now_ms = self.clock_ms;
+        let fade_at = (!self.more).then_some(local_ms);
+        for seat in self.seats.values_mut() {
+            seat.classify(now_ms, fade_at);
         }
     }
 
@@ -237,25 +425,22 @@ impl Host {
             .iter()
             .map(|session| session.seat.clone())
             .collect::<std::collections::BTreeSet<_>>();
+        let now_ms = sessions.observed_at_ms;
         self.seats.retain(|id, seat| {
             if !current.contains(id) && seat.discovery.take().is_some() {
-                seat.state = SeatState::Stopped;
-                seat.state_since_ms = sessions.observed_at_ms;
-                seat.changed_at = fade_at;
+                seat.presence = Presence::Gone;
+                seat.classify(now_ms, fade_at);
             }
             current.contains(id) || !seat.history.is_empty()
         });
         for session in sessions.seats {
+            use prismattyc_core::activity::ActivitySessionState as Daemon;
             // A hidden row returns when an agent starts in its session again.
-            let still_gone = matches!(
-                session.state,
-                prismattyc_core::activity::ActivitySessionState::Idle
-                    | prismattyc_core::activity::ActivitySessionState::Stopped
-            );
+            let still_gone = matches!(session.state, Daemon::Idle | Daemon::Stopped);
             self.dismissed.retain(|(seat, dismissed_id)| {
                 seat != &session.seat || (*dismissed_id == Some(session.session_id) && still_gone)
             });
-            let observation = session.observation(sessions.observed_at_ms);
+            let observation = session.observation(now_ms);
             // pmux sends each value only when it is unambiguous, so the latest
             // snapshot replaces the old one, including a value it no longer has.
             let info = SeatInfo {
@@ -264,85 +449,30 @@ impl Host {
                 quota: session.quota.clone(),
                 project: session.project.clone(),
             };
-            let seat = self.seats.entry(session.seat).or_insert_with(|| Seat {
-                history: VecDeque::new(),
-                state: SeatState::Unknown,
-                state_since_ms: sessions.observed_at_ms,
-                changed_at: None,
-                info: SeatInfo::default(),
-                discovery: None,
-            });
+            let seat = self
+                .seats
+                .entry(session.seat)
+                .or_insert_with(|| Seat::new(now_ms));
             seat.info = info;
             let replaced = seat
                 .discovery
                 .as_ref()
                 .is_some_and(|(id, _)| *id != session.session_id);
             if replaced {
-                seat.history.clear();
+                seat.forget();
             }
-            let hooked = seat
-                .history
-                .iter()
-                .rev()
-                .find(|record| {
-                    record.event.source != ActivitySource::Runtime
-                        && !matches!(
-                            record.event.kind,
-                            ActivityKind::MailSent | ActivityKind::MailReceived
-                        )
-                })
-                .is_some_and(|record| {
-                    !matches!(
-                        record.event.kind,
-                        ActivityKind::Stopped | ActivityKind::SessionFinished
-                    )
-                });
-            // A turn is in flight when the last hook event says the agent is
-            // working. Only then can a quiet agent be stuck; one that finished
-            // its turn, or never reported one, is idle at its prompt.
-            let in_flight = seat
-                .history
-                .iter()
-                .rev()
-                .find(|record| {
-                    record.event.source != ActivitySource::Runtime
-                        && !matches!(
-                            record.event.kind,
-                            ActivityKind::MailSent | ActivityKind::MailReceived
-                        )
-                })
-                .is_some_and(|record| {
-                    next_state(SeatState::Unknown, record.event.kind) == SeatState::Working
-                });
-            if !hooked
-                || matches!(
-                    session.state,
-                    prismattyc_core::activity::ActivitySessionState::Idle
-                        | prismattyc_core::activity::ActivitySessionState::Stuck
-                        | prismattyc_core::activity::ActivitySessionState::Stopped
-                )
-            {
-                let state = match session.state {
-                    // The daemon reports Idle when the shell owns the terminal:
-                    // no agent process is running in the pane.
-                    prismattyc_core::activity::ActivitySessionState::Idle => SeatState::NoAgent,
-                    prismattyc_core::activity::ActivitySessionState::Stuck if in_flight => {
-                        SeatState::Stuck
-                    }
-                    prismattyc_core::activity::ActivitySessionState::Stuck => SeatState::Idle,
-                    prismattyc_core::activity::ActivitySessionState::Stopped => SeatState::Stopped,
-                    prismattyc_core::activity::ActivitySessionState::Working => SeatState::Working,
-                    prismattyc_core::activity::ActivitySessionState::Waiting => SeatState::Waiting,
-                };
-                if state != seat.state {
-                    if seat.state != SeatState::Unknown {
-                        seat.changed_at = fade_at;
-                    }
-                    seat.state = state;
-                    seat.state_since_ms = sessions.observed_at_ms;
-                }
-            }
+            // The daemon's own verdict is only evidence about the process. Its
+            // stuck (an agent with quiet output) ignores hook events, so the
+            // shared rule in `classify` decides working, waiting and stuck.
+            seat.presence = match session.state {
+                Daemon::Stopped => Presence::Gone,
+                Daemon::Idle => Presence::Shell,
+                Daemon::Stuck => Presence::Agent,
+                Daemon::Working | Daemon::Waiting => Presence::Live,
+            };
+            seat.output_at_ms = session.last_output_at_ms;
             seat.discovery = Some((session.session_id, observation));
+            seat.classify(now_ms, fade_at);
         }
     }
 
@@ -395,27 +525,10 @@ impl Host {
                 return;
             }
         }
-        let seat = self.seats.entry(seat_id).or_insert_with(|| Seat {
-            history: VecDeque::new(),
-            state: SeatState::Unknown,
-            state_since_ms: record.received_at_ms,
-            changed_at: None,
-            info: SeatInfo::default(),
-            discovery: None,
-        });
-        let state = next_state(seat.state, record.event.kind);
-        if state != seat.state {
-            // The first state of a newly seen seat is not a transition worth a fade.
-            if seat.state != SeatState::Unknown {
-                seat.changed_at = fade_at.or(seat.changed_at);
-            }
-            seat.state = state;
-            seat.state_since_ms = record.received_at_ms;
-        }
-        if seat.history.len() == HISTORY {
-            seat.history.pop_front();
-        }
-        seat.history.push_back(record);
+        let at = record.received_at_ms;
+        let seat = self.seats.entry(seat_id).or_insert_with(|| Seat::new(at));
+        seat.record(record);
+        seat.classify(at, fade_at);
     }
 
     pub fn disconnect(&mut self, now_ms: u64) {
@@ -425,14 +538,21 @@ impl Host {
     }
 }
 
+/// Where a host's seats come from, as each row shows it. Every host today is a
+/// pmuxd, named by its endpoint label (for example `mac` or `windows`).
+pub fn source_label(host: &Host) -> &str {
+    &host.label
+}
+
+/// Stale means the seat's source has gone quiet about it, never that the seat
+/// itself is quiet: a seat waiting for input is not stale. A seat only events
+/// vouch for is stale only when its host's link is down.
 pub fn is_stale(host: &Host, seat: &Seat, now_ms: u64) -> bool {
-    let observed = seat
-        .discovery
-        .as_ref()
-        .map_or(seat.latest().received_at_ms, |(_, record)| {
-            record.received_at_ms
-        });
-    !host.connected() || now_ms.saturating_sub(observed) >= STALE_MS
+    !host.connected()
+        || seat
+            .discovery
+            .as_ref()
+            .is_some_and(|(_, snapshot)| now_ms.saturating_sub(snapshot.received_at_ms) >= STALE_MS)
 }
 
 /// Events that name no seat land on a seat called `unknown`. It has no pane to
@@ -441,11 +561,17 @@ pub const UNATTRIBUTED_MS: u64 = 5 * 60 * 1000;
 
 /// Whether this row is the catch-all for events without a seat and has gone quiet.
 pub fn expired_unattributed(id: &AgentId, seat: &Seat, now_ms: u64) -> bool {
-    id.as_str() == "unknown" && seat.discovery.is_none() && age_ms(seat, now_ms) >= UNATTRIBUTED_MS
+    // Its last event of any kind, mail included, keeps the row: this row has no
+    // state to age from.
+    id.as_str() == "unknown"
+        && seat.discovery.is_none()
+        && now_ms.saturating_sub(seat.latest().received_at_ms) >= UNATTRIBUTED_MS
 }
 
+/// Time since the seat last made progress (an event or pane output), or since
+/// its state began when it has never made any.
 pub fn age_ms(seat: &Seat, now_ms: u64) -> u64 {
-    now_ms.saturating_sub(seat.latest().received_at_ms)
+    now_ms.saturating_sub(seat.progress_ms().unwrap_or(seat.state_since_ms))
 }
 
 /// One lane bin: how many events landed in it and the state at its end.
@@ -503,6 +629,21 @@ pub fn lane(
             out[cursor].state = known.then_some(state);
         }
         cursor += 1;
+    }
+    out
+}
+
+/// A seat's lane: its events, then its current state from the moment it
+/// began, so the lane's tail always agrees with the row's state mark.
+pub fn seat_lane(seat: &Seat, now_ms: u64, window_ms: u64, bins: usize) -> Vec<Bin> {
+    let mut out = lane(&seat.history, now_ms, window_ms, bins);
+    let start = now_ms.saturating_sub(window_ms);
+    let span = (window_ms / bins as u64).max(1);
+    for (index, bin) in out.iter_mut().enumerate() {
+        let bin_end = start + span * (index as u64 + 1);
+        if bin.events == 0 && bin_end > seat.state_since_ms {
+            bin.state = Some(seat.state);
+        }
     }
     out
 }
@@ -913,7 +1054,8 @@ pub(crate) mod tests {
         first.sessions = Some(discovered(&["quiet", "unhooked"], 1_000));
         host.apply(first.clone(), 0);
         assert_eq!(host.seats.len(), 2);
-        assert_eq!(seat(&host, "quiet").state, SeatState::Waiting);
+        // A live session with no events and no pane output has shown nothing to wait on.
+        assert_eq!(seat(&host, "quiet").state, SeatState::Idle);
         assert!(seat(&host, "quiet").history.is_empty());
         assert_eq!(host.sequence, 0);
         first.sessions = Some(discovered(&["quiet", "unhooked"], 60_000));
@@ -1001,11 +1143,402 @@ pub(crate) mod tests {
             old - 1
         ));
         assert!(expired_unattributed(&unknown, &host.seats[&unknown], old));
+        // Later mail with no seat keeps the row for five minutes after it.
+        host.apply(
+            page_in(
+                "e0",
+                vec![record_at(
+                    "unknown",
+                    3,
+                    "mail_received",
+                    1_000 + 4 * 60_000,
+                )?],
+                None,
+            )?,
+            2_000,
+        );
+        assert!(!expired_unattributed(&unknown, &host.seats[&unknown], old));
+        assert!(expired_unattributed(
+            &unknown,
+            &host.seats[&unknown],
+            old + 4 * 60_000
+        ));
         assert!(!expired_unattributed(
             &worker,
             &host.seats[&worker],
             old * 10
         ));
+        Ok(())
+    }
+
+    /// One live session as pmuxd reports it.
+    fn session(
+        name: &str,
+        state: prismattyc_core::activity::ActivitySessionState,
+        last_output_at_ms: Option<u64>,
+        at: u64,
+    ) -> prismattyc_core::activity::ActivitySessions {
+        let mut sessions = discovered(&[name], at);
+        sessions.seats[0].state = state;
+        sessions.seats[0].last_output_at_ms = last_output_at_ms;
+        sessions
+    }
+
+    const MIN: u64 = 60_000;
+
+    #[test]
+    fn hook_events_keep_a_seat_with_a_quiet_pane_working() -> Result<()> {
+        use prismattyc_core::activity::ActivitySessionState;
+
+        // pmuxd calls the pane stuck: an agent in front and no output for 10 minutes.
+        // Its hooks report a tool 30 s ago, so the seat is working, as its lane shows.
+        let now = 20 * MIN;
+        let mut page = page_in(
+            "e0",
+            vec![
+                record_at("agent", 1, "turn_started", now - 9 * MIN)?,
+                record_at("agent", 2, "tool_started", now - 30_000)?,
+            ],
+            None,
+        )?;
+        page.sessions = Some(session(
+            "agent",
+            ActivitySessionState::Stuck,
+            Some(now - 10 * MIN),
+            now,
+        ));
+        let mut host = Host::new("local");
+        host.apply(page, 0);
+        let agent = seat(&host, "agent");
+        assert_eq!(agent.state, SeatState::Working);
+        let lane = seat_lane(agent, now, 10 * MIN, 10);
+        assert_eq!(
+            lane.last().and_then(|bin| bin.state),
+            Some(SeatState::Working)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_turn_is_stuck_only_when_events_and_output_are_both_quiet() -> Result<()> {
+        use prismattyc_core::activity::ActivitySessionState;
+
+        let now = 20 * MIN;
+        let state_with_output = |output_at: u64, daemon| -> Result<SeatState> {
+            let mut page = page_in(
+                "e0",
+                vec![record_at("agent", 1, "command_started", now - 10 * MIN)?],
+                None,
+            )?;
+            page.sessions = Some(session("agent", daemon, Some(output_at), now));
+            let mut host = Host::new("local");
+            host.apply(page, 0);
+            Ok(seat(&host, "agent").state)
+        };
+        // A long command that still prints is working.
+        assert_eq!(
+            state_with_output(now - 30_000, ActivitySessionState::Working)?,
+            SeatState::Working
+        );
+        // Four and a half quiet minutes is not yet stuck; five is.
+        assert_eq!(
+            state_with_output(now - 4 * MIN - 30_000, ActivitySessionState::Waiting)?,
+            SeatState::Working
+        );
+        assert_eq!(
+            state_with_output(now - 5 * MIN, ActivitySessionState::Stuck)?,
+            SeatState::Stuck
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_seat_only_events_vouch_for_ages_with_its_host_clock() -> Result<()> {
+        let mut host = Host::new("remote");
+        host.apply(
+            page_in(
+                "e0",
+                vec![
+                    record_at("busy", 1, "tool_started", 1_000)?,
+                    record_at("done", 2, "turn_finished", 1_000)?,
+                ],
+                None,
+            )?,
+            0,
+        );
+        assert_eq!(seat(&host, "busy").state, SeatState::Working);
+        assert_eq!(seat(&host, "done").state, SeatState::Waiting);
+        // Another seat's event moves the host clock four minutes on: nothing settles yet.
+        let mut later = page_in(
+            "e0",
+            vec![record_at("other", 3, "working", 1_000 + 4 * MIN)?],
+            None,
+        )?;
+        host.apply(later.clone(), 10);
+        assert_eq!(seat(&host, "busy").state, SeatState::Working);
+        assert_eq!(seat(&host, "done").state, SeatState::Waiting);
+        // Five minutes on, the open tool is stuck and the finished turn has settled to idle.
+        later.records = vec![record_at("other", 4, "working", 1_000 + 5 * MIN)?];
+        later.cursor.sequence = 4;
+        host.apply(later, 20);
+        assert_eq!(seat(&host, "busy").state, SeatState::Stuck);
+        assert_eq!(seat(&host, "done").state, SeatState::Idle);
+        // Each began the moment its five quiet minutes ran out.
+        assert_eq!(seat(&host, "busy").state_since_ms, 1_000 + 5 * MIN);
+        assert_eq!(seat(&host, "done").state_since_ms, 1_000 + 5 * MIN);
+        Ok(())
+    }
+
+    #[test]
+    fn a_live_seat_without_events_is_judged_by_its_pane_output() -> Result<()> {
+        use prismattyc_core::activity::ActivitySessionState as Daemon;
+
+        let now = 20 * MIN;
+        let judged = |output: Option<u64>| -> Result<(SeatState, u64)> {
+            let mut page = page_in("e0", vec![], None)?;
+            page.sessions = Some(session("plain", Daemon::Waiting, output, now));
+            let mut host = Host::new("local");
+            host.apply(page, 0);
+            let plain = seat(&host, "plain");
+            Ok((plain.state, age_ms(plain, now)))
+        };
+        let since = |output: u64| -> Result<u64> {
+            let mut page = page_in("e0", vec![], None)?;
+            page.sessions = Some(session("plain", Daemon::Waiting, Some(output), now));
+            let mut host = Host::new("local");
+            host.apply(page, 0);
+            Ok(seat(&host, "plain").state_since_ms)
+        };
+        // Waiting began when the output went a minute quiet; idle at five minutes.
+        assert_eq!(since(now - 2 * MIN)?, now - MIN);
+        assert_eq!(since(now - 6 * MIN)?, now - MIN);
+        assert_eq!(since(now - 10_000)?, now);
+        assert_eq!(judged(Some(now - 10_000))?, (SeatState::Working, 10_000));
+        // Output exactly a minute old is no longer fresh; five quiet minutes is idle.
+        assert_eq!(judged(Some(now - MIN))?.0, SeatState::Waiting);
+        assert_eq!(judged(Some(now - 2 * MIN))?, (SeatState::Waiting, 2 * MIN));
+        assert_eq!(judged(Some(now - 5 * MIN))?.0, SeatState::Idle);
+        assert_eq!(judged(Some(now - 6 * MIN))?, (SeatState::Idle, 6 * MIN));
+        // No output ever: nothing to wait on.
+        assert_eq!(judged(None)?.0, SeatState::Idle);
+        Ok(())
+    }
+
+    #[test]
+    fn the_lane_tail_matches_the_row_state() -> Result<()> {
+        let mut host = Host::new("remote");
+        host.apply(
+            page_in("e0", vec![record_at("busy", 1, "tool_started", 0)?], None)?,
+            0,
+        );
+        host.apply(
+            page_in("e0", vec![record_at("other", 2, "working", 6 * MIN)?], None)?,
+            10,
+        );
+        let busy = seat(&host, "busy");
+        assert_eq!(busy.state, SeatState::Stuck);
+        // Stuck began five minutes after the tool started, not when it was observed.
+        assert_eq!(busy.state_since_ms, 5 * MIN);
+        let bins = seat_lane(busy, 10 * MIN, 10 * MIN, 10);
+        assert_eq!(bins[0].state, Some(SeatState::Working));
+        // The bin that ends the moment the seat went stuck is still before it.
+        assert_eq!(bins[4].state, Some(SeatState::Working));
+        assert_eq!(bins[5].state, Some(SeatState::Stuck));
+        assert_eq!(bins[9].state, Some(SeatState::Stuck));
+        Ok(())
+    }
+
+    #[test]
+    fn a_seat_only_events_vouch_for_keeps_its_last_word() -> Result<()> {
+        let mut runtime_stop = record_at("ended", 2, "session_finished", 2_000)?;
+        runtime_stop.event.source = ActivitySource::Runtime;
+        let mut host = Host::new("remote");
+        host.apply(
+            page_in(
+                "e0",
+                vec![
+                    record_at("ended", 1, "tool_started", 1_000)?,
+                    runtime_stop,
+                    record_at("stopped", 3, "stopped", 1_000)?,
+                    record_at("mail-only", 4, "mail_received", 1_000)?,
+                ],
+                None,
+            )?,
+            0,
+        );
+        // With no session snapshot, even pmux's runtime events speak for the seat.
+        assert_eq!(seat(&host, "ended").state, SeatState::Stopped);
+        assert_eq!(seat(&host, "stopped").state, SeatState::Stopped);
+        // Mail alone sets no state.
+        assert_eq!(seat(&host, "mail-only").state, SeatState::Unknown);
+        assert!(seat_lane(seat(&host, "mail-only"), 2_000, 2_000, 4)
+            .iter()
+            .all(|bin| bin.state.is_none_or(|state| state == SeatState::Unknown)));
+        Ok(())
+    }
+
+    #[test]
+    fn a_snapshot_outranks_the_daemons_runtime_events() -> Result<()> {
+        use prismattyc_core::activity::ActivitySessionState;
+
+        // Hooks say the turn finished; a later runtime ping says working. Once the
+        // snapshot vouches for the seat, the hook report decides.
+        let mut ping = record_at("agent", 2, "working", 2_000)?;
+        ping.event.source = ActivitySource::Runtime;
+        let mut page = page_in(
+            "e0",
+            vec![record_at("agent", 1, "turn_finished", 1_000)?, ping],
+            None,
+        )?;
+        page.sessions = Some(session(
+            "agent",
+            ActivitySessionState::Waiting,
+            Some(1_000),
+            3_000,
+        ));
+        let mut host = Host::new("local");
+        host.apply(page, 0);
+        assert_eq!(seat(&host, "agent").state, SeatState::Waiting);
+        Ok(())
+    }
+
+    #[test]
+    fn a_repeated_snapshot_of_a_live_seat_does_not_fade_it() -> Result<()> {
+        use prismattyc_core::activity::ActivitySessionState;
+
+        let snapshot = |at: u64| -> Result<ActivityPage> {
+            let mut page = page_in("e0", vec![], None)?;
+            page.sessions = Some(session(
+                "agent",
+                ActivitySessionState::Working,
+                Some(at),
+                at,
+            ));
+            Ok(page)
+        };
+        let mut host = Host::new("local");
+        host.apply(snapshot(1_000)?, 0);
+        host.apply(snapshot(2_000)?, 10);
+        let agent = seat(&host, "agent");
+        assert_eq!(agent.state, SeatState::Working);
+        assert_eq!(agent.changed_at, None);
+        assert_eq!(agent.session_id(), Some(1));
+        Ok(())
+    }
+
+    #[test]
+    fn a_run_of_mail_past_the_history_limit_keeps_the_seat_state() -> Result<()> {
+        let mut records = vec![record_at("agent", 1, "tool_failed", 1_000)?];
+        for sequence in 2..=(HISTORY as u64 + 10) {
+            records.push(record_at(
+                "agent",
+                sequence,
+                "mail_received",
+                1_000 + sequence,
+            )?);
+        }
+        let mut host = Host::new("remote");
+        host.apply(page_in("e0", records, None)?, 0);
+        let agent = seat(&host, "agent");
+        assert!(agent
+            .history
+            .iter()
+            .all(|record| record.event.kind == ActivityKind::MailReceived));
+        assert_eq!(agent.state, SeatState::Failed);
+        assert_eq!(
+            agent.last_report().map(|record| record.event.kind),
+            Some(ActivityKind::ToolFailed)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn time_passes_for_a_quiet_source_between_pages() -> Result<()> {
+        let mut host = Host::new("remote");
+        host.apply(
+            page_in(
+                "e0",
+                vec![record_at("busy", 1, "tool_started", 1_000)?],
+                None,
+            )?,
+            0,
+        );
+        // The monitor learns the source's time at viewer wall time 50_000.
+        host.advance(50_000, 10);
+        assert_eq!(seat(&host, "busy").state, SeatState::Working);
+        // Empty polls bring no new time, but the viewer's clock moves on.
+        let empty = page_in("e0", vec![], None)?;
+        host.apply(empty.clone(), 20);
+        host.advance(50_000 + 5 * MIN - 1, 30);
+        assert_eq!(seat(&host, "busy").state, SeatState::Working);
+        host.advance(50_000 + 5 * MIN, 40);
+        let busy = seat(&host, "busy");
+        assert_eq!(busy.state, SeatState::Stuck);
+        assert_eq!(busy.state_since_ms, 1_000 + 5 * MIN);
+        assert_eq!(busy.changed_at, Some(40));
+        // A later empty page does not wind the clock back.
+        host.apply(empty, 50);
+        assert_eq!(seat(&host, "busy").state, SeatState::Stuck);
+        Ok(())
+    }
+
+    #[test]
+    fn a_new_source_time_reanchors_the_clock() -> Result<()> {
+        let mut host = Host::new("remote");
+        host.apply(
+            page_in(
+                "e0",
+                vec![record_at("early", 1, "turn_finished", 1_000)?],
+                None,
+            )?,
+            0,
+        );
+        host.advance(50_000, 10);
+        // The source reports a much later time; the clock follows it from now on.
+        let later = 1_000 + 10 * MIN;
+        host.apply(
+            page_in(
+                "e0",
+                vec![record_at("busy", 2, "tool_started", later)?],
+                None,
+            )?,
+            20,
+        );
+        host.advance(50_000 + MIN, 30);
+        assert_eq!(seat(&host, "busy").state, SeatState::Working);
+        host.advance(50_000 + 6 * MIN, 40);
+        assert_eq!(host.clock_ms, later + 5 * MIN);
+        assert_eq!(seat(&host, "busy").state, SeatState::Stuck);
+        Ok(())
+    }
+
+    #[test]
+    fn a_replaced_session_forgets_the_previous_reports() -> Result<()> {
+        use prismattyc_core::activity::ActivitySessionState;
+
+        let mut first = page_in(
+            "e0",
+            vec![record_at("agent", 1, "tool_failed", 1_000)?],
+            None,
+        )?;
+        first.sessions = Some(session(
+            "agent",
+            ActivitySessionState::Working,
+            Some(1_000),
+            1_000,
+        ));
+        let mut host = Host::new("local");
+        host.apply(first, 0);
+        assert_eq!(seat(&host, "agent").state, SeatState::Failed);
+        // The same seat in a new session: the old failure is not this session's.
+        let mut second = page_in("e0", vec![], None)?;
+        let mut sessions = session("agent", ActivitySessionState::Working, Some(2_000), 2_000);
+        sessions.seats[0].session_id = 2;
+        second.sessions = Some(sessions);
+        host.apply(second, 10);
+        let agent = seat(&host, "agent");
+        assert!(agent.last_report().is_none());
+        assert_eq!(agent.state, SeatState::Working);
         Ok(())
     }
 
@@ -1095,8 +1628,10 @@ pub(crate) mod tests {
         )?;
         page.sessions = Some(discovered(&["mail-only", "finished"], 2000));
         host.apply(page, 0);
-        assert_eq!(seat(&host, "mail-only").state, SeatState::Waiting);
-        assert_eq!(seat(&host, "finished").state, SeatState::Waiting);
+        // Mail sets no state, and a finished hook session gives way to the live
+        // snapshot; with no pane output either, both are idle.
+        assert_eq!(seat(&host, "mail-only").state, SeatState::Idle);
+        assert_eq!(seat(&host, "finished").state, SeatState::Idle);
         Ok(())
     }
 
@@ -1389,14 +1924,18 @@ pub(crate) mod tests {
     #[test]
     fn staleness_follows_receive_age_and_the_host_link() -> Result<()> {
         let mut host = Host::new("mac");
-        host.apply(
-            page_in("e", vec![record_at("sa", 1, "working", 1_000)?], None)?,
-            0,
-        );
-        assert!(!is_stale(&host, seat(&host, "sa"), 30_999));
-        assert!(is_stale(&host, seat(&host, "sa"), 31_000));
+        let mut page = page_in("e", vec![record_at("sa", 1, "waiting", 1_000)?], None)?;
+        page.sessions = Some(discovered(&["live"], 1_000));
+        host.apply(page, 0);
+        // The snapshot vouches for a session seat; once it is old, the row is stale.
+        assert!(!is_stale(&host, seat(&host, "live"), 30_999));
+        assert!(is_stale(&host, seat(&host, "live"), 31_000));
+        // A seat only events vouch for is quiet, not stale, while its host is connected:
+        // waiting for input for a minute is normal.
+        assert!(!is_stale(&host, seat(&host, "sa"), 600_000));
         host.disconnect(2_000);
         assert!(is_stale(&host, seat(&host, "sa"), 1_500));
+        assert!(is_stale(&host, seat(&host, "live"), 1_500));
         assert_eq!(host.link, Link::Retrying { since_ms: 2_000 });
         host.disconnect(9_000);
         assert_eq!(

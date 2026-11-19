@@ -4,7 +4,28 @@
 
 ### Added
 
-- In the activity monitor's seat details, `Enter`, `Space` or a click expands the selected line in place so its full command or file name wraps onto the rows below, with the age, result and timing columns unchanged. `e` expands or collapses every line. It is on by default and uses the same already-redacted text as the collapsed line. `↑`/`↓` now move the selected line, and the list scrolls to keep it visible. The Activity Monitor package is now 1.3.4.
+- In the activity monitor's seat details, `Enter`, `Space` or a click expands the selected line in place so its full command or file name wraps onto the rows below, with the age, result and timing columns unchanged. `e` expands or collapses every line. It is on by default and uses the same already-redacted text as the collapsed line. `↑`/`↓` now move the selected line, and the list scrolls to keep it visible. The Activity Monitor package is now 1.3.5.
+
+## [0.3.69] - 2026-11-18
+
+### Added
+
+- On Linux and Windows the app checks for a new release on launch and daily, and shows a short notice when one exists. The notice only names the version and points to **Update and restart**; it never installs anything or stops a session. It is shown once per version, appears in Recent messages, and follows `automatic_update_checks`. It is hidden only by `toasts = "off"`.
+
+### Changed
+
+- The activity monitor derives every seat's state from one rule. A seat is stuck only when its turn is in flight and neither an event nor pane output has followed for five minutes, so a seat whose hooks keep reporting no longer shows `stuck` beside a working lane. A finished turn settles to `idle` after five quiet minutes, and the lane always ends in the row's state.
+- `stale` now means a seat's source has gone quiet (its host is disconnected or its session snapshot is old), not that the seat is quiet, so a seat waiting for input is no longer stale after 30 seconds.
+- Medium and wide monitor layouts show each seat's source, and the event column shows the report the state comes from (or `no events`) instead of echoing pmuxd's snapshot or runtime events, which could contradict the row's state. A row's age is the time since its last progress.
+- The Activity Monitor package is now 1.3.4 so its updated sources have a new immutable archive identity.
+
+### Fixed
+
+- This release embeds official plug-in catalog 1.3.4, which adds activity-monitor 1.3.4 and keeps the earlier packages.
+
+## [0.3.69-rc.1]
+
+Release candidate for 0.3.69, with the [same changes](#0369---2026-11-18).
 
 ## [0.3.68] - 2026-11-17
 
@@ -17,7 +38,6 @@
 
 ### Added
 
-- On Linux and Windows the app checks for a new release on launch and daily, and shows a short notice when one exists. The notice only names the version and points to **Update and restart**; it never installs anything or stops a session. It is shown once per version, appears in Recent messages, and follows `automatic_update_checks`. It is hidden only by `toasts = "off"`.
 - The macOS app menu has **Restart…**. It previews what `pmux restart --plan` reports, saves a session configuration snapshot, then runs `pmux restart` without stopping any session. **Roll Back Last Update…** now saves a snapshot first too.
 - A seat can set, clear, and show its current ticket with `pmux activity ticket`. `activity-emit` attaches that marker to the seat's activity events.
 

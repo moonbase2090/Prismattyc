@@ -43,6 +43,11 @@ impl Monitor {
         mono_ms: u64,
         pixels: bool,
     ) {
+        // Time passes for every host before each frame is drawn, even when no
+        // poll brought anything new: an open turn can become stuck.
+        for host in &mut self.hosts {
+            host.advance(self.now_ms, mono_ms);
+        }
         let theme = self.palette.theme();
         let clock = Clock {
             wall_ms: self.now_ms,

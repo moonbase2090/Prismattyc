@@ -719,6 +719,20 @@ pub struct Activity<'a> {
     pub operation_id: Option<&'a str>,
 }
 
+impl Activity<'_> {
+    /// Identifies this activity across redraws, so a view can remember which
+    /// ones the viewer expanded. A start and its result share one key.
+    pub fn key(&self) -> String {
+        format!(
+            "{}/{:?}/{}/{}",
+            self.run_id,
+            self.action,
+            self.operation_id.unwrap_or(""),
+            self.started_ms
+        )
+    }
+}
+
 /// Recent activities that share a task, newest first.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TaskGroup<'a> {

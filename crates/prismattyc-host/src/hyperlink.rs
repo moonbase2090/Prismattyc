@@ -333,13 +333,13 @@ pub fn spawn_open(url: &str) -> bool {
     let Some((program, arg)) = open_argv(url) else {
         return false;
     };
-    match Command::new(program)
-        .arg(&arg)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    {
+    match prismattyc_process::spawn(
+        Command::new(program)
+            .arg(&arg)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    ) {
         Ok(mut child) => {
             thread::spawn(move || {
                 let _ = child.wait();

@@ -42,11 +42,12 @@ struct ChildGuard(Child);
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
-        let _ = Command::new("kill")
-            .args(["-TERM", "--", &format!("-{}", self.0.id())])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let _ = prismattyc_process::status(
+            Command::new("kill")
+                .args(["-TERM", "--", &format!("-{}", self.0.id())])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        );
         for _ in 0..20 {
             if self.0.try_wait().ok().flatten().is_some() {
                 return;
@@ -312,7 +313,7 @@ pub(super) fn run_in_private_display(test_name: &str) {
     let (_display, number) = start_private_display(&scratch, started, time_scale);
     let display_ready = started.elapsed();
     let mut command = window_child_command(&scratch, number, test_name);
-    let mut child = ChildGuard(command.spawn().unwrap());
+    let mut child = ChildGuard(prismattyc_process::spawn(&mut command).unwrap());
     let status = loop {
         if let Some(status) = child.0.try_wait().unwrap() {
             break status;
@@ -349,21 +350,22 @@ fn start_private_display(
     // Xvfb allocates an unused display itself and reports only its own number
     // after initialization. Never connect to a guessed or shared :99 display.
     let mut display = ChildGuard(
-        Command::new("Xvfb")
-            .args([
-                "-displayfd",
-                "1",
-                "-screen",
-                "0",
-                "1024x768x24",
-                "-nolisten",
-                "tcp",
-            ])
-            .process_group(0)
-            .stdout(std::fs::File::create(&display_file).unwrap())
-            .stderr(std::fs::File::create(scratch.0.join("xvfb.log")).unwrap())
-            .spawn()
-            .expect("real-window tests require Xvfb installed"),
+        prismattyc_process::spawn(
+            Command::new("Xvfb")
+                .args([
+                    "-displayfd",
+                    "1",
+                    "-screen",
+                    "0",
+                    "1024x768x24",
+                    "-nolisten",
+                    "tcp",
+                ])
+                .process_group(0)
+                .stdout(std::fs::File::create(&display_file).unwrap())
+                .stderr(std::fs::File::create(scratch.0.join("xvfb.log")).unwrap()),
+        )
+        .expect("real-window tests require Xvfb installed"),
     );
     let number = loop {
         if let Ok(number) = std::fs::read_to_string(&display_file)
@@ -2250,15 +2252,16 @@ pub(super) fn session_naming_in_private_window() {
     mux.insert("allow_mixed_case_session_names", toml_edit::value(true));
     config::save_preference(&config::config_path(), "mux", toml_edit::Item::Table(mux)).unwrap();
     let _daemon = ChildGuard(
-        Command::new(bin.join("pmuxd"))
-            .arg("--socket")
-            .arg(&socket)
-            .args(["--", "/bin/sh"])
-            .process_group(0)
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .expect("build pmuxd before the session naming fixture"),
+        prismattyc_process::spawn(
+            Command::new(bin.join("pmuxd"))
+                .arg("--socket")
+                .arg(&socket)
+                .args(["--", "/bin/sh"])
+                .process_group(0)
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit()),
+        )
+        .expect("build pmuxd before the session naming fixture"),
     );
     let deadline = Instant::now() + Duration::from_secs(5);
     while attach_log::live_snapshot().is_none() {

@@ -1,12 +1,13 @@
 //! `pmux-mcp --version` / `-V` short-circuit before connecting.
 
-use std::process::{Command, Output};
+use std::process::Output;
 
 fn mcp(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_pmux-mcp"))
-        .args(args)
-        .output()
-        .expect("run pmux-mcp")
+    prismattyc_process::spawn(
+        prismattyc_process::capture_command(env!("CARGO_BIN_EXE_pmux-mcp")).args(args),
+    )
+    .and_then(std::process::Child::wait_with_output)
+    .expect("run pmux-mcp")
 }
 
 #[test]

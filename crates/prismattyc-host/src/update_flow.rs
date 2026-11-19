@@ -358,7 +358,7 @@ fn verify_installed_versions(value: &Value, expected: &str) -> Result<()> {
 }
 
 pub(super) fn run(pmux: &Path, args: &[&str]) -> Result<String> {
-    let mut cmd = prismattyc_mux::platform::hidden_command(pmux);
+    let mut cmd = prismattyc_mux::platform::hidden_capture_command(pmux);
     if let Some(socket) = host_mux_socket() {
         cmd.arg("--socket").arg(socket);
     }
@@ -368,10 +368,8 @@ pub(super) fn run(pmux: &Path, args: &[&str]) -> Result<String> {
             cmd.env("PMUX_SERVER", server);
         }
     }
-    let output = cmd
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .output()
+    let output = prismattyc_process::spawn(cmd.args(args).stdin(std::process::Stdio::null()))
+        .and_then(std::process::Child::wait_with_output)
         .context("run update command")?;
     anyhow::ensure!(
         output.status.success(),
@@ -390,13 +388,12 @@ fn relaunch(resume: &Resume) -> Result<()> {
     cmd.env("PRISMATTYC_COMPLETE_UPDATE", serde_json::to_string(resume)?);
     #[cfg(unix)]
     {
-        use prismattyc_mux::platform::Exec;
-        Err(cmd.exec()).context("launch updated app")
+        Err(prismattyc_process::exec(&mut cmd)).context("launch updated app")
     }
     #[cfg(windows)]
     {
         instance::release();
-        cmd.spawn().context("launch updated app")?;
+        prismattyc_process::spawn(&mut cmd).context("launch updated app")?;
         std::process::exit(0);
     }
 }

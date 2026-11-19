@@ -723,21 +723,6 @@ mod windows {
 }
 
 #[cfg(unix)]
-pub use std::os::unix::process::CommandExt as Exec;
-#[cfg(windows)]
-pub trait Exec {
-    fn exec(&mut self) -> io::Error;
-}
-#[cfg(windows)]
-impl Exec for std::process::Command {
-    fn exec(&mut self) -> io::Error {
-        match self.status() {
-            Ok(status) => std::process::exit(status.code().unwrap_or(1)),
-            Err(error) => error,
-        }
-    }
-}
-#[cfg(unix)]
 pub use rustix::process::Signal;
 #[cfg(windows)]
 #[derive(Clone, Copy)]
@@ -781,6 +766,13 @@ pub fn detach_creation_flags() -> u32 {
 /// Start `program` without allocating a console window on Windows.
 pub fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
     let mut command = std::process::Command::new(program);
+    hide_console(&mut command);
+    command
+}
+
+/// Capture output without allocating a console window on Windows.
+pub fn hidden_capture_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let mut command = prismattyc_process::capture_command(program);
     hide_console(&mut command);
     command
 }
@@ -838,7 +830,7 @@ pub fn spawn_detached(command: &mut std::process::Command) -> io::Result<std::pr
     }
     #[cfg(not(windows))]
     {
-        command.spawn()
+        prismattyc_process::spawn(command)
     }
 }
 
@@ -916,7 +908,7 @@ fn spawn_without_parent_stdio(
                 restore.restore[index] = true;
             }
         }
-        let child = command.spawn();
+        let child = prismattyc_process::spawn(command);
         drop(restore);
         child
     }
@@ -1149,7 +1141,7 @@ pub fn spawn_probe(
             return Err(io::Error::last_os_error());
         }
         command.creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW);
-        let mut child = command.spawn()?;
+        let mut child = prismattyc_process::spawn(command)?;
         if AssignProcessToJobObject(job.0, child.as_raw_handle()) == 0 {
             let error = io::Error::last_os_error();
             let _ = child.kill();

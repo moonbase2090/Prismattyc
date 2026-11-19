@@ -1243,8 +1243,7 @@ fn cmd_attach_all(paths: &Paths) -> Result<()> {
         sessions.len(),
         session_list(&sessions)
     );
-    use prismattyc_mux::platform::Exec;
-    Err(command.exec()).with_context(|| format!("exec {}", host.display()))
+    Err(prismattyc_process::exec(&mut command)).with_context(|| format!("exec {}", host.display()))
 }
 
 /// The prismattyc-host command that shows every live session as a tab.
@@ -1494,8 +1493,8 @@ fn cmd_attach(paths: &Paths, rest: Vec<String>) -> Result<()> {
     if parsed.fit {
         command.arg("--fit");
     }
-    use prismattyc_mux::platform::Exec;
-    Err(command.exec()).with_context(|| format!("exec {}", attach.display()))
+    Err(prismattyc_process::exec(&mut command))
+        .with_context(|| format!("exec {}", attach.display()))
 }
 
 const NEW_USAGE: &str =
@@ -2469,8 +2468,8 @@ fn exec_attach_session(paths: &Paths, session: &str, space: Option<&str>) -> Res
         command.arg("--space").arg(space);
         command.env("PMUX_SPACE", space);
     }
-    use prismattyc_mux::platform::Exec;
-    Err(command.exec()).with_context(|| format!("exec {}", attach.display()))
+    Err(prismattyc_process::exec(&mut command))
+        .with_context(|| format!("exec {}", attach.display()))
 }
 
 fn cmd_new(paths: &Paths, rest: Vec<String>, file: &prismattyc_mux::MuxSection) -> Result<()> {
@@ -7574,12 +7573,13 @@ impl PipeWriter {
                 let shell = "sh";
                 #[cfg(windows)]
                 let shell = prismattyc_mux::platform::default_shell();
-                let mut child = Command::new(shell)
-                    .arg(if cfg!(windows) { "/C" } else { "-c" })
-                    .arg(cmd)
-                    .stdin(Stdio::piped())
-                    .spawn()
-                    .with_context(|| format!("exec {cmd:?}"))?;
+                let mut child = prismattyc_process::spawn(
+                    Command::new(shell)
+                        .arg(if cfg!(windows) { "/C" } else { "-c" })
+                        .arg(cmd)
+                        .stdin(Stdio::piped()),
+                )
+                .with_context(|| format!("exec {cmd:?}"))?;
                 let stdin = child.stdin.take().context("exec command has no stdin")?;
                 Ok(Self {
                     sink: Box::new(stdin),
@@ -9350,27 +9350,30 @@ mod tests {
         let fixture_source =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/detach-process.rs");
         let fixture_bin = dir.join(format!("pmux-attach{}", std::env::consts::EXE_SUFFIX));
-        let compiled = Command::new("rustc")
-            .arg("--edition=2021")
-            .arg(&fixture_source)
-            .arg("-o")
-            .arg(&fixture_bin)
-            .output()
-            .expect("compile detach process fixture");
+        let compiled = prismattyc_process::spawn(
+            prismattyc_process::capture_command("rustc")
+                .arg("--edition=2021")
+                .arg(&fixture_source)
+                .arg("-o")
+                .arg(&fixture_bin),
+        )
+        .and_then(std::process::Child::wait_with_output)
+        .expect("compile detach process fixture");
         assert!(
             compiled.status.success(),
             "detach fixture compilation failed: {}",
             String::from_utf8_lossy(&compiled.stderr)
         );
         let mut child = ReapChild::new(
-            Command::new(&fixture_bin)
-                .arg("--socket")
-                .arg(sock)
-                .env("PMUX_DETACH_FIXTURE_READY", &ready)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap(),
+            prismattyc_process::spawn(
+                Command::new(&fixture_bin)
+                    .arg("--socket")
+                    .arg(sock)
+                    .env("PMUX_DETACH_FIXTURE_READY", &ready)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null()),
+            )
+            .unwrap(),
         );
         let start = Instant::now();
         while !ready.exists()
@@ -9541,33 +9544,34 @@ mod tests {
         ));
         std::fs::create_dir_all(dir.join("crates/prismattyc-host")).unwrap();
         std::fs::create_dir_all(dir.join("crates/prismattyc-mux")).unwrap();
-        assert!(Command::new("git")
-            .args(["init"])
-            .current_dir(&dir)
-            .status()
-            .unwrap()
-            .success());
+        assert!(
+            prismattyc_process::status(Command::new("git").args(["init"]).current_dir(&dir))
+                .unwrap()
+                .success()
+        );
         std::fs::write(dir.join("README"), "x\n").unwrap();
-        assert!(Command::new("git")
-            .args(["-c", "user.email=t@t", "-c", "user.name=t", "add", "README"])
-            .current_dir(&dir)
-            .status()
-            .unwrap()
-            .success());
-        assert!(Command::new("git")
-            .args([
-                "-c",
-                "user.email=t@t",
-                "-c",
-                "user.name=t",
-                "commit",
-                "-m",
-                "init",
-            ])
-            .current_dir(&dir)
-            .status()
-            .unwrap()
-            .success());
+        assert!(prismattyc_process::status(
+            Command::new("git")
+                .args(["-c", "user.email=t@t", "-c", "user.name=t", "add", "README"])
+                .current_dir(&dir)
+        )
+        .unwrap()
+        .success());
+        assert!(prismattyc_process::status(
+            Command::new("git")
+                .args([
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "user.name=t",
+                    "commit",
+                    "-m",
+                    "init",
+                ])
+                .current_dir(&dir)
+        )
+        .unwrap()
+        .success());
         std::fs::write(dir.join("dirty"), "y\n").unwrap();
         let _lock = REPO_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _env = TempEnvDir::install("PRISMATTYC_REPO", dir.clone(), &dir);

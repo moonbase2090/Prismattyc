@@ -5,7 +5,7 @@
 //! exists. This module only reads that answer; installing stays with the
 //! explicit update flow, so a check never stops a session.
 
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::thread;
 
 use anyhow::{ensure, Context, Result};
@@ -33,11 +33,13 @@ pub(super) fn start_check(proxy: EventLoopProxy<UserAction>) {
 fn check_release() -> Result<ReleaseCheck> {
     let pmux = find_mux_bin();
     let args = ["update", "--check", "--json"];
-    let output = Command::new(&pmux)
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .with_context(|| format!("run {} {}", pmux.display(), args.join(" ")))?;
+    let output = prismattyc_process::spawn(
+        prismattyc_process::capture_command(&pmux)
+            .args(args)
+            .stdin(Stdio::null()),
+    )
+    .and_then(std::process::Child::wait_with_output)
+    .with_context(|| format!("run {} {}", pmux.display(), args.join(" ")))?;
     ensure!(output.status.success(), "{}", command_error(&output));
     parse(&output.stdout)
 }

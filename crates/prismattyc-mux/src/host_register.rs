@@ -199,20 +199,21 @@ mod tests {
             let executable = std::env::current_exe().expect("current test executable");
             let ready_dir = temp_dir("keeper");
             let ready_path = ready_dir.join("ready");
-            let mut child = Command::new(executable)
-                .args([
-                    "--exact",
-                    "host_register::tests::pid_keeper",
-                    "--ignored",
-                    "--nocapture",
-                ])
-                .env("PMUX_TEST_PID_KEEPER", "1")
-                .env("PMUX_TEST_PID_KEEPER_READY", &ready_path)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .expect("spawn pid keeper test process");
+            let mut child = prismattyc_process::spawn(
+                Command::new(executable)
+                    .args([
+                        "--exact",
+                        "host_register::tests::pid_keeper",
+                        "--ignored",
+                        "--nocapture",
+                    ])
+                    .env("PMUX_TEST_PID_KEEPER", "1")
+                    .env("PMUX_TEST_PID_KEEPER_READY", &ready_path)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null()),
+            )
+            .expect("spawn pid keeper test process");
             let deadline = Instant::now() + Duration::from_secs(5);
             while Instant::now() < deadline {
                 if let Some(status) = child.try_wait().expect("check pid keeper process") {

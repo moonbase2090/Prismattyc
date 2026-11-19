@@ -47,10 +47,12 @@ pub(super) struct Prompt {
 }
 
 fn suggested(space: &str) -> String {
-    let output = pmux_command()
-        .args(["session", "suggest", "--space", space])
-        .stdin(std::process::Stdio::null())
-        .output();
+    let output = prismattyc_process::spawn(
+        pmux_capture_command()
+            .args(["session", "suggest", "--space", space])
+            .stdin(std::process::Stdio::null()),
+    )
+    .and_then(std::process::Child::wait_with_output);
     if let Ok(output) = output {
         if output.status.success() {
             let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -222,10 +224,12 @@ pub(super) fn rename_space(host: &mut HostState, name: String) {
 }
 
 fn run(args: &[&str]) -> Result<String> {
-    let output = pmux_command()
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .output()?;
+    let output = prismattyc_process::spawn(
+        pmux_capture_command()
+            .args(args)
+            .stdin(std::process::Stdio::null()),
+    )
+    .and_then(std::process::Child::wait_with_output)?;
     if !output.status.success() {
         bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
     }

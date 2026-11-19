@@ -4,7 +4,6 @@
 mod support;
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 struct Home {
     root: PathBuf,
@@ -31,7 +30,7 @@ impl Home {
     }
 
     fn pmux(&self, args: &[&str]) -> String {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_pmux"));
+        let mut command = prismattyc_process::capture_command(env!("CARGO_BIN_EXE_pmux"));
         support::clear_command_env(&mut command);
         command
             .env_remove(prismattyc_mux::default_space::DEFAULT_SPACE_ENV)
@@ -41,7 +40,9 @@ impl Home {
             .env("XDG_STATE_HOME", self.root.join("state"))
             .env("XDG_CONFIG_HOME", self.root.join("config"))
             .args(args);
-        let output = command.output().expect("run pmux");
+        let output = prismattyc_process::spawn(&mut command)
+            .and_then(std::process::Child::wait_with_output)
+            .expect("run pmux");
         assert!(
             output.status.success(),
             "pmux {args:?}: {}",
@@ -66,15 +67,17 @@ impl Home {
 
 impl Drop for Home {
     fn drop(&mut self) {
-        let _ = Command::new(env!("CARGO_BIN_EXE_pmux"))
-            .env("HOME", self.root.join("home"))
-            .env("XDG_RUNTIME_DIR", self.root.join("run"))
-            .env("XDG_DATA_HOME", self.root.join("data"))
-            .env("XDG_STATE_HOME", self.root.join("state"))
-            .env("XDG_CONFIG_HOME", self.root.join("config"))
-            .env_remove("PMUX_SOCKET")
-            .arg("stop")
-            .output();
+        let _ = prismattyc_process::spawn(
+            prismattyc_process::capture_command(env!("CARGO_BIN_EXE_pmux"))
+                .env("HOME", self.root.join("home"))
+                .env("XDG_RUNTIME_DIR", self.root.join("run"))
+                .env("XDG_DATA_HOME", self.root.join("data"))
+                .env("XDG_STATE_HOME", self.root.join("state"))
+                .env("XDG_CONFIG_HOME", self.root.join("config"))
+                .env_remove("PMUX_SOCKET")
+                .arg("stop"),
+        )
+        .and_then(std::process::Child::wait_with_output);
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }

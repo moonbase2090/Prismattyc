@@ -3,6 +3,7 @@ exclude = ["third_party/portable-pty", "tools/activity-monitor"]
 members = [
     "crates/prismattyc",
     "crates/prismattyc-core",
+    "crates/prismattyc-process",
     "crates/prismattyc-emulator",
     "crates/prismattyc-host",
     "crates/prismattyc-labs",

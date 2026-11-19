@@ -331,7 +331,7 @@ fn run_request(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = match command.spawn() {
+    let mut child = match prismattyc_process::spawn(&mut command) {
         Ok(child) => child,
         Err(error) => return Some(Err(FetchError::SshUnavailable(error.to_string()))),
     };
@@ -553,11 +553,12 @@ mod tests {
     }
 
     fn pid_alive(pid: i32) -> bool {
-        Command::new("/bin/kill")
-            .args(["-0", &pid.to_string()])
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
+        prismattyc_process::status(
+            Command::new("/bin/kill")
+                .args(["-0", &pid.to_string()])
+                .stderr(Stdio::null()),
+        )
+        .is_ok_and(|status| status.success())
     }
 
     #[test]
@@ -948,11 +949,12 @@ mod real_ssh_tests {
     }
 
     fn keygen(path: &Path) {
-        let status = Command::new("/usr/bin/ssh-keygen")
-            .args(["-q", "-t", "ed25519", "-N", "", "-f"])
-            .arg(path)
-            .status()
-            .unwrap();
+        let status = prismattyc_process::status(
+            Command::new("/usr/bin/ssh-keygen")
+                .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+                .arg(path),
+        )
+        .unwrap();
         assert!(status.success());
     }
 
@@ -969,7 +971,7 @@ mod real_ssh_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let socket = dir.join("mux.sock");
         let local = |binary: &str| {
-            let mut command = Command::new(env.bin.join(binary));
+            let mut command = prismattyc_process::capture_command(env.bin.join(binary));
             command
                 .env("PMUX_SOCKET", &socket)
                 .env("XDG_DATA_HOME", &dir)
@@ -988,23 +990,28 @@ mod real_ssh_tests {
             }
         ));
 
-        let mut daemon = local("pmuxd")
-            .arg("--socket")
-            .arg(&socket)
-            .args(["--", "/bin/sh", "-c", "exec sleep 999"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+        let mut daemon = prismattyc_process::spawn(
+            local("pmuxd")
+                .arg("--socket")
+                .arg(&socket)
+                .args(["--", "/bin/sh", "-c", "exec sleep 999"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         while std::os::unix::net::UnixStream::connect(&socket).is_err() {
             assert!(Instant::now() < deadline, "daemon did not start");
             std::thread::sleep(Duration::from_millis(10));
         }
-        let created = local("pmux")
-            .args(["space", "create", "work", "--no-attach"])
-            .output()
-            .unwrap();
+        let created = prismattyc_process::spawn(local("pmux").args([
+            "space",
+            "create",
+            "work",
+            "--no-attach",
+        ]))
+        .and_then(std::process::Child::wait_with_output)
+        .unwrap();
         assert!(
             created.status.success(),
             "{}",

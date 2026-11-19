@@ -9869,6 +9869,10 @@ fn pmux_command() -> std::process::Command {
     prismattyc_mux::platform::hidden_command(pmux_bin())
 }
 
+fn pmux_capture_command() -> std::process::Command {
+    prismattyc_mux::platform::hidden_capture_command(pmux_bin())
+}
+
 /// The mux socket this host belongs to: `PMUX_SOCKET` when set and
 /// non-empty, else the default instance — the same instance a bare `pmux`
 /// picks. A bare launch (Dock, Finder, a recorder, `prismattyc-host` from a
@@ -9981,23 +9985,23 @@ fn advance_space_opens(host: &mut HostState) {
     };
     let before = host.attach_layout_path.as_deref().and_then(cache_stamp);
     host.space_open_observation = Some(space_outcome::Observation::capture(&request.name));
-    match pmux_command()
-        .args({
-            let mut args = targeted_space_args(
-                &request.name,
-                request.mode,
-                host.attach_layout_path.as_deref(),
-            );
-            if let Some(name) = &request.session_name {
-                args.extend([std::ffi::OsString::from("--session-name"), name.into()]);
-            }
-            args
-        })
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-    {
+    match prismattyc_process::spawn(
+        pmux_command()
+            .args({
+                let mut args = targeted_space_args(
+                    &request.name,
+                    request.mode,
+                    host.attach_layout_path.as_deref(),
+                );
+                if let Some(name) = &request.session_name {
+                    args.extend([std::ffi::OsString::from("--session-name"), name.into()]);
+                }
+                args
+            })
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped()),
+    ) {
         Ok(child) => host.space_opens.started(request, child, before),
         Err(error) => report_space_open(
             host,
@@ -10774,23 +10778,24 @@ fn save_space_from_host_with(host: &mut HostState, name: &str, toast: bool) -> b
     }
     persist_attach_layout_from_live(host);
     match pump_timing::measure_subprocess_wait(|| {
-        pmux_command()
-            .args(["space", "save", name])
-            .args(
-                host.attach_layout_path
-                    .as_ref()
-                    .into_iter()
-                    .flat_map(|path| {
-                        [
-                            std::ffi::OsString::from("--view-path"),
-                            path.as_os_str().to_owned(),
-                        ]
-                    }),
-            )
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::inherit())
-            .status()
+        prismattyc_process::status(
+            pmux_command()
+                .args(["space", "save", name])
+                .args(
+                    host.attach_layout_path
+                        .as_ref()
+                        .into_iter()
+                        .flat_map(|path| {
+                            [
+                                std::ffi::OsString::from("--view-path"),
+                                path.as_os_str().to_owned(),
+                            ]
+                        }),
+                )
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::inherit()),
+        )
     }) {
         Ok(status) if status.success() => {
             refresh_rail(host);
@@ -15735,13 +15740,13 @@ fn space_picker_rows(kind: SpacePickerKind, current: Option<&str>) -> Vec<SpaceP
 /// Whether the focused pane can move into `target`.
 fn run_pmux_space(args: &[String]) -> Result<(), String> {
     let args_ref = args.iter().map(String::as_str).collect::<Vec<_>>();
-    match pmux_command()
-        .args(&args_ref)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::inherit())
-        .status()
-    {
+    match prismattyc_process::status(
+        pmux_command()
+            .args(&args_ref)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit()),
+    ) {
         Ok(status) if status.success() => Ok(()),
         Ok(status) => Err(format!("pmux {} exited {status}", args.join(" "))),
         Err(error) => Err(format!("could not run pmux: {error}")),
@@ -17659,11 +17664,13 @@ fn spawn_owned_space_pane(
         .as_deref()
         .context("no current Space")?;
     let owner = space.id.clone().context("Space ownership is unresolved")?;
-    let output = pmux_command()
-        .args(["space", "add", name])
-        .args(requested.into_iter().flat_map(|name| ["--name", name]))
-        .stdin(std::process::Stdio::null())
-        .output()?;
+    let output = prismattyc_process::spawn(
+        pmux_capture_command()
+            .args(["space", "add", name])
+            .args(requested.into_iter().flat_map(|name| ["--name", name]))
+            .stdin(std::process::Stdio::null()),
+    )
+    .and_then(std::process::Child::wait_with_output)?;
     if !output.status.success() {
         bail!(
             "create session: {}",
@@ -19756,11 +19763,13 @@ fn live_sessions() -> Vec<(String, String)> {
         return Vec::new();
     };
     let output = pump_timing::measure_subprocess_wait(|| {
-        pmux_command()
-            .arg("--socket")
-            .arg(&socket)
-            .arg("ls")
-            .output()
+        prismattyc_process::spawn(
+            pmux_capture_command()
+                .arg("--socket")
+                .arg(&socket)
+                .arg("ls"),
+        )
+        .and_then(std::process::Child::wait_with_output)
     });
     let Ok(output) = output else {
         return Vec::new();
@@ -19833,12 +19842,13 @@ fn recreate_session(host: &HostState, name: &str) -> Result<()> {
         Some(space) => session_reopen_args(name, space, true),
         None => session_reopen_args(name, &loaded_space_name(host), false),
     };
-    let mut command = pmux_command();
+    let mut command = pmux_capture_command();
     command.args(&args);
     if let Some(socket) = host_mux_socket() {
         command.env("PMUX_SOCKET", socket);
     }
-    let output = command.stdin(std::process::Stdio::null()).output()?;
+    let output = prismattyc_process::spawn(command.stdin(std::process::Stdio::null()))
+        .and_then(std::process::Child::wait_with_output)?;
     if !output.status.success() {
         bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
     }
@@ -22280,10 +22290,9 @@ impl ApplicationHandler<UserAction> for App {
                 Ok(command) if command.detached => {
                     // A GUI editor opens its own window. A host window
                     // around it would only show an empty pane.
-                    if let Err(e) = std::process::Command::new(&command.program)
-                        .args(&command.args)
-                        .spawn()
-                    {
+                    if let Err(e) = prismattyc_process::spawn(
+                        std::process::Command::new(&command.program).args(&command.args),
+                    ) {
                         eprintln!(
                             "prismattyc-host: config editor {} failed: {e}",
                             command.program

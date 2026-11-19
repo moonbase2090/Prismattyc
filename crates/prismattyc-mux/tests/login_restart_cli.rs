@@ -61,14 +61,15 @@ fn start_server_with_env(socket: &Path, root: &Path, env: &[(&str, &str)]) -> Se
         command.env(key, value);
     }
     let guard = ServerGuard {
-        child: command
-            .arg("--socket")
-            .arg(socket)
-            .args(["--", "/bin/sh", "-c", "exec sleep 999"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn pmuxd"),
+        child: prismattyc_process::spawn(
+            command
+                .arg("--socket")
+                .arg(socket)
+                .args(["--", "/bin/sh", "-c", "exec sleep 999"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .expect("spawn pmuxd"),
         socket: socket.to_path_buf(),
         root: root.to_path_buf(),
     };
@@ -97,7 +98,7 @@ fn apply_isolation(command: &mut Command, root: &Path) {
 }
 
 fn pmux(socket: &Path, root: &Path, extra: &[(&str, &str)], args: &[&str]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_pmux"));
+    let mut command = prismattyc_process::capture_command(env!("CARGO_BIN_EXE_pmux"));
     clear_command_env(&mut command);
     apply_isolation(&mut command, root);
     command
@@ -108,7 +109,9 @@ fn pmux(socket: &Path, root: &Path, extra: &[(&str, &str)], args: &[&str]) -> Ou
     for (key, value) in extra {
         command.env(key, value);
     }
-    command.output().expect("run pmux")
+    prismattyc_process::spawn(&mut command)
+        .and_then(std::process::Child::wait_with_output)
+        .expect("run pmux")
 }
 
 fn text(output: &Output) -> String {
@@ -173,17 +176,17 @@ fn restart_plan_never_reports_a_locked_unresponsive_daemon_as_empty() {
     struct Resume(u32);
     impl Drop for Resume {
         fn drop(&mut self) {
-            let _ = Command::new("kill")
-                .args(["-CONT", &self.0.to_string()])
-                .status();
+            let _ = prismattyc_process::status(
+                Command::new("kill").args(["-CONT", &self.0.to_string()]),
+            );
         }
     }
     let _resume = Resume(pid);
-    assert!(Command::new("kill")
-        .args(["-STOP", &pid.to_string()])
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        prismattyc_process::status(Command::new("kill").args(["-STOP", &pid.to_string()]))
+            .unwrap()
+            .success()
+    );
     let output = pmux(&socket, &root, &[], &["restart", "--plan", "--json"]);
     fail(&output, "Could not read running sessions");
     let detail = text(&output);
@@ -198,10 +201,12 @@ fn restart_plan_never_reports_a_locked_unresponsive_daemon_as_empty() {
         .as_str()
         .unwrap()
         .contains(&format!("pid {pid}")));
-    let mut duplicate = Command::new(env!("CARGO_BIN_EXE_pmuxd"));
+    let mut duplicate = prismattyc_process::capture_command(env!("CARGO_BIN_EXE_pmuxd"));
     clear_command_env(&mut duplicate);
     apply_isolation(&mut duplicate, &root);
-    let refused = duplicate.arg("--socket").arg(&socket).output().unwrap();
+    let refused = prismattyc_process::spawn(duplicate.arg("--socket").arg(&socket))
+        .and_then(std::process::Child::wait_with_output)
+        .unwrap();
     fail(&refused, "daemon lock");
     assert!(
         text(&refused).contains(&format!("pid {pid}")),
@@ -469,16 +474,18 @@ fn session_configuration_restores_names_directories_and_commands_without_replay(
     let cwd = root.join("project");
     std::fs::create_dir(&cwd).unwrap();
     let cwd = cwd.canonicalize().unwrap();
-    let mut create = Command::new(env!("CARGO_BIN_EXE_pmux"));
+    let mut create = prismattyc_process::capture_command(env!("CARGO_BIN_EXE_pmux"));
     clear_command_env(&mut create);
     apply_isolation(&mut create, &root);
-    ok(&create
-        .current_dir(&cwd)
-        .arg("--socket")
-        .arg(&socket)
-        .args(["new", "--no-attach", "work"])
-        .output()
-        .unwrap());
+    ok(
+        &prismattyc_process::spawn(create.current_dir(&cwd).arg("--socket").arg(&socket).args([
+            "new",
+            "--no-attach",
+            "work",
+        ]))
+        .and_then(std::process::Child::wait_with_output)
+        .unwrap(),
+    );
     let file = root.join("configuration.json");
     let launch = "printf restored >> launches".to_string();
     ok(&pmux(
@@ -558,16 +565,18 @@ fn restore_replays_the_saved_command_into_a_pane_that_looks_busy() {
     let cwd = root.join("project");
     std::fs::create_dir(&cwd).unwrap();
     let cwd = cwd.canonicalize().unwrap();
-    let mut create = Command::new(env!("CARGO_BIN_EXE_pmux"));
+    let mut create = prismattyc_process::capture_command(env!("CARGO_BIN_EXE_pmux"));
     clear_command_env(&mut create);
     apply_isolation(&mut create, &root);
-    ok(&create
-        .current_dir(&cwd)
-        .arg("--socket")
-        .arg(&socket)
-        .args(["new", "--no-attach", "work"])
-        .output()
-        .unwrap());
+    ok(
+        &prismattyc_process::spawn(create.current_dir(&cwd).arg("--socket").arg(&socket).args([
+            "new",
+            "--no-attach",
+            "work",
+        ]))
+        .and_then(std::process::Child::wait_with_output)
+        .unwrap(),
+    );
     let file = root.join("configuration.json");
     let launch = "printf restored >> launches".to_string();
     ok(&pmux(
@@ -1115,16 +1124,18 @@ fn restore_skips_a_saved_command_with_a_line_break_and_restores_the_rest() {
         let cwd = root.join(name);
         std::fs::create_dir(&cwd).unwrap();
         let cwd = cwd.canonicalize().unwrap();
-        let mut create = Command::new(env!("CARGO_BIN_EXE_pmux"));
+        let mut create = prismattyc_process::capture_command(env!("CARGO_BIN_EXE_pmux"));
         clear_command_env(&mut create);
         apply_isolation(&mut create, &root);
-        ok(&create
-            .current_dir(&cwd)
-            .arg("--socket")
-            .arg(&socket)
-            .args(["new", "--no-attach", name])
-            .output()
-            .unwrap());
+        ok(&prismattyc_process::spawn(
+            create.current_dir(&cwd).arg("--socket").arg(&socket).args([
+                "new",
+                "--no-attach",
+                name,
+            ]),
+        )
+        .and_then(std::process::Child::wait_with_output)
+        .unwrap());
         dirs.push(cwd);
     }
     let file = root.join("configuration.json");

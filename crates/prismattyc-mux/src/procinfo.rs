@@ -1519,15 +1519,16 @@ mod tests {
 
     #[test]
     fn pane_processes_match_the_single_root_reads() {
-        let mut child =
-            std::process::Command::new(if cfg!(windows) { "cmd.exe" } else { "/bin/sh" })
-                .args(if cfg!(windows) {
+        let mut child = prismattyc_process::spawn(
+            std::process::Command::new(if cfg!(windows) { "cmd.exe" } else { "/bin/sh" }).args(
+                if cfg!(windows) {
                     vec!["/d", "/c", "ping -n 30 127.0.0.1 > nul"]
                 } else {
                     vec!["-c", "sleep 30"]
-                })
-                .spawn()
-                .expect("spawn a pane stand-in");
+                },
+            ),
+        )
+        .expect("spawn a pane stand-in");
         let root = child.id();
         std::thread::sleep(std::time::Duration::from_millis(200));
         let processes = PaneProcesses::read(&[root]);
@@ -1561,12 +1562,14 @@ mod tests {
             b"#include <stdlib.h>\n#include <unistd.h>\nint main(int argc, char **argv) { sleep(argc > 1 ? (unsigned int)atoi(argv[1]) : 30); return 0; }\n",
         )
         .expect("write controlled-PATH sleeper source");
-        let output = std::process::Command::new("cc")
-            .arg("-o")
-            .arg(path)
-            .arg(&source)
-            .output()
-            .expect("compile controlled-PATH sleeper");
+        let output = prismattyc_process::spawn(
+            prismattyc_process::capture_command("cc")
+                .arg("-o")
+                .arg(path)
+                .arg(&source),
+        )
+        .and_then(std::process::Child::wait_with_output)
+        .expect("compile controlled-PATH sleeper");
         let _ = std::fs::remove_file(source);
         assert!(
             output.status.success(),
@@ -1592,7 +1595,8 @@ mod tests {
         if let Some(path) = path {
             command.env("PATH", path);
         }
-        let mut child = command.spawn().expect("spawn controlled-PATH process");
+        let mut child =
+            prismattyc_process::spawn(&mut command).expect("spawn controlled-PATH process");
         assert_eq!(child.try_wait().unwrap(), None, "controlled process exited");
         let expected_path = path.map(OsStr::to_os_string);
         let mut observed_path = process_path(child.id());
@@ -1885,11 +1889,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn foreground_command_sees_shell_child() {
-        let mut child = std::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg("sleep 30")
-            .spawn()
-            .expect("spawn sh -c sleep");
+        let mut child = prismattyc_process::spawn(
+            std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg("sleep 30"),
+        )
+        .expect("spawn sh -c sleep");
         let pid = child.id();
         let mut found = None;
         for _ in 0..50 {
@@ -1908,12 +1913,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn foreground_command_absent_for_bare_shell() {
-        let mut bare = std::process::Command::new("/bin/sh")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("spawn bare sh");
+        let mut bare = prismattyc_process::spawn(
+            std::process::Command::new("/bin/sh")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null()),
+        )
+        .expect("spawn bare sh");
         std::thread::sleep(std::time::Duration::from_millis(50));
         let cmd = foreground_command_impl(bare.id());
         let health = terminal_foreground(bare.id());

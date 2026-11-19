@@ -617,11 +617,13 @@ pub fn install_main_menu(
 }
 
 fn save_configuration(pmux: &std::path::Path, path: &std::path::Path) -> Result<String, String> {
-    let output = std::process::Command::new(pmux)
-        .args(["session-config", "save"])
-        .arg(path)
-        .output()
-        .map_err(|error| format!("Could not start the session configuration save: {error}"))?;
+    let output = prismattyc_process::spawn(
+        prismattyc_process::capture_command(pmux)
+            .args(["session-config", "save"])
+            .arg(path),
+    )
+    .and_then(std::process::Child::wait_with_output)
+    .map_err(|error| format!("Could not start the session configuration save: {error}"))?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     } else {

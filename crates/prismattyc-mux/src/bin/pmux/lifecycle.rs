@@ -203,7 +203,10 @@ pub(super) fn restart(paths: &Paths, args: Vec<String>) -> Result<()> {
                     .arg(&paths.socket)
                     .arg("up")
                     .stdout(Stdio::null());
-                anyhow::ensure!(up.status()?.success(), "daemon up failed");
+                anyhow::ensure!(
+                    prismattyc_process::status(&mut up)?.success(),
+                    "daemon up failed"
+                );
                 results.push(json!({"component":"daemon","status":"restarted"}));
             } else {
                 let verbs: &[&str] = if opts.stop_sessions {
@@ -223,7 +226,10 @@ pub(super) fn restart(paths: &Paths, args: Vec<String>) -> Result<()> {
                     {
                         command.env("PMUX_SERVER", server);
                     }
-                    anyhow::ensure!(command.status()?.success(), "daemon {verb} failed");
+                    anyhow::ensure!(
+                        prismattyc_process::status(&mut command)?.success(),
+                        "daemon {verb} failed"
+                    );
                 }
                 results.push(json!({"component":"daemon","status":"restarted"}));
             }

@@ -81,6 +81,43 @@ a stalled mirror fails over in minutes instead of using up the job. Use it only
 for fetching tools and packages, never around a test. `bash
 scripts/fetch-with-time-limit_test.sh` checks it.
 
+## Process launch changes
+
+For changes to child launch, replacement, or native descriptor acquisition, run:
+
+```sh
+python3 scripts/check-process-boundary_test.py
+python3 scripts/check-process-boundary.py
+cargo +1.90.0 test -p prismattyc-process --locked
+```
+
+The boundary check lints all workspace targets, the patched `portable-pty`
+library, and the separately locked activity monitor. The excluded library uses
+`clippy-driver` through `cargo rustc` because cargo-clippy wraps workspace
+members. Its check enforces the launch lint independently of upstream style
+warnings. It also checks raw launch
+FFI declarations and lint suppressions. The fixture script proves that direct,
+aliased, and UFCS process launches fail while thread launches pass.
+
+The host's normal dependency closure is recorded for Darwin and Linux in
+`.config/process-runtime-audit.json`, with resolved features conservatively
+including workspace feature unification. A changed source, version, feature,
+or local package requires review of its launch paths before regenerating
+`python3 scripts/check-process-boundary.py --write-audit`. The check requires
+exactly one local `prismattyc-process` package in that closure. This records
+dependency changes; it does not prove arbitrary third-party or framework code
+uses the boundary.
+
+Run the process tests on native macOS for descriptor creation and reception
+races, close-on-exec, cleanup, and lock release during child wait. Linux proves
+the atomic descriptor path; it does not exercise the Darwin mutex. Capture
+stream and replacement tests run on all native platforms. Show each new test
+failing against an intentional break before accepting the restored pass.
+
+Use the session/mail and space drives after launch migrations. Exercise a real
+PTY with inherited descriptors and a native restart for desktop replacement
+changes. Record clean-VM results and platform gaps separately.
+
 ## Doctor
 
 The CLI helper performs a read-only doctor before the drive, after success, and after a failed drive when the daemon is still alive: check its owned process, check the private socket, run that build's `pmux --version` and `pmux ls`. Inspect `doctor.jsonl` and compare the version with `revision.txt`; a response from an unrelated installed binary is not proof.

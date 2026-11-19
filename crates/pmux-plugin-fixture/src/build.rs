@@ -2,7 +2,6 @@
 //! Compile the actual guest with the caller's Rust toolchain, never opaque bytes.
 
 use anyhow::{ensure, Result};
-use std::process::Command;
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -15,13 +14,12 @@ pub fn module() -> &'static [u8] {
         let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
         let target = std::env::temp_dir().join(format!("pmux-plugin-fixture-{}-{nonce}", std::process::id()));
         let result = (|| -> Result<Vec<u8>> {
-            let output = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+            let output = prismattyc_process::spawn(prismattyc_process::capture_command(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
                 .current_dir(root)
                 .args(["build", "-p", "pmux-plugin-fixture", "--release", "--target", "wasm32-unknown-unknown", "--locked"])
                 .env("CARGO_TARGET_DIR", &target)
                 .env_remove("RUSTFLAGS")
-                .env_remove("CARGO_ENCODED_RUSTFLAGS")
-                .output()?;
+                .env_remove("CARGO_ENCODED_RUSTFLAGS")).and_then(std::process::Child::wait_with_output)?;
             ensure!(output.status.success(), "build the real component fixture; install wasm32-unknown-unknown for this toolchain:\n{}", String::from_utf8_lossy(&output.stderr));
             Ok(std::fs::read(target.join("wasm32-unknown-unknown/release/pmux_plugin_fixture.wasm"))?)
         })();

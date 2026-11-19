@@ -213,11 +213,12 @@ mod tests {
     fn start(opens: &mut Opens, name: &str, mode: Mode, before: CacheStamp) {
         opens.enqueue(name, mode);
         let request = opens.next().unwrap();
-        let child = Command::new("/bin/sh")
-            .args(["-c", "read answer"])
-            .stdin(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let child = prismattyc_process::spawn(
+            Command::new("/bin/sh")
+                .args(["-c", "read answer"])
+                .stdin(Stdio::piped()),
+        )
+        .unwrap();
         opens.started(request, child, before);
     }
 
@@ -240,9 +241,9 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let late = dir.join("late-cache");
         let _ = std::fs::remove_file(&late);
-        let mut child=Command::new("python3").args(["-u","-c",
+        let mut child=prismattyc_process::spawn(Command::new("python3").args(["-u","-c",
             "import pathlib,sys,time; print('ready',flush=True); time.sleep(0.4); pathlib.Path(sys.argv[1]).write_text('late')"])
-            .arg(&late).stdout(Stdio::piped()).spawn().unwrap();
+            .arg(&late).stdout(Stdio::piped())).unwrap();
         let pid = child.id();
         let mut ready = String::new();
         BufReader::new(child.stdout.take().unwrap())
@@ -382,14 +383,15 @@ mod tests {
         let mut opens = Opens::default();
         opens.enqueue_named("work", "taken".into());
         let request = opens.next().unwrap();
-        let child = Command::new("/bin/sh")
-            .args([
-                "-c",
-                "printf 'session name taken is already in use\\n' >&2; exit 1",
-            ])
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let child = prismattyc_process::spawn(
+            Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    "printf 'session name taken is already in use\\n' >&2; exit 1",
+                ])
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
         opens.started(request, child, None);
         let deadline = Instant::now() + Duration::from_secs(3);
         let completed = loop {
@@ -421,11 +423,12 @@ mod tests {
         let mut opens = Opens::default();
         opens.enqueue("work", Mode::Switch);
         let request = opens.next().unwrap();
-        let child = Command::new("/bin/sh")
-            .args(["-c", "head -c 1048576 /dev/zero >&2; exit 1"])
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let child = prismattyc_process::spawn(
+            Command::new("/bin/sh")
+                .args(["-c", "head -c 1048576 /dev/zero >&2; exit 1"])
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
         opens.started(request, child, None);
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {

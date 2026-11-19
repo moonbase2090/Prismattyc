@@ -87,7 +87,7 @@ fn git(path: &Path, args: &[&str]) -> Option<String> {
     ] {
         command.env_remove(name);
     }
-    let mut child = command.spawn().ok()?;
+    let mut child = prismattyc_process::spawn(&mut command).ok()?;
     let mut stdout = child.stdout.take()?;
     // Bound memory even for very large working trees. A full pipe must not block wait.
     let reader = std::thread::spawn(move || {

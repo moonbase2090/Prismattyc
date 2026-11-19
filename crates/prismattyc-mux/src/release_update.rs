@@ -699,10 +699,7 @@ fn run_release_json(program: &str, url: &str, auth_config: Option<&str>) -> Resu
     if auth_config.is_some() {
         cmd.args(["--config", "-"]).stdin(Stdio::piped());
     }
-    let mut child = cmd
-        .arg(url)
-        .stdout(Stdio::piped())
-        .spawn()
+    let mut child = prismattyc_process::spawn(cmd.arg(url).stdout(Stdio::piped()))
         .context("start HTTPS download (curl is required)")?;
     if let Some(config) = auth_config {
         let mut stdin = child.stdin.take().context("curl stdin")?;
@@ -714,12 +711,13 @@ fn run_release_json(program: &str, url: &str, auth_config: Option<&str>) -> Resu
 }
 
 pub(crate) fn download_bounded(url: &str, cap: usize) -> Result<Vec<u8>> {
-    let mut child = curl()
-        .args(["--max-filesize", &cap.to_string()])
-        .arg(url)
-        .stdout(Stdio::piped())
-        .spawn()
-        .context("start bounded HTTPS download")?;
+    let mut child = prismattyc_process::spawn(
+        curl()
+            .args(["--max-filesize", &cap.to_string()])
+            .arg(url)
+            .stdout(Stdio::piped()),
+    )
+    .context("start bounded HTTPS download")?;
     read_capped_child_stdout(&mut child, cap)
 }
 
@@ -790,7 +788,7 @@ fn executable_probe(executable: &Path, argument: &str, cap: usize, label: &str) 
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     #[cfg(unix)]
-    let mut child = command.spawn()?;
+    let mut child = prismattyc_process::spawn(&mut command)?;
     #[cfg(windows)]
     let (mut child, probe_job) = crate::platform::spawn_probe(&mut command)?;
     let mut stdout = child.stdout.take().context("version stdout")?;
@@ -1417,13 +1415,14 @@ fn download_one_binary(path: &Path, binary: &str, asset: &Asset) -> Result<()> {
 
 /// Curl one asset to `path`, failing if the download did not succeed.
 fn fetch_binary(path: &Path, binary: &str, asset: &Asset) -> Result<()> {
-    let status = curl()
-        .arg("--max-filesize")
-        .arg(MAX_ASSET.to_string())
-        .arg("--output")
-        .arg(path)
-        .arg(&asset.browser_download_url)
-        .status()?;
+    let status = prismattyc_process::status(
+        curl()
+            .arg("--max-filesize")
+            .arg(MAX_ASSET.to_string())
+            .arg("--output")
+            .arg(path)
+            .arg(&asset.browser_download_url),
+    )?;
     ensure!(
         status.success(),
         "download failed for {binary}; installed version unchanged"
@@ -1917,14 +1916,15 @@ fn ensure_parent_dir(destination: &Path) -> Result<()> {
 
 #[cfg(target_os = "macos")]
 fn download_asset(asset: &Asset, path: &Path) -> Result<()> {
-    let status = curl()
-        .arg("--max-filesize")
-        .arg(asset.size.to_string())
-        .arg("--output")
-        .arg(path)
-        .arg(&asset.browser_download_url)
-        .status()
-        .with_context(|| format!("download {}", asset.name))?;
+    let status = prismattyc_process::status(
+        curl()
+            .arg("--max-filesize")
+            .arg(asset.size.to_string())
+            .arg("--output")
+            .arg(path)
+            .arg(&asset.browser_download_url),
+    )
+    .with_context(|| format!("download {}", asset.name))?;
     ensure!(
         status.success(),
         "download failed for {}; installed version unchanged",
@@ -1936,22 +1936,25 @@ fn download_asset(asset: &Asset, path: &Path) -> Result<()> {
 
 #[cfg(target_os = "macos")]
 fn verify_macos_trust(app: &Path, tag: &str, target: &str) -> Result<()> {
-    let codesign = Command::new("codesign")
-        .args(["--verify", "--strict", "--verbose=2"])
-        .arg(app)
-        .status()
-        .context("codesign is required to verify Prismattyc.app")?;
+    let codesign = prismattyc_process::status(
+        Command::new("codesign")
+            .args(["--verify", "--strict", "--verbose=2"])
+            .arg(app),
+    )
+    .context("codesign is required to verify Prismattyc.app")?;
     ensure!(
         codesign.success(),
         "codesign rejected {} ({codesign}). The installed app was not changed because the downloaded bundle failed code signature verification. {}",
         app.display(),
         manual_update_instructions(tag, target)
     );
-    let identity = Command::new("codesign")
-        .args(["--display", "--verbose=4"])
-        .arg(app)
-        .output()
-        .context("codesign is required to inspect Prismattyc.app identity")?;
+    let identity = prismattyc_process::spawn(
+        prismattyc_process::capture_command("codesign")
+            .args(["--display", "--verbose=4"])
+            .arg(app),
+    )
+    .and_then(std::process::Child::wait_with_output)
+    .context("codesign is required to inspect Prismattyc.app identity")?;
     let identity_text = format!(
         "{}\n{}",
         String::from_utf8_lossy(&identity.stdout),
@@ -1966,11 +1969,13 @@ fn verify_macos_trust(app: &Path, tag: &str, target: &str) -> Result<()> {
         app.display(),
         manual_update_instructions(tag, target)
     );
-    let gatekeeper = Command::new("spctl")
-        .args(["--assess", "--verbose=4", "--type", "exec"])
-        .arg(app)
-        .output()
-        .context("spctl is required to assess Prismattyc.app")?;
+    let gatekeeper = prismattyc_process::spawn(
+        prismattyc_process::capture_command("spctl")
+            .args(["--assess", "--verbose=4", "--type", "exec"])
+            .arg(app),
+    )
+    .and_then(std::process::Child::wait_with_output)
+    .context("spctl is required to assess Prismattyc.app")?;
     let assessment = format!(
         "{}\n{}",
         String::from_utf8_lossy(&gatekeeper.stdout),
@@ -1988,12 +1993,9 @@ fn verify_macos_trust(app: &Path, tag: &str, target: &str) -> Result<()> {
 
 #[cfg(target_os = "macos")]
 fn extract_macos_zip(zip: &Path, dest: &Path, tag: &str, target: &str) -> Result<PathBuf> {
-    let status = Command::new("ditto")
-        .args(["-x", "-k"])
-        .arg(zip)
-        .arg(dest)
-        .status()
-        .context("ditto is required to unpack the macOS update")?;
+    let status =
+        prismattyc_process::status(Command::new("ditto").args(["-x", "-k"]).arg(zip).arg(dest))
+            .context("ditto is required to unpack the macOS update")?;
     ensure!(
         status.success(),
         "unpacking {} failed ({status}). The installed app was not changed. {}",
@@ -2012,15 +2014,19 @@ fn extract_macos_zip(zip: &Path, dest: &Path, tag: &str, target: &str) -> Result
 
 #[cfg(target_os = "macos")]
 fn clear_quarantine(app: &Path) {
-    let _ = Command::new("xattr")
-        .args(["-dr", "com.apple.quarantine"])
-        .arg(app)
-        .status();
+    let _ = prismattyc_process::status(
+        Command::new("xattr")
+            .args(["-dr", "com.apple.quarantine"])
+            .arg(app),
+    );
 }
 
 #[cfg(target_os = "macos")]
 fn app_process_running(app: &Path) -> bool {
-    let Ok(output) = Command::new("/bin/ps").args(["-axo", "command="]).output() else {
+    let Ok(output) = prismattyc_process::spawn(
+        prismattyc_process::capture_command("/bin/ps").args(["-axo", "command="]),
+    )
+    .and_then(std::process::Child::wait_with_output) else {
         return true;
     };
     let text = String::from_utf8_lossy(&output.stdout);
@@ -2270,10 +2276,7 @@ fn ditto_copy(extracted: &Path, staged: &Path) -> Result<()> {
     if staged.exists() {
         fs::remove_dir_all(staged)?;
     }
-    let copied = Command::new("ditto")
-        .arg(extracted)
-        .arg(staged)
-        .status()
+    let copied = prismattyc_process::status(Command::new("ditto").arg(extracted).arg(staged))
         .context("ditto is required to stage Prismattyc.app")?;
     ensure!(
         copied.success(),
@@ -2961,12 +2964,11 @@ mod tests {
             }
         }
         let ready = dir.join("ready");
-        let mut child = ChildGuard(Command::new(&executable)
+        let mut child = ChildGuard(prismattyc_process::spawn(Command::new(&executable)
             .args(["--exact", "release_update::tests::displaced_app_keeps_mapped_executables_until_the_process_exits"])
             .env("PRISMATTYC_TEST_MAPPED_READY", &ready)
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn().unwrap());
+            .stderr(Stdio::null())).unwrap());
         let deadline = Instant::now() + Duration::from_secs(5);
         while !ready.exists() {
             assert!(
@@ -3646,20 +3648,19 @@ mod tests {
     #[test]
     fn read_capped_child_stdout_reads_and_caps() {
         // Within cap: returns the bytes.
-        let mut child = Command::new("printf")
-            .arg("hello")
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let mut child =
+            prismattyc_process::spawn(Command::new("printf").arg("hello").stdout(Stdio::piped()))
+                .unwrap();
         let bytes = read_capped_child_stdout(&mut child, 64).unwrap();
         assert_eq!(bytes, b"hello");
 
         // Over cap: errors and does not return oversized data.
-        let mut big = Command::new("sh")
-            .args(["-c", "printf 'aaaaaaaaaa'"]) // 10 bytes
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let mut big = prismattyc_process::spawn(
+            Command::new("sh")
+                .args(["-c", "printf 'aaaaaaaaaa'"]) // 10 bytes
+                .stdout(Stdio::piped()),
+        )
+        .unwrap();
         assert!(read_capped_child_stdout(&mut big, 3).is_err());
     }
 

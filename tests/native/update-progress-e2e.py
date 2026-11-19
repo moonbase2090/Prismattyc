@@ -17,7 +17,9 @@ hold step 1 with the error instead of moving on.
 
 Keys go to the host only: Quartz events to its PID on macOS, XTEST through
 xdotool on its focused window on Linux, SendInput to its foreground window on
-Windows. The script records every change of the panel's meter lines from
+Windows. Where the guest does not permit event injection, --key-relay DIR
+writes each key as DIR/NNNNN.req (JSON) and waits for DIR/NNNNN.ack from an
+outside input source such as the VM's console. The script records every change of the panel's meter lines from
 render-status and copies each presented frame (PRISMATTYC_DUMP_PRESENT).
 
   update-progress-e2e.py --bins target/release --out DIR [--fail-download pmux-attach]
@@ -38,15 +40,20 @@ STEP = 'Step '
 FAILED = 'Failed at step '
 BINARIES = ('pmux', 'pmuxd', 'pmux-attach', 'pmux-mcp', 'prismattyc', 'prismattyc-host')
 EXE = '.exe' if os.name == 'nt' else ''
-BINDING = 'ctrl+alt+u'
+# No Option/Alt: on macOS, Option+letter can be a dead key.
+BINDING = 'ctrl+shift+y'
 
 
 class Keys:
     """Native key input for one host process."""
 
-    def __init__(self, pid):
+    def __init__(self, pid, relay=None):
         self.pid = pid
-        if sys.platform == 'darwin':
+        self.relay = relay
+        self.sent = 0
+        if relay:
+            relay.mkdir(parents=True, exist_ok=True)
+        elif sys.platform == 'darwin':
             import ctypes
             import ctypes.util
             self.quartz = ctypes.CDLL(ctypes.util.find_library('ApplicationServices'))
@@ -57,13 +64,21 @@ class Keys:
             self.quartz.CFRelease.argtypes = [ctypes.c_void_p]
 
     # Each name maps to (macOS key code, X keysym, Windows virtual key).
-    CODES = {'u': (32, 'u', 0x55), 'Home': (115, 'Home', 0x24), 'Down': (125, 'Down', 0x28),
-             'Return': (36, 'Return', 0x0D), 'Escape': (53, 'Escape', 0x1B)}
+    CODES = {'y': (16, 'y', 0x59), 'Home': (115, 'Home', 0x24), 'Down': (125, 'Down', 0x28),
+             'Up': (126, 'Up', 0x26), 'Return': (36, 'Return', 0x0D), 'Escape': (53, 'Escape', 0x1B)}
 
-    def press(self, name, ctrl=False, alt=False):
+    def press(self, name, ctrl=False, shift=False):
         mac, keysym, vk = self.CODES[name]
-        if sys.platform == 'darwin':
-            flags = (1 << 18 if ctrl else 0) | (1 << 19 if alt else 0)
+        if self.relay:
+            stem = self.relay / f'{self.sent:05d}'
+            self.sent += 1
+            stem.with_suffix('.req').write_text(json.dumps({'key': name, 'ctrl': ctrl, 'shift': shift}))
+            deadline = time.monotonic() + 60
+            while not stem.with_suffix('.ack').exists():
+                assert time.monotonic() < deadline, f'no relay ack for {name}'
+                time.sleep(.05)
+        elif sys.platform == 'darwin':
+            flags = (1 << 18 if ctrl else 0) | (1 << 17 if shift else 0)
             for down in (True, False):
                 event = self.quartz.CGEventCreateKeyboardEvent(None, mac, down)
                 assert event
@@ -74,13 +89,13 @@ class Keys:
             window = subprocess.check_output(['xdotool', 'search', '--sync', '--onlyvisible', '--pid',
                                               str(self.pid)], text=True).split()[0]
             subprocess.check_call(['xdotool', 'windowfocus', '--sync', window])
-            chord = '+'.join([*(['ctrl'] if ctrl else []), *(['alt'] if alt else []), keysym])
+            chord = '+'.join([*(['ctrl'] if ctrl else []), *(['shift'] if shift else []), keysym])
             subprocess.check_call(['xdotool', 'key', '--clearmodifiers', chord])
         else:
-            self._windows(vk, ctrl, alt)
+            self._windows(vk, ctrl, shift)
         time.sleep(.15)
 
-    def _windows(self, vk, ctrl, alt):
+    def _windows(self, vk, ctrl, shift):
         import ctypes
         from ctypes import wintypes
         user32 = ctypes.WinDLL('user32', use_last_error=True)
@@ -108,7 +123,7 @@ class Keys:
             _anonymous_ = ('u',)
             _fields_ = [('type', wintypes.DWORD), ('u', _U)]
 
-        keys = [*([0x11] if ctrl else []), *([0x12] if alt else []), vk]
+        keys = [*([0x11] if ctrl else []), *([0x10] if shift else []), vk]
         events = [(k, 0) for k in keys] + [(k, 2) for k in reversed(keys)]
         array = (INPUT * len(events))()
         for slot, (key, flags) in zip(array, events):
@@ -124,6 +139,7 @@ def main():
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--fail-download', choices=BINARIES)
     parser.add_argument('--timeout', type=int, default=600)
+    parser.add_argument('--key-relay', type=Path)
     args = parser.parse_args()
     assert not (args.fail_download and not sys.platform.startswith('linux')), '--fail-download is Linux only'
     out = args.out.resolve()
@@ -211,10 +227,36 @@ exec {real} "$@"
         panel = render_status()['windows'][0].get('space_details') or {}
         return [row.removesuffix(': ') for row in panel.get('rows', [])]
 
+    def panel():
+        return render_status()['windows'][0].get('space_details') or {}
+
     def choose(keys, label):
-        listing = wait(lambda: (lambda r: r if any(x.startswith(label + ':') or x == label for x in r) else None)(rows()),
-                       'row ' + label)
-        index = next(i for i, x in enumerate(listing) if x.startswith(label + ':') or x == label)
+        """Follow the panel's reported selection to `label`, then Enter. The
+        row index depends on how details wrap at this window width."""
+        def selected_row():
+            details = wait(lambda: (lambda d: d if any(x.startswith(label + ':') for x in d.get('rows', [])) else None)(
+                panel()), 'row ' + label)
+            return details.get('selected'), details
+
+        keys.press('Home')
+        time.sleep(.3)
+        for step in ('Down', 'Up'):
+            for _ in range(40):
+                selected, details = selected_row()
+                if selected is not None and details['rows'][selected].startswith(label + ':'):
+                    keys.press('Return')
+                    return
+                keys.press(step)
+                try:
+                    wait(lambda: selected_row()[0] != selected, 'selection moves', timeout=3)
+                except AssertionError:
+                    break
+        raise AssertionError(f'could not select {label}')
+
+    def choose_option(keys, label):
+        """Pick a choice in the Restart to update dialog by its label."""
+        dialog = wait(lambda: render_status()['windows'][0].get('restart_modal'), 'restart dialog', timeout=120)
+        index = next(i for i, x in enumerate(dialog['rows']) if x.startswith(label + ':'))
         keys.press('Home')
         for _ in range(index):
             keys.press('Down')
@@ -281,12 +323,11 @@ exec {real} "$@"
         owned.append(host)
         wait(lambda: render_status()['windows'][0]['last_raster']['present_succeeded'], 'first frame')
         first_instance = render_status()['host_instance']
-        keys = Keys(host.pid)
-        keys.press('u', ctrl=True, alt=True)
+        keys = Keys(host.pid, args.key_relay)
+        keys.press('y', ctrl=True, shift=True)
         choose(keys, 'Update and restart all components')
-        wait(lambda: any(x.startswith('Continue without saving') for x in rows()), 'session consent', timeout=120)
         threading.Thread(target=watch_meter, args=(started,), daemon=True).start()
-        choose(keys, 'Continue without saving')
+        choose_option(keys, 'Restart without saving')
         if args.fail_download:
             final = wait(lambda: (lambda r: r if r and r[0].startswith(FAILED) else None)(rows()),
                          'meter holds the failed step', timeout=args.timeout)

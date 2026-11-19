@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: MIT
 //! Shared child-launch and descriptor acquisition boundary.
 //!
+//! This crate owns synchronous `std::process::Command` launches. The separate
+//! `pmux-mcp` executable uses Tokio launches outside this guard. The audited
+//! desktop host runtime closure contains no Tokio package; adding a new launch
+//! implementation there requires review and integration with this boundary.
+//!
 //! A poisoned Darwin gate fails closed for every launch through this crate,
 //! including application update and restart. Recover by restarting the host
 //! process rather than continuing after an uncertain descriptor window.

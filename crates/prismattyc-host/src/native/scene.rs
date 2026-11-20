@@ -9,9 +9,9 @@ use super::{
     registry::{ImageRegistry, RegistryError, ResolvedPlacement},
     retirement::{ProgressError, SceneProgress},
     ring::{RingContext, RingError, SharedRing},
-    wire12::{FrameSequence, Reply, ResourceHandle, Retirement, UploadState, RING_SLOTS},
+    wire12::{FrameSequence, Reply, ResourceHandle, Retirement, UploadState},
 };
-use std::{collections::VecDeque, io, os::fd::BorrowedFd, sync::Arc, time::Instant};
+use std::{io, os::fd::BorrowedFd, sync::Arc, time::Instant};
 
 pub struct NativeScene {
     frame: FrameSnapshot,
@@ -45,7 +45,7 @@ pub enum SceneError {
 pub struct SessionFrames {
     ring: SharedRing,
     resources: ImageRegistry,
-    pending: VecDeque<Arc<NativeScene>>,
+    pending: Option<Arc<NativeScene>>,
     installed: Option<Arc<NativeScene>>,
     progress: SceneProgress,
 }
@@ -62,17 +62,13 @@ impl SessionFrames {
         pool: Arc<ImagePool>,
         dialect: Dialect,
     ) -> io::Result<Self> {
-        let mut pending = VecDeque::new();
-        pending
-            .try_reserve_exact(RING_SLOTS as usize)
-            .map_err(io::Error::other)?;
         Ok(Self {
             ring: match dialect {
                 Dialect::Grid0 => SharedRing::create_legacy(context)?,
                 Dialect::Images2 => SharedRing::create(context)?,
             },
             resources: ImageRegistry::new(context.session, context.epoch, pool),
-            pending,
+            pending: None,
             installed: None,
             progress: SceneProgress::default(),
         })
@@ -108,9 +104,6 @@ impl SessionFrames {
 
     /// Copies at most one slot. An unresolved resource leaves the consumer unacknowledged.
     pub fn prepare_next(&mut self) -> Result<bool, SceneError> {
-        if self.pending.len() == RING_SLOTS as usize {
-            return Ok(false);
-        }
         let Some(copied) = self.ring.copy_next().map_err(SceneError::Ring)? else {
             return Ok(false);
         };
@@ -146,20 +139,20 @@ impl SessionFrames {
         self.progress
             .consume(consumed)
             .map_err(SceneError::Progress)?;
-        self.pending.push_back(scene);
+        self.pending = Some(scene);
         Ok(true)
     }
 
     /// Publish the same immutable scene used by every native reader, before ACTIVE.
     pub fn install_next(&mut self) -> Result<Option<FrameSequence>, SceneError> {
-        let Some(scene) = self.pending.front() else {
+        let Some(scene) = self.pending.as_ref() else {
             return Ok(None);
         };
         let sequence = scene.frame.context.sequence;
         self.progress
             .install(sequence)
             .map_err(SceneError::Progress)?;
-        self.installed = self.pending.pop_front();
+        self.installed = self.pending.take();
         Ok(Some(sequence))
     }
 }

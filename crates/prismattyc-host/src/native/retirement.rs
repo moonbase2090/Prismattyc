@@ -26,9 +26,9 @@ impl SceneProgress {
         Ok(())
     }
 
-    /// Called after the scene was installed, including transient scenes coalesced before presentation.
+    /// Install a consumed full snapshot; intermediate pending snapshots may be coalesced.
     pub fn install(&mut self, frame: FrameSequence) -> Result<(), ProgressError> {
-        if self.installed.checked_add(1) != Some(frame.get()) {
+        if frame.get() <= self.installed {
             return Err(ProgressError::InstallOrder);
         }
         if frame.get() > self.consumed {
@@ -208,7 +208,10 @@ mod tests {
         progress.install(frame(1)).unwrap();
         assert_eq!(progress.consume(frame(3)), Err(ProgressError::ConsumeOrder));
         progress.consume(frame(2)).unwrap();
-        assert_eq!(progress.install(frame(3)), Err(ProgressError::InstallOrder));
+        assert_eq!(
+            progress.install(frame(3)),
+            Err(ProgressError::UnconsumedInstall)
+        );
         progress.install(frame(2)).unwrap();
     }
 }

@@ -102,6 +102,12 @@ force backpressure; draining those bytes permits the original response to
 finish without changing its deadline. This check does not establish liveness
 for a request that arrives while painting is already blocked.
 
+The scene tests publish more than one ring's worth of full snapshots without
+installing them. Consumption must continue, obsolete pending snapshots must be
+released, and the next installation must contain the newest literal glyph.
+Coalesced omission frames still leave retirement BUSY while an older painted
+scene retains its pixels.
+
 A HELLO received before offer authorization has session zero. Revocation drops
 that obsolete offer without a reply; the client recovers to ANSI at its 200 ms
 setup bound, and the endpoint accepts a fresh offer. The socket test checks

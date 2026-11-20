@@ -85,34 +85,27 @@ fn sequence(n: u64) -> FrameSequence {
 }
 
 #[test]
-fn consumption_does_not_install_and_fifth_owned_snapshot_waits_for_a_queue_slot() {
+fn pending_full_snapshots_coalesce_without_installing_or_blocking_ring_progress() {
     let mut frames = frames();
     let producer = Producer::new(frames.descriptor().try_clone_to_owned().unwrap());
     assert!(!frames.prepare_next().unwrap());
-    for n in 1..=4 {
-        producer.publish(n, literals::FRAME_INITIAL);
+    let mut previous_pending = None;
+    for n in 1..=12 {
+        let mut bytes = literals::FRAME_INITIAL.to_vec();
+        bytes[128] = b'A' + n as u8;
+        producer.publish(n, &bytes);
         assert!(frames.prepare_next().unwrap());
+        assert!(frames.installed().is_none());
+        assert_eq!(producer.counter(128).load(Ordering::Acquire), n);
+        if let Some(previous) = previous_pending.take() {
+            assert!(std::sync::Weak::upgrade(&previous).is_none());
+        }
+        previous_pending = frames.pending.as_ref().map(Arc::downgrade);
     }
-    assert!(frames.installed().is_none());
-    assert_eq!(producer.counter(128).load(Ordering::Acquire), 4);
-    let mut changed = literals::FRAME_INITIAL.to_vec();
-    changed[128] = b'X';
-    producer.publish(5, &changed);
-    assert!(!frames.prepare_next().unwrap());
-    assert_eq!(producer.counter(128).load(Ordering::Acquire), 4);
-    assert_eq!(frames.install_next(), Ok(Some(sequence(1))));
+    assert_eq!(frames.install_next(), Ok(Some(sequence(12))));
     assert_eq!(
         frames.installed().unwrap().frame().cells[0].glyph,
-        Glyph::Scalar('?')
-    );
-    assert!(frames.prepare_next().unwrap());
-    assert_eq!(producer.counter(128).load(Ordering::Acquire), 5);
-    for n in 2..=5 {
-        assert_eq!(frames.install_next(), Ok(Some(sequence(n))));
-    }
-    assert_eq!(
-        frames.installed().unwrap().frame().cells[0].glyph,
-        Glyph::Scalar('X')
+        Glyph::Scalar('M')
     );
     assert_eq!(frames.install_next(), Ok(None));
 }
@@ -163,18 +156,21 @@ fn retiring_waits_for_the_installed_omission_and_a_real_retained_scene() {
     frames.prepare_next().unwrap();
     let handle = ResourceHandle::new(1).unwrap();
     assert_eq!(frames.retire(handle, sequence(3)), Ok(Retirement::Busy));
-    frames.install_next().unwrap();
+    producer.publish(4, literals::FRAME_OMISSION);
+    assert!(frames.prepare_next().unwrap());
+    assert_eq!(frames.retire(handle, sequence(3)), Ok(Retirement::Busy));
+    assert_eq!(frames.install_next(), Ok(Some(sequence(4))));
     assert!(frames.installed().unwrap().images().is_empty());
     assert_eq!(frames.retire(handle, sequence(3)), Ok(Retirement::Busy));
     drop(retained);
     assert_eq!(frames.retire(handle, sequence(3)), Ok(Retirement::Retired));
     assert_eq!(frames.pong(now), Ok(UploadState::Idle));
-    producer.publish(4, literals::FRAME_PLACEMENT);
+    producer.publish(5, literals::FRAME_PLACEMENT);
     assert_eq!(
         frames.prepare_next(),
         Err(SceneError::Resource(RegistryError::UnknownHandle))
     );
-    assert_eq!(producer.counter(128).load(Ordering::Acquire), 3);
+    assert_eq!(producer.counter(128).load(Ordering::Acquire), 4);
 }
 
 #[test]

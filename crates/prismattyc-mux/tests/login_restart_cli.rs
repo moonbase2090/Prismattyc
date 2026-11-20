@@ -80,6 +80,40 @@ fn start_server_with_env(socket: &Path, root: &Path, env: &[(&str, &str)]) -> Se
     guard
 }
 
+/// Waits until `path` holds exactly the expected text, or the deadline passes.
+/// The file appearing is not enough: the shell creates it before the
+/// redirected command has written into it, so a reader that stops at
+/// existence can see it empty.
+fn wait_for_file_content(path: &Path, expected: &str, deadline: Instant) {
+    while std::fs::read_to_string(path).map_or(true, |text| text != expected)
+        && Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn waiting_for_a_file_waits_for_its_content_not_its_creation() {
+    let dir = std::env::temp_dir().join(format!("pmux-wait-content-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("launches");
+    // The shell creates the file before the command writes into it.
+    std::fs::write(&path, "").unwrap();
+    let (go, gate) = std::sync::mpsc::channel::<()>();
+    let writer = {
+        let path = path.clone();
+        std::thread::spawn(move || {
+            gate.recv().unwrap();
+            std::fs::write(path, "restored").unwrap();
+        })
+    };
+    go.send(()).unwrap();
+    wait_for_file_content(&path, "restored", Instant::now() + Duration::from_secs(8));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "restored");
+    writer.join().unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 fn wait_for_server_ready(
     child: &mut Child,
     socket: &Path,
@@ -638,9 +672,7 @@ fn session_configuration_restores_names_directories_and_commands_without_replay(
         &["session-config", "restore", file.to_str().unwrap()],
     ));
     let deadline = Instant::now() + Duration::from_secs(8);
-    while !cwd.join("launches").exists() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_for_file_content(&cwd.join("launches"), "restored", deadline);
     assert_eq!(
         std::fs::read_to_string(cwd.join("launches")).unwrap(),
         "restored"
@@ -715,9 +747,7 @@ fn restore_replays_the_saved_command_into_a_pane_that_looks_busy() {
         "restore skipped the command in its own new pane: {restored}"
     );
     let deadline = Instant::now() + Duration::from_secs(15);
-    while !cwd.join("launches").exists() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_for_file_content(&cwd.join("launches"), "restored", deadline);
     assert_eq!(
         std::fs::read_to_string(cwd.join("launches")).unwrap_or_default(),
         "restored",
@@ -1425,9 +1455,7 @@ fn restore_skips_a_saved_command_with_a_line_break_and_restores_the_rest() {
         "{listing}"
     );
     let deadline = Instant::now() + Duration::from_secs(8);
-    while !dirs[0].join("launches").exists() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_for_file_content(&dirs[0].join("launches"), "ran", deadline);
     assert_eq!(
         std::fs::read_to_string(dirs[0].join("launches")).unwrap(),
         "ran"

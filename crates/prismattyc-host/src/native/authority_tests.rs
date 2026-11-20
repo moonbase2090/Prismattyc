@@ -258,6 +258,137 @@ fn timer_expiry_releases_a_hidden_scene_without_receiving_its_queued_ping() {
 }
 
 #[test]
+fn a_resumed_old_session_after_long_idle_gets_ended_and_can_start_a_fresh_session() {
+    let now = Instant::now();
+    let (mut native, mut client) = owner(now);
+    let _old_producer = active(&mut native, &mut client, now);
+    assert!(native.expire(now + Duration::from_millis(500)).unwrap());
+    assert!(native.available());
+    assert_eq!(native.next_wakeup(), None);
+    let resumed = now + Duration::from_secs(30);
+    client
+        .write_all(&control(literals::PING_IDLE, 1, 1, 3))
+        .unwrap();
+    native.poll(resumed).unwrap();
+    native.poll(resumed).unwrap();
+    let (ended, descriptor) = response(&client, 0);
+    assert!(descriptor.is_none());
+    assert_eq!(
+        (
+            opcode(&ended),
+            value(&ended, 8),
+            value(&ended, 16),
+            value(&ended, 24),
+            value(&ended, 32)
+        ),
+        (14, 1, 3, 1, 2)
+    );
+    assert_eq!(&ended[40..48], &[3, 0, 0, 0, 0, 0, 0, 0]);
+
+    let fresh = native
+        .prepare_offer(NonZeroU32::new(2).unwrap(), resumed)
+        .unwrap();
+    native.authorize_written_offer(fresh.receipt.clone());
+    client
+        .write_all(&control(literals::PING_IDLE, 1, 1, 4))
+        .unwrap();
+    native.poll(resumed).unwrap();
+    native.poll(resumed).unwrap();
+    assert_eq!(opcode(&response(&client, 0).0), 14);
+    client.write_all(&hello(&fresh)).unwrap();
+    native.poll(resumed).unwrap();
+    native.poll(resumed).unwrap();
+    let (setup, descriptor) = response(&client, 1);
+    assert_eq!(
+        (
+            opcode(&setup),
+            value(&setup, 8),
+            value(&setup, 24),
+            value(&setup, 64)
+        ),
+        (9, 2, 2, 2)
+    );
+    let producer = Producer::new(descriptor.unwrap());
+    publish(&producer, frame_literals::FRAME_INITIAL, 1, 2, 2);
+    client
+        .write_all(&control(literals::ACTIVATE, 2, 2, 2))
+        .unwrap();
+    native.poll(resumed).unwrap();
+    native.poll(resumed).unwrap();
+    native.poll(resumed).unwrap();
+    assert_eq!(opcode(&response(&client, 0).0), 4);
+    assert_eq!(native.scene().unwrap().frame().context.epoch.get(), 2);
+
+    let late = resumed + Duration::from_millis(250);
+    client
+        .write_all(&control(literals::PING_IDLE, 1, 1, 5))
+        .unwrap();
+    native.poll(late).unwrap();
+    native.poll(late).unwrap();
+    assert_eq!(opcode(&response(&client, 0).0), 14);
+    assert!(native.scene().is_some());
+    assert!(
+        native.expire(resumed + Duration::from_millis(500)).unwrap(),
+        "old traffic must not renew the current lease"
+    );
+}
+
+#[test]
+fn a_resumed_stale_drain_keeps_one_absolute_deadline() {
+    let now = Instant::now();
+    let (mut native, mut client) = owner(now);
+    let _producer = active(&mut native, &mut client, now);
+    native.pty_bytes(now).unwrap();
+    let resumed = now + Duration::from_secs(30);
+    for elapsed in [0, 199] {
+        let at = resumed + Duration::from_millis(elapsed);
+        client
+            .write_all(&control(literals::PING_IDLE, 1, 1, 3))
+            .unwrap();
+        native.poll(at).unwrap();
+        native.poll(at).unwrap();
+        assert_eq!(opcode(&response(&client, 0).0), 14);
+    }
+    client
+        .write_all(&control(literals::PING_IDLE, 1, 1, 3))
+        .unwrap();
+    assert!(matches!(
+        native.poll(resumed + Duration::from_millis(200)),
+        Err(AuthorityError::Protocol("native stale drain limit"))
+    ));
+    assert!(!native.available());
+    eof(client);
+}
+
+#[test]
+fn a_late_first_stale_record_does_not_extend_the_fresh_discovery_deadline() {
+    let now = Instant::now();
+    let (mut native, mut client) = owner(now);
+    let _producer = active(&mut native, &mut client, now);
+    native.pty_bytes(now).unwrap();
+    let fresh = native
+        .prepare_offer(NonZeroU32::new(2).unwrap(), now)
+        .unwrap();
+    native.authorize_written_offer(fresh.receipt);
+    client
+        .write_all(&control(literals::PING_IDLE, 1, 1, 3))
+        .unwrap();
+    let late = now + Duration::from_millis(199);
+    native.poll(late).unwrap();
+    native.poll(late).unwrap();
+    assert_eq!(opcode(&response(&client, 0).0), 14);
+    client
+        .write_all(&control(literals::PING_IDLE, 1, 1, 3))
+        .unwrap();
+    assert!(matches!(
+        native.poll(now + Duration::from_millis(200)),
+        Err(AuthorityError::Protocol("native stale drain limit"))
+    ));
+    assert!(!native.available());
+    eof(client);
+}
+
+#[test]
 fn control_only_pty_output_revokes_before_rearm_and_old_records_cannot_authorize_the_new_session() {
     let now = Instant::now();
     let (mut native, mut client) = owner(now);

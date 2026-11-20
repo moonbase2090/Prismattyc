@@ -164,6 +164,11 @@ enum AfterReply {
     CloseLegacy,
 }
 
+struct StaleDrain {
+    deadline: Instant,
+    records: u8,
+}
+
 pub struct DesktopNative {
     endpoint: ControlEndpoint<'static>,
     geometry: Geometry,
@@ -175,7 +180,7 @@ pub struct DesktopNative {
     session: Option<Session>,
     after_reply: Option<AfterReply>,
     rearm_deadline: Instant,
-    stale_records: u8,
+    stale_drain: Option<StaleDrain>,
     last_end: EndReason,
     closed: bool,
     last_poll: Instant,
@@ -200,7 +205,7 @@ impl DesktopNative {
             session: None,
             after_reply: None,
             rearm_deadline: now + OPERATION,
-            stale_records: 0,
+            stale_drain: None,
             last_end: EndReason::Release,
             closed: false,
             last_poll: now,
@@ -319,7 +324,7 @@ impl DesktopNative {
             delivery: OfferDelivery::Queued,
         });
         self.rearm_deadline = now + OPERATION;
-        self.stale_records = 0;
+        self.stale_drain = None;
         self.rearm_readiness()?;
         Ok(PreparedOffer {
             capability_id,
@@ -366,7 +371,7 @@ impl DesktopNative {
         self.after_reply = None;
         self.last_end = reason;
         self.rearm_deadline = now + OPERATION;
-        self.stale_records = 0;
+        self.stale_drain = None;
         let result = self.endpoint.discard_reply();
         let next = self.epoch.get().checked_add(1).and_then(PtyEpoch::new);
         match (result, next) {
@@ -527,6 +532,7 @@ impl DesktopNative {
                     return Err(AuthorityError::Protocol("active reply state"));
                 };
                 session.phase = Phase::Active { lease_until };
+                self.stale_drain = None;
             }
         }
         if let Some(session) = &mut self.session {
@@ -612,10 +618,20 @@ impl DesktopNative {
     fn handle(&mut self, request: OwnedRequest, now: Instant) -> Result<bool, AuthorityError> {
         let header = request.record.header;
         if header.epoch < self.epoch && header.session.is_some() {
-            if self.stale_records == 4 || now >= self.rearm_deadline {
+            let deadline = request.started + OPERATION;
+            let deadline = if self.offer.is_some() {
+                deadline.min(self.rearm_deadline)
+            } else {
+                deadline
+            };
+            let drain = self.stale_drain.get_or_insert(StaleDrain {
+                deadline,
+                records: 0,
+            });
+            if drain.records == 4 || now >= drain.deadline {
                 return Err(AuthorityError::Protocol("native stale drain limit"));
             }
-            self.stale_records += 1;
+            drain.records += 1;
             self.queue(
                 Dialect::Images2,
                 ReplyIdentity {

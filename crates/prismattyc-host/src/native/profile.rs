@@ -26,11 +26,14 @@ impl Dialect {
 }
 
 pub fn dialects() -> &'static [Dialect] {
-    if !cfg!(all(
-        target_endian = "little",
-        target_pointer_width = "64",
-        target_has_atomic = "64"
-    )) {
+    let platform = crate::native_platform::TargetPlatform {
+        os: std::env::consts::OS,
+        arch: std::env::consts::ARCH,
+        pointer_width: usize::BITS,
+        little_endian: cfg!(target_endian = "little"),
+        atomic64: cfg!(target_has_atomic = "64"),
+    };
+    if !platform.supports_native() {
         return &[];
     }
     if cfg!(target_os = "linux") {

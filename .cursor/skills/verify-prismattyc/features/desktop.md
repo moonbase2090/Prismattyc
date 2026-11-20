@@ -118,8 +118,9 @@ to its own file.
   `--bins`, so the app updates itself as a user's would; run from elsewhere,
   the version check after install finds the wrong `pmux`. A guest without
   Accessibility takes keys through `--key-relay DIR`: the drive writes one
-  JSON line per key to the named pipe `DIR/requests` and blocks on a line from
-  `DIR/acks`, which the VM console's controller answers after typing the key.
+  JSON line per key to the named pipe `DIR/requests` and waits, bounded, for a
+  line on `DIR/acks`, which the VM console's controller answers after typing
+  the key. A relay that is absent, stalls or closes fails the run at the bound.
 - On Linux, `--fail-download NAME` cuts the download of one component's
   release file short. Require `Failed at step 1 of 4: Download`, the
   component's download line, its download error and `Check again` in

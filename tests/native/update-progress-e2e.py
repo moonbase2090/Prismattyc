@@ -30,9 +30,11 @@ line is copied as that step's capture.
 
 Keys go to the host only: Quartz events to its PID on macOS, XTEST through
 xdotool on Linux, SendInput on Windows. --key-relay DIR (a guest whose privacy
-settings forbid event injection) sends each key as a JSON line into the named
-pipe DIR/requests and blocks on a line from DIR/acks, answered by an outside
-input source such as the VM's console.
+settings forbid event injection) writes each key as a JSON line into the named
+pipe DIR/requests and waits for a line on DIR/acks, answered by an outside
+input source such as the VM's console. The drive holds both pipes open
+read-write and non-blocking and waits for each ack with select, so an absent,
+stalled or closed relay fails at the per-key bound and cleanup never blocks.
 
   update-progress-e2e.py --bins target/release --out DIR [--fail-download pmux-attach]
 """
@@ -40,6 +42,7 @@ import argparse
 import json
 import os
 import queue
+import select
 import shutil
 import signal
 import subprocess
@@ -78,13 +81,13 @@ class Keys:
                     os.mkfifo(relay / name)
                 except FileExistsError:
                     pass
-            # Open order matches the relay: requests first, then acks, so
-            # each blocking open meets its peer. A relay that never attaches
-            # fails at the bound.
-            self.requests = bounded(lambda: (relay / 'requests').open('w'), timeout,
-                                    'key relay attaching to requests')
-            self.acks = bounded(lambda: (relay / 'acks').open('r'), timeout,
-                                'key relay attaching to acks')
+            # Both ends open read-write and non-blocking: the opens never wait
+            # for the relay, a request (well under the pipe's atomic size)
+            # never blocks, and nothing here can block a later close. The
+            # only wait is for each ack, under `timeout`.
+            flags = os.O_RDWR | os.O_NONBLOCK
+            self.requests = os.open(relay / 'requests', flags)
+            self.acks = os.open(relay / 'acks', flags)
         elif sys.platform == 'darwin':
             import ctypes
             import ctypes.util
@@ -98,15 +101,9 @@ class Keys:
     def press(self, name, ctrl=False, shift=False):
         mac, keysym, vk = self.CODES[name]
         if self.relay:
-            def send():
-                self.requests.write(json.dumps({'key': name, 'ctrl': ctrl, 'shift': shift}) + '\n')
-                self.requests.flush()
-                return self.acks.readline()
-
-            # A relay that stops answering fails at the bound; one that closes
-            # fails at once (end of file, or a broken pipe on write).
-            assert bounded(send, self.relay_timeout, f'key relay ack for {name}'), \
-                f'the key relay closed before {name}'
+            request = (json.dumps({'key': name, 'ctrl': ctrl, 'shift': shift}) + '\n').encode()
+            assert os.write(self.requests, request) == len(request), f'short relay write for {name}'
+            self._await_ack(name)
         elif sys.platform == 'darwin':
             flags = (1 << 18 if ctrl else 0) | (1 << 17 if shift else 0)
             for down in (True, False):
@@ -125,15 +122,24 @@ class Keys:
         else:
             self._windows(vk, ctrl, shift)
 
+    def _await_ack(self, name):
+        """Read one ack line, waiting at most the per-key timeout in total. A
+        relay that is absent, stalled or gone fails at that bound."""
+        deadline = time.monotonic() + self.relay_timeout
+        line = b''
+        while not line.endswith(b'\n'):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([self.acks], [], [], remaining)[0]:
+                raise AssertionError(f'no key relay ack for {name} within {self.relay_timeout} s')
+            try:
+                line += os.read(self.acks, 256)
+            except BlockingIOError:
+                continue
+
     def close(self):
-        # A thread still blocked on a stalled relay holds these files; the
-        # process exit releases them.
         if self.relay:
-            for stream in (self.requests, self.acks):
-                try:
-                    stream.close()
-                except OSError:
-                    pass
+            os.close(self.requests)
+            os.close(self.acks)
 
     def _windows(self, vk, ctrl, shift):
         import ctypes
@@ -171,27 +177,6 @@ class Keys:
             slot.ki = KEYBDINPUT(key, 0, flags, 0, 0)
         sent = user32.SendInput(len(events), array, ctypes.sizeof(INPUT))
         assert sent == len(events), f'SendInput sent {sent} of {len(events)}'
-
-
-def bounded(step, timeout, label):
-    """Run a blocking step on a helper thread and wait for it at most
-    `timeout` seconds; the wait ends when the step returns or raises."""
-    done = queue.Queue()
-
-    def run():
-        try:
-            done.put((True, step()))
-        except BaseException as error:
-            done.put((False, error))
-
-    threading.Thread(target=run, daemon=True).start()
-    try:
-        ok, value = done.get(timeout=timeout)
-    except queue.Empty:
-        raise AssertionError(f'no {label} within {timeout} s') from None
-    if not ok:
-        raise value
-    return value
 
 
 class LineReader:

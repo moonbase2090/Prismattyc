@@ -66,10 +66,11 @@ class Keys:
     CODES = {'y': (16, 'y', 0x59), 'Home': (115, 'Home', 0x24), 'Down': (125, 'Down', 0x28),
              'Up': (126, 'Up', 0x26), 'Return': (36, 'Return', 0x0D), 'Escape': (53, 'Escape', 0x1B)}
 
-    def __init__(self, pid, relay=None, relay_timeout=60):
+    def __init__(self, pid, relay=None, timeout=60):
         self.pid = pid
         self.relay = relay
-        self.relay_timeout = relay_timeout
+        # Bounds each key's relay step or desktop call.
+        self.relay_timeout = timeout
         if relay:
             relay.mkdir(parents=True, exist_ok=True)
             for name in ('requests', 'acks'):
@@ -115,11 +116,12 @@ class Keys:
                 self.quartz.CGEventPostToPid(self.pid, event)
                 self.quartz.CFRelease(event)
         elif sys.platform.startswith('linux'):
+            # Each call is bounded so a stalled desktop fails the run.
             window = subprocess.check_output(['xdotool', 'search', '--sync', '--onlyvisible', '--pid',
-                                              str(self.pid)], text=True).split()[0]
-            subprocess.check_call(['xdotool', 'windowfocus', '--sync', window])
+                                              str(self.pid)], text=True, timeout=self.relay_timeout).split()[0]
+            subprocess.check_call(['xdotool', 'windowfocus', '--sync', window], timeout=self.relay_timeout)
             chord = '+'.join([*(['ctrl'] if ctrl else []), *(['shift'] if shift else []), keysym])
-            subprocess.check_call(['xdotool', 'key', '--clearmodifiers', chord])
+            subprocess.check_call(['xdotool', 'key', '--clearmodifiers', chord], timeout=self.relay_timeout)
         else:
             self._windows(vk, ctrl, shift)
 

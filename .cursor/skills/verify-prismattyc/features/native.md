@@ -1,0 +1,120 @@
+# Native terminal sessions and images
+
+With `--experimental-rich`, an eligible direct local PTY can negotiate a native
+grid and uploaded images. The feature is off by default. An installed native
+scene supplies displayed text, selection, find, links, accessibility, cursor
+and painting. The retained ANSI terminal becomes visible when ownership ends.
+
+Linux supports grid minor 0 and image minor 2 on 64-bit, little-endian targets
+with atomic 64-bit operations. Native Apple Silicon macOS supports image minor
+2. The advertised tokens match these session paths. Windows, Intel macOS,
+forwarded sessions and daemon-owned log views use the Classic display source.
+The protocol is documented in Lunatui's
+[grid contract](https://github.com/moonbase2090/lunatui/blob/main/docs/native-protocol.md)
+and [image contract](https://github.com/moonbase2090/lunatui/blob/main/docs/native-image-protocol.md).
+
+## Launch and drive
+
+Use the optimized matching binaries from Launch. The helper builds a separately
+locked fixture against pinned Lunatui source. It uses the actual Image widget,
+image geometry, ANSI encoder, discovery decoder and grid frame encoder. This
+is a test producer; it does not enable a production Lunatui native backend.
+
+```sh
+python3 .cursor/skills/verify-prismattyc/scripts/verify-native.py \
+  --bins "$verify_bins" --out "$verify_evidence/native" --case all
+```
+
+Python 3.11+ and Rust 1.90.0 are required. macOS needs an allocated unlocked
+desktop and existing Accessibility permission for the runner. Both `tiles`
+and `iosurface` run by default; `--presenter` selects one. Linux needs Xvfb,
+xdotool and libX11 plus `scripts/install-render-test-deps.sh` dependencies.
+The Linux cleanup path needs a kernel with pidfd support and mounted procfs.
+Each drive owns a fresh host, daemon, producer and isolated data. The Linux
+drive also owns its X server. The helper preserves failure
+artifacts and stops at the first failed case.
+
+Keep the macOS fixture window on the main display. The driver normalizes its
+font size for that display's 1× or 2× backing scale, then requires the bundled
+font's measured 22×49 physical cell for the fixed pixel vectors. A different
+display or font measurement is an unmet fixture prerequisite.
+
+Use `--case images` for upload, READY placement, move, omission, retirement and
+release. `--case off` checks actual widget ANSI fallback without the native
+gate. On Linux, `--case legacy` negotiates minor 0 through the existing decoder
+and frame encoder, and `--case resize` resizes the real X11 window, checks ANSI
+recovery and activates a fresh descendant on the retained shell endpoint.
+`--case text` copies a native scene with a wide glyph, a 21-scalar combining
+cluster and a URL through real keyboard shortcuts and the isolated X11
+clipboard. It then releases ownership and copies the retained Classic scene.
+With `smart_ctrl_c = true` in its private configuration, it also opens Find,
+types a native-only query and copies the matched text while Find stays open.
+The clipboard reader waits for selection events. It does not read host internals.
+
+macOS adds these cases:
+
+- `ctrl-z` sends native Ctrl-Z, observes the stopped foreground process, runs
+  the shell's real `fg`, checks ANSI recovery and activates a new descendant.
+- `lease` stops only the producer after a completed heartbeat. The shell keeps
+  the inherited endpoint. Require one lease revocation before resume, ANSI
+  recovery and successful activation by a new descendant.
+- `metrics` changes the configured font size while heartbeats continue.
+  Require SESSION_ENDED reason Resize, a new terminal grid and physical cell
+  metrics, ANSI recovery and fresh activation on the same launch endpoint.
+- `budgets` admits two 64 MiB sources, declines another source at the 128 MiB
+  live limit, preserves actual widget fallback and rejects an oversized source
+  before upload. It compares literal pixels with real iTerm2 PNG output.
+- `animation` supplies 150 distinct 64×64 checker images at 30 Hz for five
+  seconds in a small window. Every presented generation must match the literal
+  crop and nearest-sampled pixels. The checker distinguishes image composition
+  from cell fallback. This is workload proof, not a comparative benchmark.
+
+## Inspect the result
+
+Require suite and per-drive `result.json` to report PASS. Inspect the logs,
+binary SHA-256 records, presented PNGs and saved render-status records. Native
+proof names the owned host, selected `display_source`, installed frame sequence,
+metrics, grid and placement count. Static captures must match a successful
+present and its capture sequence. macOS checks the requested presenter.
+The suite requires host, daemon and producer version receipts to name the
+current source revision. A supplied `--probe` must come from a matching helper
+build; hashes alone do not establish its source provenance.
+
+Require all recorded processes to be reaped and no remaining owned producer.
+Retained-shell cases must keep the same root PID and birth identity, advance
+the generation and restart frame numbering at 1. Keep runtime directories
+private, retain evidence outside them and scrub public proof before uploading.
+Presented-frame artifacts prove the application presentation path; OS window
+decoration or compositor claims require an OS screenshot separately.
+
+## Text readers and failure cases
+
+Run the host's native, Content and PTY integration tests for protocol bounds,
+stale generations, FD ownership, full graphemes, wide-pair lead styles,
+copy/find/link/accessibility source selection and damage transitions:
+
+```sh
+cargo +1.90.0 test -p prismattyc-host --locked native -- --test-threads=1
+cargo +1.90.0 test -p prismattyc-host --locked content::tests -- --test-threads=1
+cargo +1.90.0 test -p prismattyc-host --locked mux::native_tests -- --test-threads=1
+cargo +1.90.0 test --locked \
+  --manifest-path .cursor/skills/verify-prismattyc/scripts/native-client/Cargo.toml
+cargo +1.90.0 fmt --check \
+  --manifest-path .cursor/skills/verify-prismattyc/scripts/native-client/Cargo.toml
+cargo +1.90.0 clippy --locked --all-targets \
+  --manifest-path .cursor/skills/verify-prismattyc/scripts/native-client/Cargo.toml \
+  -- -D warnings
+python3 .cursor/skills/verify-prismattyc/scripts/check-native-client-controls.py \
+  --out "$verify_evidence/native-client-controls"
+```
+
+Require nonzero test counts. The control helper must detect every deliberate
+break and restore the source bytes. Run it with no concurrent writer or build
+of the fixture source. Supporting Rust tests do not replace real window proof.
+
+When changing native text or input, additionally drive real selection/copy,
+find and link hover against a native text scene, and inspect accessibility text
+and the full combining cluster. After release, repeat one reader against the
+retained Classic source. The Linux text fixture above proves selection, copy,
+find and Classic recovery. Link hover and accessibility still need their own
+desktop drive. Native has no scrollback; Classic scrollback remains readable.

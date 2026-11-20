@@ -88,7 +88,7 @@ struct Control {
 }
 
 impl Control {
-    fn system() -> Self {
+    fn realtime() -> Self {
         Self {
             clock: Clock::System,
             #[cfg(test)]
@@ -126,7 +126,7 @@ impl UploadWorker {
         identity: UploadIdentity,
         admitted_at: Instant,
     ) -> Result<Self, UploadFailure> {
-        Self::start_inner(source, identity, admitted_at, Control::system())
+        Self::start_inner(source, identity, admitted_at, Control::realtime())
     }
 
     fn start_inner(

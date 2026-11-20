@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Experimental native terminal grids and uploaded images for direct local PTY applications on supported Linux and Apple Silicon macOS hosts, enabled with `--experimental-rich`. Native content supplies rendering and text readers; release, resize or lease expiry restores the retained ANSI terminal. The feature remains off by default.
+
 ### Fixed
 
 - On Windows, **Update and restart** no longer stays on the daemon restart step after the update installs: the new daemon kept a copy of the app's output pipe, so the app never saw the restart finish. The app now reads command output from private files, and `pmux` no longer hands its standard handles to the programs it starts unless they ask.

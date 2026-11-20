@@ -2,6 +2,10 @@
 
 The host presents terminals, space navigation, and naming overlays. Native input and the resulting presented frame are part of the behavior.
 
+For the experimental direct local grid and image transport, use
+[native terminal sessions](native.md), including source transitions and text
+readers. The desktop fixtures below normally display the Classic source.
+
 ## Sub-features
 
 - `rail-delete`: confirmation removes a saved space without losing live panes.

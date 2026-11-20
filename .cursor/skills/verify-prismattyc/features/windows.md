@@ -43,6 +43,17 @@ The mux ConPTY fixture is `cargo test -p prismattyc-mux --lib`. It may run in th
 
 The package proof's explicit PATH option does not alone prove an installer default; test a plain install and `ADDTOPATH=0` when those semantics change. Packaging/installer runs are not isolated by the Unix helper. macOS screenshots and chooser-unit tests are not Windows runtime proof. If the test desktop cannot be reached, report the missing connection and requested exact-tip checks to the coordinator; keep the PR's runtime proof marked outstanding.
 
+## Classic content readers
+
+When changing shared displayed-content readers, open a real Windows terminal
+pane with a wide glyph, a combining cluster, a URL and enough lines to scroll.
+Use this build's bindings to select/copy, find, hover the URL and return from
+scrollback. Inspect accessibility text and require the complete cluster and
+correct selected text. Repeat with `--experimental-rich`; render status must
+still report `display_source=classic` and `native=null`, with no native offer.
+Windows does not implement the Unix native transport. Record the Windows
+desktop and toolchain prerequisites above if this route is unavailable.
+
 ## Separate monitor repair
 
 After building the matched seven native executables, retain

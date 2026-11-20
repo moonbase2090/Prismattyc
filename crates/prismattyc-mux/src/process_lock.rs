@@ -123,17 +123,157 @@ pub(crate) fn file_users(paths: &[std::path::PathBuf], mapped_only: bool) -> io:
         std::thread::sleep(Duration::from_millis(10));
     }
     let output = child.wait_with_output()?;
-    if !output.stderr.is_empty() || !matches!(output.status.code(), Some(0 | 1)) {
+    interpret_lsof(output.status.code(), &output.stdout, &output.stderr, paths)
+}
+
+/// lsof warns about mounts it cannot stat, such as a Time Machine snapshot,
+/// even when none of the requested files live there. Those warnings are
+/// tolerated. Any other stderr, a warning about a mount that holds a requested
+/// path, or an exit status other than 0 or 1 still means the inspection failed.
+#[cfg(target_os = "macos")]
+fn interpret_lsof(
+    code: Option<i32>,
+    stdout: &[u8],
+    stderr: &[u8],
+    paths: &[std::path::PathBuf],
+) -> io::Result<Vec<u32>> {
+    let blocking = blocking_stderr(stderr, paths);
+    if blocking.is_some() || !matches!(code, Some(0 | 1)) {
         return Err(io::Error::other(format!(
             "could not inspect mapped processes: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            blocking.unwrap_or_else(|| String::from_utf8_lossy(stderr).trim().to_string())
         )));
     }
-    let mut pids: Vec<_> = String::from_utf8_lossy(&output.stdout)
+    let mut pids: Vec<_> = String::from_utf8_lossy(stdout)
         .lines()
         .filter_map(|line| line.strip_prefix('p')?.parse().ok())
         .collect();
     pids.sort_unstable();
     pids.dedup();
     Ok(pids)
+}
+
+/// The first stderr line that is not a warning about an unrelated mount.
+#[cfg(target_os = "macos")]
+fn blocking_stderr(stderr: &[u8], paths: &[std::path::PathBuf]) -> Option<String> {
+    use std::os::unix::ffi::OsStrExt;
+    const WARNING: &[u8] = b"lsof: WARNING: can't stat() ";
+    const MARKER: &[u8] = b" file system ";
+    // The continuation lines only qualify the warning just above them; on
+    // their own they say nothing about which mount was skipped.
+    let mut after_unrelated_warning = false;
+    for line in stderr.split(|&b| b == b'\n') {
+        let text = line.trim_ascii();
+        if text.is_empty() {
+            continue;
+        }
+        let continuation = text == b"Output information may be incomplete."
+            || (text.starts_with(b"assuming \"dev=") && text.ends_with(b"\" from mount table"));
+        if continuation && after_unrelated_warning {
+            continue;
+        }
+        let mount = line.strip_prefix(WARNING).and_then(|rest| {
+            let at = rest.windows(MARKER.len()).position(|w| w == MARKER)?;
+            Some(&rest[at + MARKER.len()..])
+        });
+        match mount {
+            Some(mount)
+                if !paths
+                    .iter()
+                    .any(|path| path.starts_with(std::ffi::OsStr::from_bytes(mount))) =>
+            {
+                after_unrelated_warning = true;
+            }
+            _ => return Some(String::from_utf8_lossy(text).into_owned()),
+        }
+    }
+    None
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod lsof_tests {
+    use super::interpret_lsof;
+    use std::path::PathBuf;
+
+    const SNAPSHOT_WARNING: &[u8] = b"lsof: WARNING: can't stat() apfs file system /Volumes/com.apple.TimeMachine.localsnapshots/Backups.backupdb/Some Mac/2026-11-16-112811/Data\n      Output information may be incomplete.\n      assuming \"dev=3200000d\" from mount table\n";
+
+    fn app() -> Vec<PathBuf> {
+        vec![PathBuf::from("/Applications/Demo.app/Contents/MacOS/demo")]
+    }
+
+    #[test]
+    fn an_unrelated_mount_warning_with_no_user_finds_no_processes() {
+        assert_eq!(
+            interpret_lsof(Some(1), b"", SNAPSHOT_WARNING, &app()).unwrap(),
+            Vec::<u32>::new()
+        );
+    }
+
+    #[test]
+    fn an_unrelated_mount_warning_still_reports_the_mapped_users() {
+        let pids = interpret_lsof(Some(0), b"p412\np77\np412\n", SNAPSHOT_WARNING, &app()).unwrap();
+        assert_eq!(pids, vec![77, 412]);
+    }
+
+    #[test]
+    fn a_warning_about_the_mount_holding_the_requested_file_fails() {
+        let stderr = b"lsof: WARNING: can't stat() apfs file system /Applications\n      Output information may be incomplete.\n";
+        let err = interpret_lsof(Some(1), b"", stderr, &app()).unwrap_err();
+        assert!(err.to_string().contains("/Applications"), "{err}");
+    }
+
+    #[test]
+    fn any_other_stderr_fails_even_beside_an_unrelated_warning() {
+        let mut stderr = SNAPSHOT_WARNING.to_vec();
+        stderr.extend_from_slice(
+            b"lsof: status error on /Applications/Demo.app: Permission denied\n",
+        );
+        let err = interpret_lsof(Some(1), b"p5\n", &stderr, &app()).unwrap_err();
+        assert!(err.to_string().contains("Permission denied"), "{err}");
+    }
+
+    #[test]
+    fn an_exit_status_other_than_0_or_1_fails_even_with_only_warnings() {
+        assert!(interpret_lsof(Some(2), b"", SNAPSHOT_WARNING, &app()).is_err());
+        assert!(interpret_lsof(None, b"", b"", &app()).is_err());
+    }
+
+    #[test]
+    fn a_standalone_incomplete_output_line_fails() {
+        let err = interpret_lsof(
+            Some(1),
+            b"",
+            b"      Output information may be incomplete.\n",
+            &app(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("incomplete"), "{err}");
+    }
+
+    #[test]
+    fn a_standalone_assumed_device_line_fails() {
+        let stderr = b"      assuming \"dev=3200000d\" from mount table\n";
+        assert!(interpret_lsof(Some(1), b"", stderr, &app()).is_err());
+    }
+
+    #[test]
+    fn a_continuation_line_after_a_blocking_line_fails() {
+        let stderr = b"lsof: status error on /Applications/Demo.app: Permission denied\n      Output information may be incomplete.\n";
+        let err = interpret_lsof(Some(1), b"", stderr, &app()).unwrap_err();
+        assert!(err.to_string().contains("Permission denied"), "{err}");
+    }
+
+    #[test]
+    fn a_continuation_line_after_a_warning_for_the_requested_mount_fails() {
+        let stderr = b"lsof: WARNING: can't stat() apfs file system /Applications\n      Output information may be incomplete.\n";
+        assert!(interpret_lsof(Some(1), b"", stderr, &app()).is_err());
+    }
+
+    #[test]
+    fn clean_output_still_parses() {
+        assert_eq!(
+            interpret_lsof(Some(0), b"p9\n", b"", &app()).unwrap(),
+            vec![9]
+        );
+    }
 }

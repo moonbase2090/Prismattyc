@@ -27,6 +27,10 @@ use std::{
 const COMMAND_BOUND: Duration = Duration::from_millis(100);
 const FRAME_TURN: Duration = Duration::from_millis(20);
 
+fn command_response<T>(receiver: &mpsc::Receiver<T>) -> Result<T, mpsc::RecvTimeoutError> {
+    receiver.recv_timeout(COMMAND_BOUND)
+}
+
 #[cfg(test)]
 struct TestClock {
     paused_at: Instant,
@@ -50,7 +54,7 @@ fn fixture_response<T>(
         // A paused fixture awaits completion, with a hang guard, not a speed assertion.
         receiver.recv_timeout(Duration::from_secs(2))
     } else {
-        receiver.recv_timeout(COMMAND_BOUND)
+        command_response(receiver)
     }
 }
 
@@ -303,7 +307,7 @@ impl NativeService {
         #[cfg(test)]
         let response = fixture_response(&initial, test_clock.as_ref());
         #[cfg(not(test))]
-        let response = initial.recv_timeout(COMMAND_BOUND);
+        let response = command_response(&initial);
         let cached = match response {
             Ok(Ok(snapshot)) => snapshot,
             Ok(Err(error)) => return Err(error),
@@ -354,7 +358,7 @@ impl NativeService {
             #[cfg(test)]
             let response = fixture_response(&receiver, self.test_clock.as_ref());
             #[cfg(not(test))]
-            let response = receiver.recv_timeout(COMMAND_BOUND);
+            let response = command_response(&receiver);
             response.ok()
         } else {
             None

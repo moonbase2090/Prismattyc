@@ -259,7 +259,8 @@ fn a_stalled_worker_fails_closed_without_holding_the_ui_command() {
         .sender
         .send(Message::Call(Box::new(move |_w| {
             entered.send(()).unwrap();
-            gate.recv_timeout(Duration::from_secs(2)).unwrap();
+            // Longer than the real watchdog, shorter than a fixture hang guard.
+            gate.recv_timeout(Duration::from_millis(500)).unwrap();
         })))
         .unwrap();
     waiting.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -377,7 +378,8 @@ fn blocked_maximum_slot() -> BlockedMaximumSlot {
         .request(move |w| {
             w.before_frame = Some(Box::new(move || {
                 entered.send(()).unwrap();
-                gate.recv_timeout(Duration::from_secs(2)).unwrap();
+                // A fixture hang guard must not substitute for the real watchdog.
+                gate.recv_timeout(Duration::from_millis(500)).unwrap();
             }));
             Ok(())
         })

@@ -61,20 +61,13 @@ fn receive(client: &UnixStream, rights: usize) -> (Vec<u8>, Option<OwnedFd>) {
     (bytes, descriptors.into_iter().next())
 }
 fn setup() -> (NativeService, UnixStream, OwnedFd, mpsc::Receiver<()>) {
+    let _clock = PausedClockScope::enter();
     let (host, client) = fd::socket_pair().unwrap();
     let mut client = UnixStream::from(client);
     client.set_nonblocking(true).unwrap();
     let now = Instant::now();
-    let mut service = NativeService::start(
-        host.into(),
-        Geometry::new(1, 1, 8, 16).unwrap(),
-        now,
-        Some(Arc::new(Mutex::new(TestClock {
-            paused_at: now,
-            resumed_at: None,
-        }))),
-    )
-    .unwrap();
+    let mut service =
+        NativeService::new(host.into(), Geometry::new(1, 1, 8, 16).unwrap(), now).unwrap();
     let (tx, rx) = mpsc::channel();
     service
         .set_wake(Arc::new(move || {
@@ -108,9 +101,7 @@ fn activate() -> (NativeService, UnixStream, OwnedFd) {
     (service, client, descriptor)
 }
 fn advance_time(service: &NativeService, duration: Duration) {
-    let mut clock = service.test_clock.as_ref().unwrap().lock().unwrap();
-    assert!(clock.resumed_at.is_none());
-    clock.paused_at += duration;
+    service.advance_clock(duration);
 }
 fn resume_time(service: &NativeService) {
     // Resume at this real instant. Protocol time advances by elapsed wall time,

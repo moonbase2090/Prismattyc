@@ -46,6 +46,36 @@ impl TestClock {
     }
 }
 #[cfg(test)]
+std::thread_local! {
+    static SCOPED_CLOCK: std::cell::RefCell<Option<Arc<Mutex<TestClock>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+pub(crate) struct PausedClockScope {
+    previous: Option<Arc<Mutex<TestClock>>>,
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+#[cfg(test)]
+impl PausedClockScope {
+    pub(crate) fn enter() -> Self {
+        let clock = Arc::new(Mutex::new(TestClock {
+            paused_at: Instant::now(),
+            resumed_at: None,
+        }));
+        let previous = SCOPED_CLOCK.with(|current| current.replace(Some(Arc::clone(&clock))));
+        Self {
+            previous,
+            _thread: std::marker::PhantomData,
+        }
+    }
+}
+#[cfg(test)]
+impl Drop for PausedClockScope {
+    fn drop(&mut self) {
+        SCOPED_CLOCK.with(|current| current.replace(self.previous.take()));
+    }
+}
+#[cfg(test)]
 fn fixture_response<T>(
     receiver: &mpsc::Receiver<T>,
     clock: Option<&Arc<Mutex<TestClock>>>,
@@ -195,6 +225,12 @@ pub struct NativeService {
     test_clock: Option<Arc<Mutex<TestClock>>>,
 }
 impl NativeService {
+    #[cfg(test)]
+    pub(crate) fn advance_clock(&self, duration: Duration) {
+        let mut clock = self.test_clock.as_ref().unwrap().lock().unwrap();
+        assert!(clock.resumed_at.is_none());
+        clock.paused_at += duration;
+    }
     pub fn new(
         socket: UnixStream,
         geometry: Geometry,
@@ -205,7 +241,7 @@ impl NativeService {
             geometry,
             now,
             #[cfg(test)]
-            None,
+            SCOPED_CLOCK.with(|current| current.borrow().clone()),
         )
     }
     fn start(
@@ -214,6 +250,10 @@ impl NativeService {
         now: Instant,
         #[cfg(test)] test_clock: Option<Arc<Mutex<TestClock>>>,
     ) -> Result<Self, AuthorityError> {
+        #[cfg(test)]
+        let now = test_clock
+            .as_ref()
+            .map_or(now, |clock| clock.lock().unwrap().now());
         let shutdown = socket.try_clone()?;
         let shared = Arc::new(Shared {
             available: AtomicBool::new(true),

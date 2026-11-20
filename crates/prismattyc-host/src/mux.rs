@@ -9845,6 +9845,7 @@ mod tests {
 
     #[test]
     fn closing_a_rich_pane_drops_its_regions() {
+        let _clock = crate::native::service::PausedClockScope::enter();
         let mut runtime = MuxRuntime::spawn_experimental("/bin/sh", &[], 80, 24).unwrap();
         let first = runtime.focused_id();
         {
@@ -9889,6 +9890,7 @@ mod tests {
 
     #[test]
     fn flag_on_emulator_collects_apc() {
+        let _clock = crate::native::service::PausedClockScope::enter();
         let mut runtime = MuxRuntime::spawn_experimental("/bin/sh", &[], 80, 24).unwrap();
         assert!(runtime.focused().emulator.collects_apc());
         assert!(runtime.focused().experimental_rich());

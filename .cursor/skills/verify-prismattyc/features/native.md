@@ -217,6 +217,11 @@ Use the normal test environment with `RUST_BACKTRACE` unset. The driver records
 backtrace settings without overriding them. The intentional worker-panic test
 has a two-second teardown guard; forced symbolization can exceed it under CPU
 contention. Preserve such a diagnostic failure separately from the normal run.
+Functional mux fixtures select a paused clock through a thread-local scope that
+restores the previous constructor context on drop. The scope cannot move across
+threads. After the producer's frame marker, the handoff fixture explicitly
+advances its service clock before installation. Standalone producer integration
+tests retain real clocks, including actual lease expiry and client deadlines.
 
 When changing native text or input, additionally drive real selection/copy,
 find and link hover against a native text scene, and inspect accessibility text

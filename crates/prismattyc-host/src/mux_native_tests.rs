@@ -318,6 +318,7 @@ fn a_completed_native_reply_cannot_authorize_an_offer_revoked_by_trailing_pty_by
     let module = module_path!().split_once("::").unwrap().1;
     let name = format!("{module}::a_completed_native_reply_cannot_authorize_an_offer_revoked_by_trailing_pty_bytes");
     for trailing in [false, true] {
+        let _clock = crate::native::service::PausedClockScope::enter();
         let mode = if trailing { "trailing" } else { "clean" };
         let args = vec![
             "-c".into(),
@@ -458,6 +459,11 @@ fn a_completed_native_reply_cannot_authorize_an_offer_revoked_by_trailing_pty_by
             assert!(pane.native.as_ref().unwrap().authority.available());
             pane.poll_native_at(now);
             signal(&receiver, &mut signals, b"NATIVE_FRAME_SENT\n");
+            pane.native
+                .as_ref()
+                .unwrap()
+                .authority
+                .advance_clock(Duration::from_millis(20));
             loop {
                 pane.poll_native_at(Instant::now());
                 if pane.content().is_native() {
@@ -525,6 +531,7 @@ fn a_completed_native_reply_cannot_authorize_an_offer_revoked_by_trailing_pty_by
 
 #[test]
 fn a_closed_reply_queue_revokes_the_unused_offer_immediately() {
+    let _clock = crate::native::service::PausedClockScope::enter();
     let mut runtime = MuxRuntime::spawn_with_geom(
         "/bin/sh",
         &["-c".into(), "read unused".into()],

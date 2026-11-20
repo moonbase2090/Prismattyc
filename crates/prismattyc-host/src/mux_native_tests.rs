@@ -185,10 +185,34 @@ fn child(trailing: bool) {
     println!("NATIVE_HELLO_SENT");
     std::io::stdout().flush().unwrap();
     if trailing {
-        let mut byte = [0];
-        readable(&socket);
-        let received = prismattyc_process::fd::receive(socket.as_fd(), &mut byte, 0).unwrap();
-        assert_eq!(received.bytes, 0, "stale offer must close without SETUP");
+        let deadline = Instant::now() + Duration::from_millis(200);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let mut descriptor = libc::pollfd {
+                fd: socket.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let ready =
+                unsafe { libc::poll(&mut descriptor, 1, remaining.as_millis().max(1) as i32) };
+            if ready < 0
+                && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+            {
+                continue;
+            }
+            assert!(ready >= 0);
+            if ready == 0 {
+                break;
+            }
+            let received = prismattyc_process::fd::receive(socket.as_fd(), &mut [0], 0).unwrap();
+            assert_eq!(received.bytes, 0, "stale offer must never receive SETUP");
+            break;
+        }
+        println!("NATIVE_STALE_OFFER_REJECTED");
+        std::io::stdout().flush().unwrap();
     } else {
         let (setup, descriptors) = receive(&socket, 1);
         assert_eq!(u16::from_le_bytes(setup[4..6].try_into().unwrap()), 9);
@@ -414,10 +438,12 @@ fn a_completed_native_reply_cannot_authorize_an_offer_revoked_by_trailing_pty_by
         let _ = pane.emulator.take_damage();
         pane.poll_native_at(now);
         if trailing {
+            signal(&receiver, b"NATIVE_STALE_OFFER_REJECTED\n");
             assert!(
-                pane.native.is_none(),
-                "trailing bytes left the written offer usable"
+                pane.native_scene().is_none(),
+                "trailing bytes authorized the stale offer"
             );
+            assert!(!pane.content().is_native());
             assert_eq!(pane.emulator.screen().view_cell(0, 0, 0).character, 'x');
         } else {
             assert!(pane.native.as_ref().unwrap().authority.available());

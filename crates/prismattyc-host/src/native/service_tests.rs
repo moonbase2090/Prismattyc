@@ -364,16 +364,24 @@ fn a_queued_revocation_finishes_after_one_maximum_slot_validation_turn() {
             let now = w.now_clock();
             let result = w.native.pty_bytes(now);
             w.publish(true);
-            completed.send(result).unwrap();
+            completed.send((result, Instant::now())).unwrap();
         })))
         .unwrap();
     release.send(()).unwrap();
-    done.recv_timeout(COMMAND_BOUND).unwrap().unwrap();
-    assert!(started.elapsed() < COMMAND_BOUND);
+    let (result, completed_at) = done.recv_timeout(COMMAND_BOUND).unwrap();
+    result.unwrap();
+    let completion = completed_at.duration_since(started);
+    let observer = started.elapsed();
+    assert!(
+        completion < COMMAND_BOUND,
+        "worker completion {}us, observer resumed {}us",
+        completion.as_micros(),
+        observer.as_micros()
+    );
     assert!(service.scene().is_none());
     eprintln!(
-        "maximum slot copy/validation and queued revocation: {}us, max worker turn {}us",
-        started.elapsed().as_micros(),
+        "maximum slot copy/validation and queued revocation: {}us, observer {}us, max worker turn {}us",
+        completion.as_micros(), observer.as_micros(),
         service.max_turn_us()
     );
     assert_eq!(producer.counter(128).load(Ordering::Acquire), 1);

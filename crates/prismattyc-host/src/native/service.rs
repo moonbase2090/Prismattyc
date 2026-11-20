@@ -102,7 +102,8 @@ impl Worker {
         let started = Instant::now();
         let now = self.now(started);
         let mut changed = self.native.poll_for_service(now, FrameWork::Keep)?;
-        if now >= self.next_frame || self.native.frame_backlog_ready() {
+        if self.native.available() && (now >= self.next_frame || self.native.frame_backlog_ready())
+        {
             #[cfg(test)]
             if self.native.awaiting_initial_frame() || self.native.frame_backlog_ready() {
                 if let Some(before) = self.before_frame.take() {

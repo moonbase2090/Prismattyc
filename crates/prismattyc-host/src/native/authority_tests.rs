@@ -798,11 +798,13 @@ fn revocation_never_activates_a_session_from_its_pending_active_reply() {
 fn legacy_revocation_finishes_its_pending_pong_before_closing() {
     for partial in [false, true] {
         let now = Instant::now();
-        let (mut native, mut client, _producer) = legacy_active(now);
+        let (mut native, mut client, _producer, sender) = legacy_active_with_write_socket(now);
         let mut ping = control(literals::PING_IDLE, 1, 1, 3);
         ping[6..8].copy_from_slice(&0u16.to_le_bytes());
         client.write_all(&ping).unwrap();
+        let blocked = block_replies(&sender);
         native.poll(now).unwrap();
+        drain_backpressure(&client, blocked);
         if partial {
             native.endpoint.limit_send(std::num::NonZeroUsize::new(1));
             native.poll(now).unwrap();
@@ -814,7 +816,12 @@ fn legacy_revocation_finishes_its_pending_pong_before_closing() {
         let (reply, descriptor) = response(&client, 0);
         assert!(descriptor.is_none());
         assert_eq!(opcode(&reply), 8);
+        assert_eq!(reply.len(), 32);
         assert_eq!(reply[6..8], [0, 0]);
+        assert_eq!(
+            (value(&reply, 8), value(&reply, 16), value(&reply, 24)),
+            (1, 3, 1)
+        );
         assert!(!native.available());
         eof(client);
     }
@@ -1180,7 +1187,15 @@ fn advertised_tokens_match_actual_setup_activation_and_ping_dialects_on_this_pla
 
 #[cfg(target_os = "linux")]
 fn legacy_active(now: Instant) -> (DesktopNative, UnixStream, Producer) {
-    let (mut native, mut client) = owner(now);
+    let (native, client, producer, _) = legacy_active_with_write_socket(now);
+    (native, client, producer)
+}
+
+#[cfg(target_os = "linux")]
+fn legacy_active_with_write_socket(
+    now: Instant,
+) -> (DesktopNative, UnixStream, Producer, UnixStream) {
+    let (mut native, mut client, sender) = owner_with_write_socket(now);
     let offer = native
         .prepare_offer(NonZeroU32::new(1).unwrap(), now)
         .unwrap();
@@ -1203,7 +1218,7 @@ fn legacy_active(now: Instant) -> (DesktopNative, UnixStream, Producer) {
     native.poll(now).unwrap();
     let (active, _) = response(&client, 0);
     assert_eq!(active[4..8], [4, 0, 0, 0]);
-    (native, client, producer)
+    (native, client, producer, sender)
 }
 
 #[test]
@@ -1217,7 +1232,7 @@ fn legacy_release_flushes_its_unchanged_reply_then_closes_the_generation() {
     client.write_all(&release).unwrap();
     assert!(native.poll(now).unwrap());
     assert!(scene.upgrade().is_none());
-    native.poll(now).unwrap();
+    client.set_nonblocking(true).unwrap();
     let (reply, _) = response(&client, 0);
     assert_eq!(opcode(&reply), 6);
     assert_eq!(reply.len(), 32);

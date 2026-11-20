@@ -711,7 +711,15 @@ $outside = Join-Path $root 'outside'
 $updates = Join-Path $root 'updates'
 New-Item -ItemType Directory -Path $bin, $outside, $updates -Force | Out-Null
 $monitor = Join-Path $bin 'pmux-activity-monitor.exe'
+$alsoLocked = Join-Path $bin 'also-locked.exe'
+$ordinary = Join-Path $bin 'pmux.exe'
+$otherShape = Join-Path $bin 'private-notes.txt'
+$data = Join-Path $install 'data'
 [System.IO.File]::WriteAllBytes($monitor, [byte[]](1, 2, 3))
+[System.IO.File]::WriteAllBytes($alsoLocked, [byte[]](4, 5, 6))
+[System.IO.File]::WriteAllBytes($ordinary, [byte[]](7, 8, 9))
+Set-Content -LiteralPath $otherShape -Value 'notes' -Encoding ascii
+New-Item -ItemType Directory -Path $data -Force | Out-Null
 $secret = Join-Path $outside 'secret.txt'
 Set-Content -LiteralPath $secret -Value 'sentinel' -Encoding ascii
 New-Item -ItemType Junction -Path (Join-Path $install 'link') -Target $outside | Out-Null
@@ -735,17 +743,36 @@ function Test-HasSid([string]$Path, [string]$Sid) {
     return $false
 }
 Set-UserOnly $monitor
+Set-UserOnly $alsoLocked
 Set-UserOnly $secret
+$userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$shaped = New-Object System.Security.AccessControl.FileSecurity
+$shaped.SetAccessRuleProtection($true, $false)
+$shaped.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+    $userSid, 'Modify', 'Allow')))
+Set-Acl -LiteralPath $otherShape -AclObject $shaped
+$dirAcl = New-Object System.Security.AccessControl.DirectorySecurity
+$dirAcl.SetAccessRuleProtection($true, $false)
+$dirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+    $userSid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+Set-Acl -LiteralPath $data -AclObject $dirAcl
 $before = (Get-Acl -LiteralPath $secret).Sddl
+$ordinaryBefore = (Get-Acl -LiteralPath $ordinary).Sddl
+$otherBefore = (Get-Acl -LiteralPath $otherShape).Sddl
+$dirBefore = (Get-Acl -LiteralPath $data).Sddl
 $prepared = @(& $prepare -InstallRoot $install -UpdatesRoot $updates)
 if ($prepared -notcontains 'Prismattyc install prepared.') {
     throw "prepare did not finish: $($prepared -join ' ')"
 }
-$user = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$user = $userSid.Value
 Write-Output ("monitor_user=" + (Test-HasSid $monitor $user))
 Write-Output ("monitor_system=" + (Test-HasSid $monitor 'S-1-5-18'))
 Write-Output ("monitor_admins=" + (Test-HasSid $monitor 'S-1-5-32-544'))
+Write-Output ("also_locked_system=" + (Test-HasSid $alsoLocked 'S-1-5-18'))
 Write-Output ("sentinel_same=" + ((Get-Acl -LiteralPath $secret).Sddl -eq $before))
+Write-Output ("ordinary_same=" + ((Get-Acl -LiteralPath $ordinary).Sddl -eq $ordinaryBefore))
+Write-Output ("other_shape_same=" + ((Get-Acl -LiteralPath $otherShape).Sddl -eq $otherBefore))
+Write-Output ("directory_same=" + ((Get-Acl -LiteralPath $data).Sddl -eq $dirBefore))
 $target = Join-Path $root 'reparse-target'
 $reparse = Join-Path $root 'reparse-root'
 New-Item -ItemType Directory -Path $target -Force | Out-Null
@@ -788,7 +815,11 @@ Write-Output "reparse_threw=$threw"
             self.assertEqual(recorded.get("monitor_user"), "True")
             self.assertEqual(recorded.get("monitor_system"), "True")
             self.assertEqual(recorded.get("monitor_admins"), "True")
+            self.assertEqual(recorded.get("also_locked_system"), "True")
             self.assertEqual(recorded.get("sentinel_same"), "True")
+            self.assertEqual(recorded.get("ordinary_same"), "True")
+            self.assertEqual(recorded.get("other_shape_same"), "True")
+            self.assertEqual(recorded.get("directory_same"), "True")
             self.assertEqual(recorded.get("reparse_threw"), "True")
 
     def test_prepare_stops_an_updates_dir_daemon_and_leaves_other_images(self):

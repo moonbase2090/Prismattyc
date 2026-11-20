@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- A Windows install stops `pmuxd` when that executable is in the install directory or the update store, then starts the installed daemon. Signing in still leaves a running daemon alone. Setup also grants SYSTEM and Administrators access to existing install files that an in-app update locked to the current user, so those files can be replaced.
+- A Windows install stops `pmuxd` when that executable is in the install directory or the update store, then starts the installed daemon. Signing in still leaves a running daemon alone. Setup also grants SYSTEM and Administrators access on a file whose access list is the protected user-only list written by an in-app update, so that file can be replaced. Other files and directories are left unchanged.
 
 ## [0.3.71] - 2026-11-20
 

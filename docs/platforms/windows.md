@@ -140,10 +140,12 @@ of an equal version. The rebuild's executables are the ones installed.
 Other prerelease spellings are rejected, and so is a version the fields cannot hold.
 
 Before copying files, an install grants SYSTEM and Administrators access on
-the install directory when an existing file has a protected user-only access
-list. An in-app monitor update can leave that list on
+a file whose access list is the protected user-only list an in-app update
+writes: one FullControl entry for the current user and no inherited entries.
+An in-app monitor update can leave that list on
 `pmux-activity-monitor.exe`, and the installer service cannot read the file
-security until those two entries are present. The same step stops `pmuxd`
+security until those two entries are present. Files and directories with any
+other access list are left unchanged. The same step stops `pmuxd`
 when its executable is inside `%LOCALAPPDATA%\Programs\Prismattyc` or the
 update store, and it deletes `windows-current.json`, so the files being
 copied are not still in use by a staged daemon and the next launch does not

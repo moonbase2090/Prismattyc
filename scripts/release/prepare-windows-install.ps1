@@ -1,8 +1,10 @@
 # Prepare a Windows install before files are copied, and again before the
-# installed daemon starts. Grant SYSTEM and Administrators access on the
-# install tree, stop pmuxd when its executable is in that tree or the update
-# store, and delete windows-current.json. A logon start does not run this.
-# -Classify prints stop or keep for one executable path and changes nothing.
+# installed daemon starts. A file whose access list is the protected
+# user-only list written by an in-app update gains SYSTEM and Administrators
+# access. Other files and directories are left unchanged. Then stop pmuxd
+# when its executable is in the install tree or the update store, and delete
+# windows-current.json. A logon start does not run this. -Classify prints
+# stop or keep for one executable path and changes nothing.
 [CmdletBinding()]
 param(
     [switch]$Classify,
@@ -52,21 +54,46 @@ function Get-PrismattycInstallRoot {
     return Join-Path $localAppData 'Programs\Prismattyc'
 }
 
+function Test-UpdaterUserOnlyFile {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $item = Get-Item -LiteralPath $Path -Force
+    if ($item.PSIsContainer) { return $false }
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { return $false }
+    $acl = Get-Acl -LiteralPath $Path
+    if (-not $acl.AreAccessRulesProtected) { return $false }
+    $rules = @($acl.Access)
+    if ($rules.Count -ne 1) { return $false }
+    $rule = $rules[0]
+    if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) {
+        return $false
+    }
+    $full = [System.Security.AccessControl.FileSystemRights]::FullControl
+    if ($rule.FileSystemRights -ne $full) { return $false }
+    if ($rule.InheritanceFlags -ne [System.Security.AccessControl.InheritanceFlags]::None) {
+        return $false
+    }
+    if ($rule.PropagationFlags -ne [System.Security.AccessControl.PropagationFlags]::None) {
+        return $false
+    }
+    $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+    $sid = $rule.IdentityReference
+    if ($sid -isnot [System.Security.Principal.SecurityIdentifier]) {
+        try {
+            $sid = $sid.Translate([System.Security.Principal.SecurityIdentifier])
+        } catch {
+            return $false
+        }
+    }
+    return $sid.Value -eq $user.Value
+}
+
 function Grant-PrismattycInstallerAccess {
-    param(
-        [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][bool]$Directory
-    )
+    param([Parameter(Mandatory = $true)][string]$Path)
     $acl = Get-Acl -LiteralPath $Path
     foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
         $identifier = New-Object System.Security.Principal.SecurityIdentifier $sid
-        if ($Directory) {
-            $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-                $identifier, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
-        } else {
-            $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-                $identifier, 'FullControl', 'Allow')
-        }
+        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+            $identifier, 'FullControl', 'Allow')
         $acl.AddAccessRule($rule)
     }
     Set-Acl -LiteralPath $Path -AclObject $acl
@@ -87,7 +114,11 @@ function Repair-PrismattycInstallAcls {
         if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
             continue
         }
-        Grant-PrismattycInstallerAccess -Path $item.FullName -Directory $item.PSIsContainer
+        # The in-app updater's private list is one protected FullControl entry
+        # for the current user. Only that file needs SYSTEM and Administrators.
+        if (Test-UpdaterUserOnlyFile -Path $item.FullName) {
+            Grant-PrismattycInstallerAccess -Path $item.FullName
+        }
         if (-not $item.PSIsContainer) { continue }
         foreach ($child in @(Get-ChildItem -LiteralPath $item.FullName -Force)) {
             if (($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {

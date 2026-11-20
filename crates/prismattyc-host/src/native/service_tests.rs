@@ -306,9 +306,16 @@ fn invalid_ping_identity_closes_the_worker_without_renewing_native_ownership() {
     }
 }
 
-#[test]
-fn a_maximum_slot_turn_keeps_the_public_revoke_bounded_or_fails_closed() {
-    let (mut service, mut client, _old_descriptor, wake) = setup();
+struct BlockedMaximumSlot {
+    service: NativeService,
+    client: UnixStream,
+    producer: Producer,
+    release: mpsc::Sender<()>,
+    epoch: PtyEpoch,
+}
+
+fn blocked_maximum_slot() -> BlockedMaximumSlot {
+    let (mut service, mut client, _old_descriptor, _wake) = setup();
     // Maximum cell and text extents fill the entire 1 MiB slot.
     service
         .resize(Geometry::new(256, 128, 8, 16).unwrap(), Instant::now())
@@ -382,6 +389,24 @@ fn a_maximum_slot_turn_keeps_the_public_revoke_bounded_or_fails_closed() {
     advance_time(&service, FRAME_TURN);
     client.write_all(&activate).unwrap();
     entry.recv_timeout(Duration::from_secs(2)).unwrap();
+    BlockedMaximumSlot {
+        service,
+        client,
+        producer,
+        release,
+        epoch: offer.epoch,
+    }
+}
+
+#[test]
+fn a_maximum_slot_turn_keeps_the_public_revoke_bounded_or_fails_closed() {
+    let BlockedMaximumSlot {
+        mut service,
+        client: _client,
+        producer,
+        release,
+        epoch,
+    } = blocked_maximum_slot();
     service.before_request = Some(Box::new(move |_| {
         release.send(()).unwrap();
     }));
@@ -392,7 +417,7 @@ fn a_maximum_slot_turn_keeps_the_public_revoke_bounded_or_fails_closed() {
     assert!(service.scene().is_none());
     match result {
         Ok(_) => {
-            assert!(service.epoch().get() > offer.epoch.get());
+            assert!(service.epoch().get() > epoch.get());
             assert_eq!(producer.counter(128).load(Ordering::Acquire), 1);
         }
         Err(AuthorityError::Io(error)) if error.kind() == io::ErrorKind::TimedOut => {
@@ -402,7 +427,6 @@ fn a_maximum_slot_turn_keeps_the_public_revoke_bounded_or_fails_closed() {
         Err(error) => panic!("unexpected public revoke result: {error:?}"),
     }
     let watchdog_closed = !service.available();
-    drop(wake);
     stop(&mut service);
     eprintln!(
         "maximum slot public revoke: {}us, max worker turn {}us, closed {}",
@@ -410,6 +434,27 @@ fn a_maximum_slot_turn_keeps_the_public_revoke_bounded_or_fails_closed() {
         service.max_turn_us(),
         watchdog_closed
     );
+}
+
+#[test]
+fn a_blocked_maximum_slot_cannot_extend_the_public_command_watchdog() {
+    let BlockedMaximumSlot {
+        mut service,
+        client: _client,
+        producer,
+        release,
+        ..
+    } = blocked_maximum_slot();
+    resume_time(&service);
+    let error = service.pty_bytes(Instant::now()).unwrap_err();
+    assert!(matches!(error, AuthorityError::Io(error) if error.kind() == io::ErrorKind::TimedOut));
+    assert!(!service.available());
+    assert!(service.scene().is_none());
+    assert!(service.cached.scene.is_none());
+    assert_eq!(producer.counter(128).load(Ordering::Acquire), 0);
+    // Only the completed watchdog call releases the worker's frame-copy gate.
+    release.send(()).unwrap();
+    stop(&mut service);
 }
 
 #[test]

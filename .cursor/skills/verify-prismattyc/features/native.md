@@ -194,6 +194,26 @@ Require nonzero test counts. The control helper must detect every deliberate
 break and restore the source bytes. Run it with no concurrent writer or build
 of the fixture source. Supporting Rust tests do not replace real window proof.
 
+For native service fixture scheduling changes, build the host test executable
+with `cargo test --locked -p prismattyc-host --bin prismattyc-host --no-run`.
+Run its native group once without load and record the selected count. Then use
+that exact executable and count for the loaded run:
+
+```sh
+python3 tests/native/native-service-load.py --binary "$native_test_binary" \
+  --revision "$(git rev-parse HEAD)" --expected-tests "$native_test_count" \
+  --out "$verify_evidence/native-service-load" --runs 400
+```
+
+The driver starts twice as many busy processes as available CPUs, retains every
+iteration and requires the exact test count on every run. Any failure makes the
+whole result FAIL; iterations are measurements, not retries of failed tests.
+It reaps its owned load processes, including on interruption. The per-iteration
+guard detects hangs and is not a performance assertion. Do not overlap this
+drive with another CPU-load proof. Paused service fixtures advance the initial
+frame timer explicitly; deadline and watchdog cases use explicit clock advances
+or resume elapsed real time before their action. Record those clocks separately.
+
 When changing native text or input, additionally drive real selection/copy,
 find and link hover against a native text scene, and inspect accessibility text
 and the full combining cluster. After release, repeat one reader against the

@@ -25,6 +25,12 @@ Preconditions: build and set the variables in the skill's Launch section; use a 
 
 Pane IDs differ from session IDs. Never send to a guessed ID or use `--force` against another client. The helper is noninteractive and does not prove attach keyboard routing; use the existing PTY integration tests in `crates/prismattyc-mux/tests/interactive_attach.rs` when that path changes. Mail in this fixture stays inside its private daemon.
 
+For mail-watch lifecycle changes, run `cargo +1.90.0 test -p prismattyc-mux
+--test mail_cli --locked -- --test-threads=1` on native Linux and macOS.
+The daemon-exit case observes the real watcher's socket before stopping its
+owned daemon. Linux reads `/proc`; macOS reads the process FD list with
+`proc_pidinfo` and does not require a `/proc` mount.
+
 ## Linux test portability
 
 When changing fake foreground-process metadata or the Linux CI runner, run:

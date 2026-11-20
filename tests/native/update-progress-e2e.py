@@ -46,6 +46,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 FAILED = 'Failed at step '
@@ -174,11 +175,13 @@ class LineReader:
                     self.lines.put(line)
 
     def await_line(self, test, label, timeout):
-        """The next kept line passing `test`. `timeout` only bounds a hung
-        process; the wait ends on the line."""
+        """The next kept line passing `test`. `timeout` bounds the whole wait
+        for a hung process, however many other lines arrive meanwhile; the
+        wait ends on the line."""
+        deadline = time.monotonic() + timeout
         while True:
             try:
-                line = self.lines.get(timeout=timeout)
+                line = self.lines.get(timeout=max(0.0, deadline - time.monotonic()))
             except queue.Empty:
                 raise AssertionError(f'no {label} within {timeout} s') from None
             if test(line):

@@ -213,6 +213,10 @@ guard detects hangs and is not a performance assertion. Do not overlap this
 drive with another CPU-load proof. Paused service fixtures advance the initial
 frame timer explicitly; deadline and watchdog cases use explicit clock advances
 or resume elapsed real time before their action. Record those clocks separately.
+Use the normal test environment with `RUST_BACKTRACE` unset. The driver records
+backtrace settings without overriding them. The intentional worker-panic test
+has a two-second teardown guard; forced symbolization can exceed it under CPU
+contention. Preserve such a diagnostic failure separately from the normal run.
 
 When changing native text or input, additionally drive real selection/copy,
 find and link hover against a native text scene, and inspect accessibility text

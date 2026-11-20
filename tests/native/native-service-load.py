@@ -44,7 +44,6 @@ def main():
                 child = subprocess.Popen(
                     [str(args.binary), args.filter, "--test-threads=1", "--nocapture"],
                     stdout=output, stderr=subprocess.STDOUT, start_new_session=True,
-                    env=dict(os.environ, RUST_BACKTRACE="1"),
                 )
                 try:
                     code = child.wait(timeout=args.hang_guard_seconds)
@@ -89,6 +88,8 @@ def main():
             "failed_iterations": sum(not result["pass"] for result in results),
             "failures_by_test": failures_by_test, "results": results,
             "elapsed_seconds": time.monotonic() - started,
+            "environment": {name: os.environ.get(name)
+                            for name in ("RUST_BACKTRACE", "RUST_LIB_BACKTRACE")},
             "load_processes_reaped": all(process.poll() is not None for process in load),
         }
         (args.out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")

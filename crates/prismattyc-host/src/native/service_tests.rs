@@ -121,9 +121,10 @@ fn control_and_ring_progress_continue_while_a_paint_snapshot_is_held() {
     let producer = thread::spawn(move || {
         let producer = Producer::new(descriptor);
         let start = Instant::now();
-        for frame in 2..=16 {
+        let mut frame = 2;
+        loop {
             let mut literal = frame_literal();
-            literal[128] = b'A' + frame as u8;
+            literal[128] = b'Q';
             producer.publish(frame, &literal);
             let deadline = Instant::now() + Duration::from_secs(2);
             while consumed
@@ -138,19 +139,26 @@ fn control_and_ring_progress_continue_while_a_paint_snapshot_is_held() {
             let (pong, _) = receive(&client, 0, Duration::from_millis(100));
             assert_eq!(&pong[4..6], &15u16.to_le_bytes());
             assert_eq!(&pong[16..24], &(frame + 1).to_le_bytes());
+            if frame >= 16 && start.elapsed() >= Duration::from_millis(200) {
+                break;
+            }
+            frame += 1;
         }
         let elapsed = start.elapsed();
-        finished.send(elapsed).unwrap();
+        finished.send((elapsed, frame)).unwrap();
         painted_done.recv_timeout(Duration::from_secs(2)).unwrap();
         elapsed
     });
     // The UI paint continuation stays behind this barrier. No service.poll runs.
-    let elapsed = barrier.recv_timeout(Duration::from_secs(3)).unwrap();
+    let (elapsed, newest) = barrier.recv_timeout(Duration::from_secs(3)).unwrap();
     assert!(elapsed >= Duration::from_millis(200));
     assert_eq!(painted.frame().context.sequence.get(), 1);
     assert_eq!(service.scene().unwrap().frame().context.sequence.get(), 1);
     service.poll(Instant::now()).unwrap();
-    assert_eq!(service.scene().unwrap().frame().context.sequence.get(), 16);
+    assert_eq!(
+        service.scene().unwrap().frame().context.sequence.get(),
+        newest
+    );
     assert_eq!(
         service.scene().unwrap().frame().cells[0].glyph,
         Glyph::Scalar('Q')
@@ -231,6 +239,7 @@ fn a_stalled_worker_fails_closed_without_holding_the_ui_command() {
         })))
         .unwrap();
     waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(!service.take_revocation());
     assert!(service.pty_bytes(Instant::now()).is_err());
     assert!(!service.available());
     assert!(service.scene().is_none());
@@ -250,6 +259,8 @@ fn a_worker_panic_closes_transport_and_invalidates_the_cached_scene() {
     service.exited.recv_timeout(Duration::from_secs(2)).unwrap();
     assert!(!service.available());
     assert!(service.scene().is_none());
+    assert!(service.take_revocation());
+    assert!(service.cached.scene.is_none());
     let mut client = &client;
     assert_eq!(client.read(&mut [0]).unwrap(), 0);
     service.close();
@@ -367,5 +378,71 @@ fn a_queued_revocation_finishes_after_one_maximum_slot_validation_turn() {
     );
     assert_eq!(producer.counter(128).load(Ordering::Acquire), 1);
     drop(wake);
+    stop(&mut service);
+}
+
+#[test]
+fn a_revoke_between_cache_check_and_pty_command_still_marks_damage() {
+    let (mut service, _client, _descriptor) = activate();
+    service.before_request = Some(Box::new(|commands| {
+        let (revoked, observed) = mpsc::sync_channel(1);
+        commands
+            .send(Message::Call(Box::new(move |w| {
+                let now = w.now_clock();
+                assert!(w.native.pty_bytes(now).unwrap());
+                w.publish(true);
+                revoked.send(()).unwrap();
+            })))
+            .unwrap();
+        observed.recv_timeout(Duration::from_secs(2)).unwrap();
+    }));
+    assert!(service.pty_bytes(Instant::now()).unwrap());
+    assert!(service.cached.scene.is_none());
+    stop(&mut service);
+}
+
+#[test]
+fn a_full_ring_drains_to_the_newest_pending_scene_between_control_requests() {
+    let (mut service, mut client, descriptor) = activate();
+    let producer = Producer::new(descriptor);
+    let (progress, consumed) = mpsc::channel();
+    let (entered, entry) = mpsc::channel();
+    let (release, gate) = mpsc::channel();
+    service
+        .request(move |w| {
+            w.progress = Some(progress);
+            w.before_frame = Some(Box::new(move || {
+                entered.send(()).unwrap();
+                gate.recv_timeout(Duration::from_secs(2)).unwrap();
+            }));
+            Ok(())
+        })
+        .unwrap();
+    let mut literal = frame_literal();
+    literal[128] = b'C';
+    producer.publish(2, &literal);
+    entry.recv_timeout(Duration::from_secs(2)).unwrap();
+    for frame in 3..=5 {
+        literal[128] = b'A' + frame as u8;
+        producer.publish(frame, &literal);
+    }
+    client.write_all(&control(literals::PING_IDLE, 3)).unwrap();
+    release.send(()).unwrap();
+    let (pong, _) = receive(&client, 0, Duration::from_millis(100));
+    assert_eq!(&pong[4..6], &15u16.to_le_bytes());
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while consumed
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .unwrap()
+        != 5
+    {}
+    assert_eq!(producer.counter(128).load(Ordering::Acquire), 5);
+    assert_eq!(service.scene().unwrap().frame().context.sequence.get(), 1);
+    service.poll(Instant::now()).unwrap();
+    assert_eq!(service.scene().unwrap().frame().context.sequence.get(), 5);
+    assert_eq!(
+        service.scene().unwrap().frame().cells[0].glyph,
+        Glyph::Scalar('F')
+    );
     stop(&mut service);
 }

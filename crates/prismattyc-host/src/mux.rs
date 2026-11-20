@@ -1185,6 +1185,8 @@ impl PaneRuntime {
             Some(serde_json::json!({
                 "available": native.authority.available(),
                 "worker_max_turn_us": native.authority.max_turn_us(),
+                "ui_poll_last_us": native.authority.ui_poll_last_us(),
+                "ui_poll_max_us": native.authority.ui_poll_max_us(),
                 "generation": native.authority.epoch().get(),
                 "child_pid": native.identity().pid(),
                 "child_birth": native.identity().birth(),
@@ -4568,13 +4570,12 @@ impl MuxRuntime {
     fn drain_all_with_deadline(&mut self, deadline: Option<Instant>) -> (bool, bool) {
         #[cfg(native_transport)]
         let native_dirty = {
-            let now = Instant::now();
             let mut dirty = false;
             for pane in self.panes.values_mut() {
                 let Some(native) = &mut pane.native else {
                     continue;
                 };
-                let expired = native.authority.expire(now).unwrap_or(true);
+                let expired = native.authority.take_revocation();
                 let unavailable = !native.authority.available();
                 if unavailable {
                     pane.native = None;

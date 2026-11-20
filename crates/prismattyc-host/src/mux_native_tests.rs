@@ -301,12 +301,15 @@ fn a_completed_native_reply_cannot_authorize_an_offer_revoked_by_trailing_pty_by
             name.clone(),
         ];
         let (written_tx, written_rx) = mpsc::channel();
+        let (native_tx, native_rx) = mpsc::channel();
         let wake: Wake = Arc::new(move || {
             if thread::current()
                 .name()
                 .is_some_and(|name| name.ends_with("-write"))
             {
                 let _ = written_tx.send(());
+            } else {
+                let _ = native_tx.send(());
             }
         });
         let mut runtime = MuxRuntime::spawn_with_geom(
@@ -420,9 +423,17 @@ fn a_completed_native_reply_cannot_authorize_an_offer_revoked_by_trailing_pty_by
             assert!(pane.native.as_ref().unwrap().authority.available());
             pane.poll_native_at(now);
             signal(&receiver, b"NATIVE_FRAME_SENT\n");
-            pane.poll_native_at(now);
-            pane.poll_native_at(now);
-            pane.poll_native_at(now);
+            loop {
+                pane.poll_native_at(Instant::now());
+                if pane.content().is_native() {
+                    break;
+                }
+                assert!(
+                    pane.native.is_some(),
+                    "native owner failed during activation"
+                );
+                native_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            }
             signal(&receiver, b"NATIVE_ACTIVE_SEEN\n");
             assert!(pane.content().is_native());
             native_hid_classic_overlays =

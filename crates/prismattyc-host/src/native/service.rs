@@ -28,6 +28,8 @@ const COMMAND_BOUND: Duration = Duration::from_millis(100);
 const FRAME_TURN: Duration = Duration::from_millis(20);
 
 type Task = Box<dyn FnOnce(&mut Worker) + Send>;
+#[cfg(test)]
+type BeforeRequest = Box<dyn FnOnce(&mpsc::SyncSender<Message>) + Send>;
 enum Message {
     Ready,
     Call(Task),
@@ -81,7 +83,7 @@ impl Worker {
             epoch: self.native.epoch(),
             geometry: self.native.geometry(),
             scene: self.native.scene().cloned(),
-            installation: self.native.installation(),
+            installation: self.native.pending_installation(),
         }
     }
     fn publish(&mut self, changed: bool) {
@@ -100,16 +102,21 @@ impl Worker {
         let started = Instant::now();
         let now = self.now(started);
         let mut changed = self.native.poll_for_service(now, FrameWork::Keep)?;
-        if now >= self.next_frame {
+        if now >= self.next_frame || self.native.frame_backlog_ready() {
             #[cfg(test)]
-            if self.native.awaiting_initial_frame() {
+            if self.native.awaiting_initial_frame() || self.native.frame_backlog_ready() {
                 if let Some(before) = self.before_frame.take() {
                     before();
                 }
             }
             let now = self.now_clock();
             changed |= self.native.poll_for_service(now, FrameWork::Prepare)?;
-            self.next_frame = self.clock + FRAME_TURN;
+            let finished = self.now_clock();
+            self.next_frame = if self.native.frame_backlog_ready() {
+                finished
+            } else {
+                finished + FRAME_TURN
+            };
         }
         self.publish(changed);
         #[cfg(test)]
@@ -139,8 +146,12 @@ pub struct NativeService {
     shared: Arc<Shared>,
     cached: Snapshot,
     last_advance: Instant,
+    ui_poll_last_us: u64,
+    ui_poll_max_us: u64,
     #[cfg(test)]
     exited: mpsc::Receiver<()>,
+    #[cfg(test)]
+    before_request: Option<BeforeRequest>,
 }
 impl NativeService {
     pub fn new(
@@ -253,8 +264,12 @@ impl NativeService {
             shared,
             cached,
             last_advance: now,
+            ui_poll_last_us: 0,
+            ui_poll_max_us: 0,
             #[cfg(test)]
             exited,
+            #[cfg(test)]
+            before_request: None,
         })
     }
     fn request<R: Send + 'static>(
@@ -263,6 +278,10 @@ impl NativeService {
     ) -> Result<R, AuthorityError> {
         if !self.available() {
             return Err(AuthorityError::Protocol("native worker unavailable"));
+        }
+        #[cfg(test)]
+        if let Some(before) = self.before_request.take() {
+            before(&self.sender);
         }
         let (sender, receiver) = mpsc::sync_channel(1);
         let task = Box::new(move |worker: &mut Worker| {
@@ -303,12 +322,16 @@ impl NativeService {
             self.cached.scene.as_ref()
         }
     }
-    fn discard_revoked_cache(&mut self) -> bool {
+    fn scene_changed(&self, before: Option<&Arc<NativeScene>>) -> bool {
+        match (before, self.scene()) {
+            (Some(a), Some(b)) => !Arc::ptr_eq(a, b),
+            (None, None) => false,
+            _ => true,
+        }
+    }
+    fn discard_revoked_cache(&mut self) {
         if self.cached.scene.is_some() && self.scene().is_none() {
             self.cached.scene = None;
-            true
-        } else {
-            false
         }
     }
     pub fn set_wake(&mut self, wake: Wake) -> io::Result<()> {
@@ -336,56 +359,65 @@ impl NativeService {
         });
     }
     pub fn pty_bytes(&mut self, now: Instant) -> Result<bool, AuthorityError> {
-        let invalidated = self.discard_revoked_cache();
-        self.request(move |w| {
+        let before = self.cached.scene.clone();
+        self.discard_revoked_cache();
+        let changed = self.request(move |w| {
             let now = w.now(now);
             w.native.pty_bytes(now)
-        })
-        .map(|changed| changed || invalidated)
+        })?;
+        Ok(changed || self.scene_changed(before.as_ref()))
     }
     pub fn resize(&mut self, geometry: Geometry, now: Instant) -> Result<bool, AuthorityError> {
-        let invalidated = self.discard_revoked_cache();
-        self.request(move |w| {
+        let before = self.cached.scene.clone();
+        self.discard_revoked_cache();
+        let changed = self.request(move |w| {
             let now = w.now(now);
             w.native.resize(geometry, now)
-        })
-        .map(|changed| changed || invalidated)
+        })?;
+        Ok(changed || self.scene_changed(before.as_ref()))
     }
     pub fn poll(&mut self, now: Instant) -> Result<bool, AuthorityError> {
-        self.last_advance = now;
-        let old = self.cached.scene.clone();
-        self.request(move |w| {
-            let now = w.now(now);
-            w.notified = false;
-            w.native.poll_for_service(now, FrameWork::InstallPending)
-        })?;
-        if let Some(token) = self.cached.installation {
-            if !self.request(move |w| {
-                let now = w.now_clock();
-                w.native.acknowledge_installation(token, now)
-            })? {
-                self.cached.scene = None;
+        let started = Instant::now();
+        let result = (|| {
+            self.last_advance = now;
+            let old = self.cached.scene.clone();
+            self.request(move |w| {
+                let now = w.now(now);
+                w.notified = false;
+                w.native.poll_for_service(now, FrameWork::InstallPending)
+            })?;
+            if let Some(token) = self.cached.installation {
+                if !self.request(move |w| {
+                    let now = w.now_clock();
+                    w.native.acknowledge_installation(token, now)
+                })? {
+                    self.cached.scene = None;
+                }
             }
-        }
-        Ok(match (old.as_ref(), self.scene()) {
-            (Some(a), Some(b)) => !Arc::ptr_eq(a, b),
-            (None, None) => false,
-            _ => true,
-        })
+            Ok(self.scene_changed(old.as_ref()))
+        })();
+        self.ui_poll_last_us = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+        self.ui_poll_max_us = self.ui_poll_max_us.max(self.ui_poll_last_us);
+        result
     }
-    pub fn expire(&mut self, now: Instant) -> Result<bool, AuthorityError> {
-        let invalidated = self.discard_revoked_cache();
-        self.request(move |w| {
-            let now = w.now(now);
-            w.native.expire(now)
-        })
-        .map(|changed| changed || invalidated)
+    /// The worker enforces deadlines; the UI observes revocation without an RPC.
+    pub fn take_revocation(&mut self) -> bool {
+        let before = self.cached.scene.clone();
+        self.discard_revoked_cache();
+        self.scene_changed(before.as_ref())
     }
     pub fn next_wakeup(&self) -> Option<Instant> {
         // Control and lease deadlines belong to the worker; the UI advances visible scenes.
         (self.available() && (self.cached.scene.is_some() || self.cached.installation.is_some()))
             .then_some(self.last_advance + FRAME_TURN)
     }
+    pub fn ui_poll_last_us(&self) -> u64 {
+        self.ui_poll_last_us
+    }
+    pub fn ui_poll_max_us(&self) -> u64 {
+        self.ui_poll_max_us
+    }
+
     pub fn max_turn_us(&self) -> u64 {
         self.shared.max_turn_us.load(Ordering::Relaxed)
     }

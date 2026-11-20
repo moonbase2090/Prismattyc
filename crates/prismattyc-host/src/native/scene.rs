@@ -143,6 +143,10 @@ impl SessionFrames {
         Ok(true)
     }
 
+    pub(super) fn has_unconsumed_frame(&self) -> bool {
+        self.ring.has_unconsumed_frame()
+    }
+
     pub(super) fn has_pending(&self) -> bool {
         self.pending.is_some()
     }

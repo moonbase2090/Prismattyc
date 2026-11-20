@@ -550,7 +550,8 @@ impl DesktopNative {
         Ok(changed)
     }
 
-    /// Enforce deadlines without receiving requests or publishing a new scene.
+    /// Deadline-only fixture; the production worker enforces these in every turn.
+    #[cfg(test)]
     pub fn expire(&mut self, now: Instant) -> Result<bool, AuthorityError> {
         let result = self.expire_inner(now).and_then(|changed| {
             self.rearm_readiness()?;
@@ -691,6 +692,20 @@ impl DesktopNative {
             metrics: context.metrics,
             frame: context.sequence,
         })
+    }
+
+    pub(super) fn pending_installation(&self) -> Option<Installation> {
+        self.activation_needs_ack(true)
+            .then(|| self.installation())
+            .flatten()
+    }
+
+    pub(super) fn frame_backlog_ready(&self) -> bool {
+        self.after_reply.is_none()
+            && self.session.as_ref().is_some_and(|session| {
+                matches!(session.phase, Phase::Active { .. })
+                    && session.frames.has_unconsumed_frame()
+            })
     }
 
     fn activation_needs_ack(&self, defer: bool) -> bool {

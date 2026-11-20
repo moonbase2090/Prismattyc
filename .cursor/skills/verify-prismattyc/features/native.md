@@ -112,11 +112,16 @@ The service socket tests hold the UI's paint snapshot for more than 200 ms
 while a real producer continuously publishes frames and sends PING. Every
 PONG must arrive within the unchanged 100 ms bound, ring consumption must
 continue, and the next UI installation must show the newest literal glyph.
+Another case fills all four slots before allowing the worker to copy, then
+requires a timely PONG, consumption through the newest frame and its literal
+glyph at the next UI installation. Backlog turns service control between copies.
 They also check stale installation acknowledgements, worker-side revocation
 before ANSI parsing, invalid request identities, worker panic and a blocked
 worker command. A maximum valid 1 MiB slot exercises copying and validation
 before a queued revocation, with the same command bound. These component
 checks complement the real desktop drives and performance measurements.
+The PTY integration fixture drives actual wake notifications until installation;
+a fixed number of manual polls does not await an asynchronous worker.
 
 A HELLO received before offer authorization has session zero. Revocation drops
 that obsolete offer without a reply; the client recovers to ANSI at its 200 ms

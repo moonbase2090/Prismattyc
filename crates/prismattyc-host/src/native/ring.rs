@@ -135,6 +135,11 @@ impl SharedRing {
         unsafe { &*self.address.as_ptr().add(offset).cast::<AtomicU64>() }
     }
 
+    /// Scheduling hint only; copy_next still validates the header and counters.
+    pub(super) fn has_unconsumed_frame(&self) -> bool {
+        self.counter(64).load(Ordering::Acquire) != self.consumed
+    }
+
     pub fn copy_next(&mut self) -> Result<Option<CopiedFrame>, RingError> {
         if self.pending.is_some() {
             return Err(RingError::Unacknowledged);

@@ -45,7 +45,9 @@ Damage rectangles are hints, not permission to omit validation.
 A dedicated worker owns native transport, request ordering, resources and
 leases. It answers control requests while the UI paints and consumes at most
 one ring slot per turn into a single newest pending snapshot. Coalescing a
-pending full snapshot does not install it. The UI installs that snapshot as
+pending full snapshot does not install it. A published backlog schedules the
+next turn immediately, with commands and control serviced between slot copies.
+The UI installs that snapshot as
 the common source for painting and readers, then acknowledges its session,
 generation, metrics and frame identity before the worker sends the initial
 ACTIVE reply. Revocation invalidates outstanding acknowledgements.
@@ -55,6 +57,11 @@ parses bytes or changes metrics. A shared generation also invalidates a cached
 scene after worker-side lease expiry. An unresponsive or failed worker closes
 its endpoint and returns that pane to ANSI. A paint retaining an older scene
 keeps its image references alive until that paint releases them.
+
+Normal UI updates use one worker round trip. Only initial activation needs
+the acknowledgement round trip. Native render-status diagnostics report
+`worker_max_turn_us`, `ui_poll_last_us` and `ui_poll_max_us`; the UI values
+include time waiting for the worker, separately from raster and present time.
 
 An installed native scene supplies painting, selection, copy, find, links and
 accessibility text. The ANSI emulator continues to retain its independent

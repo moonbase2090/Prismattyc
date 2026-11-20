@@ -310,6 +310,10 @@ impl NativeService {
     pub fn available(&self) -> bool {
         self.shared.available.load(Ordering::Acquire) && AVAILABILITY.available()
     }
+    #[cfg(test)]
+    pub fn has_offer(&mut self) -> Result<bool, AuthorityError> {
+        self.request(|w| Ok(w.native.has_offer()))
+    }
     pub fn epoch(&self) -> PtyEpoch {
         PtyEpoch::new(self.shared.epoch.load(Ordering::Acquire)).unwrap()
     }

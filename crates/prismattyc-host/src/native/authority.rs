@@ -250,6 +250,11 @@ impl DesktopNative {
         })
     }
 
+    #[cfg(test)]
+    pub(super) fn has_offer(&self) -> bool {
+        self.offer.is_some()
+    }
+
     pub fn epoch(&self) -> PtyEpoch {
         self.epoch
     }

@@ -118,8 +118,11 @@ glyph at the next UI installation. Backlog turns service control between copies.
 They also check stale installation acknowledgements, worker-side revocation
 before ANSI parsing, invalid request identities, worker panic and a blocked
 worker command. A maximum valid 1 MiB slot exercises copying and validation
-before a queued revocation, with the same command bound. These component
-checks complement the real desktop drives and performance measurements.
+while a public `pty_bytes` call requests revocation. The call must revoke the
+scene or hit the unchanged 100 ms watchdog and close the service for ANSI
+recovery. This checks the production RPC, without setting a debug-build
+performance gate. Measure maximum-slot cost separately in an optimized build.
+These component checks complement the real desktop drives and measurements.
 The PTY integration fixture drives actual wake notifications until installation;
 a fixed number of manual polls does not await an asynchronous worker.
 

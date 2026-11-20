@@ -282,7 +282,7 @@ fn invalid_ping_identity_closes_the_worker_without_renewing_native_ownership() {
 }
 
 #[test]
-fn a_queued_revocation_finishes_after_one_maximum_slot_validation_turn() {
+fn a_maximum_slot_turn_keeps_the_public_revoke_bounded_or_fails_closed() {
     let (mut service, mut client, _old_descriptor, wake) = setup();
     // Maximum cell and text extents fill the entire 1 MiB slot.
     service
@@ -356,37 +356,33 @@ fn a_queued_revocation_finishes_after_one_maximum_slot_validation_turn() {
     activate[24..32].copy_from_slice(&2u64.to_le_bytes());
     client.write_all(&activate).unwrap();
     entry.recv_timeout(Duration::from_secs(2)).unwrap();
-    let (completed, done) = mpsc::channel();
+    service.before_request = Some(Box::new(move |_| {
+        release.send(()).unwrap();
+    }));
     let started = Instant::now();
-    service
-        .sender
-        .send(Message::Call(Box::new(move |w| {
-            let now = w.now_clock();
-            let result = w.native.pty_bytes(now);
-            w.publish(true);
-            completed.send((result, Instant::now())).unwrap();
-        })))
-        .unwrap();
-    release.send(()).unwrap();
-    let (result, completed_at) = done.recv_timeout(COMMAND_BOUND).unwrap();
-    result.unwrap();
-    let completion = completed_at.duration_since(started);
-    let observer = started.elapsed();
-    assert!(
-        completion < COMMAND_BOUND,
-        "worker completion {}us, observer resumed {}us",
-        completion.as_micros(),
-        observer.as_micros()
-    );
+    let result = service.pty_bytes(started);
+    let elapsed = started.elapsed();
     assert!(service.scene().is_none());
-    eprintln!(
-        "maximum slot copy/validation and queued revocation: {}us, observer {}us, max worker turn {}us",
-        completion.as_micros(), observer.as_micros(),
-        service.max_turn_us()
-    );
-    assert_eq!(producer.counter(128).load(Ordering::Acquire), 1);
+    match result {
+        Ok(_) => {
+            assert!(service.epoch().get() > offer.epoch.get());
+            assert_eq!(producer.counter(128).load(Ordering::Acquire), 1);
+        }
+        Err(AuthorityError::Io(error)) if error.kind() == io::ErrorKind::TimedOut => {
+            assert!(!service.available());
+            assert!(service.cached.scene.is_none());
+        }
+        Err(error) => panic!("unexpected public revoke result: {error:?}"),
+    }
+    let watchdog_closed = !service.available();
     drop(wake);
     stop(&mut service);
+    eprintln!(
+        "maximum slot public revoke: {}us, max worker turn {}us, closed {}",
+        elapsed.as_micros(),
+        service.max_turn_us(),
+        watchdog_closed
+    );
 }
 
 #[test]

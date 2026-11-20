@@ -61,7 +61,8 @@ def main():
             counts = tuple(map(int, summaries[-1])) if summaries else None
             valid_count = counts is not None and sum(counts) == args.expected_tests
             passed = code == 0 and valid_count and counts[1] == 0
-            failed_tests = sorted(set(re.findall(r"thread '([^']+)' panicked", text)))
+            # Helper threads can panic intentionally; count named test failures.
+            failed_tests = sorted(set(re.findall(r"thread '([^']+::[^']+)' panicked", text)))
             if not passed:
                 failures_by_test.update(failed_tests or ["<runner or test-count failure>"])
             results.append({"iteration": iteration, "exit": code, "counts": counts,

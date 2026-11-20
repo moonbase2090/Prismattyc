@@ -120,6 +120,48 @@ fn an_ineligible_launch_keeps_ansi_and_does_not_forward_a_native_descriptor() {
 }
 
 #[test]
+fn inherited_native_descriptor_is_removed_before_spawning_an_ineligible_pty() {
+    let name = "inherited_native_descriptor_is_removed_before_spawning_an_ineligible_pty";
+    match std::env::var(CHILD).as_deref() {
+        Ok("leaf") => {
+            assert!(std::env::var_os("PRISMATTYC_NATIVE_FD").is_none());
+            println!("AMBIENT_LEAF_READY");
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line).unwrap();
+            assert_eq!(line, "finish\n");
+            return;
+        }
+        Ok("ambient") => {
+            assert_eq!(std::env::var("PRISMATTYC_NATIVE_FD").unwrap(), "999");
+            let (program, args, env) = command(name, "leaf");
+            let mut launched = spawn(&program, &args, None, &env, size(), None).unwrap();
+            assert!(launched.native.is_none());
+            finish_after_ready(&mut launched.session, "AMBIENT_LEAF_READY");
+            println!("AMBIENT_STRIPPED");
+            return;
+        }
+        _ => {}
+    }
+    let (program, args, environment) = command(name, "ambient");
+    let mut command = prismattyc_process::capture_command(program);
+    let output = prismattyc_process::spawn(
+        command
+            .args(args)
+            .envs(environment)
+            .env("PRISMATTYC_NATIVE_FD", "999"),
+    )
+    .and_then(std::process::Child::wait_with_output)
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("AMBIENT_STRIPPED"));
+}
+
+#[test]
 fn kernel_binding_rejects_zero_out_of_range_and_non_child_processes() {
     assert!(matches!(child_identity(0), Err(error) if error.kind()==io::ErrorKind::InvalidInput));
     assert!(

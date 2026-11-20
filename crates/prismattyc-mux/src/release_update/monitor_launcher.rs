@@ -610,6 +610,12 @@ pub(super) fn run(root: &Path, options: &Options) -> Result<()> {
         },
         asset,
     )?;
+    // set_mode leaves the staged monitor with a protected user-only DACL.
+    // Moving that file onto the installed name is what makes the next MSI
+    // fail while reading file security. Widen it before the replace.
+    #[cfg(windows)]
+    crate::platform::grant_installer_access(&incoming.0)
+        .context("the installed monitor must stay readable by Windows Installer")?;
     ensure!(
         bundle_identity(&incoming.0, &installation.version)? == core,
         "verified launcher does not match the active core's contained plug-in bundle"

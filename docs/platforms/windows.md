@@ -61,10 +61,14 @@ starts for itself, including `git` and `pmux`, are created with
 runs `pmux login run` through `wscript` with a hidden window. The installer's
 update-pointer script starts PowerShell hidden. The same install writes
 `PrismattycPmuxd` under the per-user Run key. That value runs
-`start-windows-pmuxd.ps1` with a hidden window at the next logon. The script
-runs `bin\pmux.exe up`, which starts `pmuxd` when the default socket is down
-and leaves a running daemon alone. A commit action runs that script after
-the files are installed. If `pmux up` fails, the script writes a warning and
+`start-windows-pmuxd.ps1` with a hidden window at the next logon. The logon
+run starts `bin\pmux.exe up` when the default socket is down and leaves a
+running daemon alone. An install or upgrade runs the same script with
+`-ReplaceStale` after the files are copied. That run clears
+`windows-current.json`, stops `pmuxd` when its executable is under the install
+directory or the update store, and then starts the installed daemon. A
+`pmuxd` executable in any other directory is left running. The host is not
+stopped. If `pmux up` fails, the script writes a warning and
 the install still finishes with the files in place. Sign in again, or run
 `pmux up` from the `cmd` directory, before creating a session. The commit action
 runs the script through WixQuietExec, so its output is in the MSI log: either
@@ -96,9 +100,9 @@ starts it. The second leaves PATH unchanged and still starts `pmuxd`.
 `ADDTOPATH=0` explicitly disables adding the entry. An upgrade that omits
 `ADDTOPATH` leaves one `cmd` entry.
 Uninstall removes that PATH entry, the Run value, the files, and the
-shortcut. Stop `pmuxd` before an upgrade when this session must run the new
-executable. The installer does not stop a running daemon, so Windows may
-leave an in-use `pmuxd.exe` until reboot. The preview
+shortcut. An upgrade stops a daemon launched from the install directory or
+the update store before it starts the installed executable. Close Prismattyc
+before installing when this session must run the new host executable. The preview
 installer still prepends the `cmd` directory only when `-AddToPath` is set.
 Install and uninstall also remove leftover `windows-preview-*` directories directly under
 `%LOCALAPPDATA%\Programs\Prismattyc` when those directories are not reparse
@@ -135,16 +139,22 @@ a file version, so the package sets `REINSTALLMODE=emus`, which replaces files
 of an equal version. The rebuild's executables are the ones installed.
 Other prerelease spellings are rejected, and so is a version the fields cannot hold.
 
-The installer does not stop a running daemon or host. Restart Manager is
-disabled. That alone does not decide whether Windows replaces an in-use file
-or schedules the replacement until reboot. Close Prismattyc before installing
-when the new files must be the ones running in this session. `pmux update`
-stores new builds in the update store above, and the installed executables
-forward to the selected version on their next launch. An MSI install runs
-`reset-windows-update-pointer.ps1`, which deletes `windows-current.json` in
-that same store and leaves the staged payloads in place. The script uses the
-installer process environment, so a nonempty `XDG_DATA_HOME` selects the same
-directory `platform::data_home` uses. It does not stop or restart any process.
+Before copying files, an install grants SYSTEM and Administrators access on
+the install directory when an existing file has a protected user-only access
+list. An in-app monitor update can leave that list on
+`pmux-activity-monitor.exe`, and the installer service cannot read the file
+security until those two entries are present. The same step stops `pmuxd`
+when its executable is inside `%LOCALAPPDATA%\Programs\Prismattyc` or the
+update store, and it deletes `windows-current.json`, so the files being
+copied are not still in use by a staged daemon and the next launch does not
+forward to that staged copy. It does not stop the host. Restart Manager stays
+disabled, so an in-use host executable can remain until that process exits.
+Close Prismattyc before installing when the new host must be the one running.
+`pmux update` still stores new builds in the update store above, and the
+installed executables forward to the selected version until an MSI install
+clears the pointer. The clear runs again after the files are copied and does
+not itself stop a process. A nonempty `XDG_DATA_HOME` selects the same update
+directory `platform::data_home` uses. The staged payloads stay in place.
 
 Live proofs that install Prismattyc, start `pmuxd`, or open the host run as a
 local Windows user created for that proof, in a profile with no Prismattyc

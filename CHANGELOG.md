@@ -6,6 +6,10 @@
 
 - **Update and restart** shows the update's progress in the Restart to update dialog: bytes downloaded of the whole release, each component as it is verified, the install step, and each component as it restarts, with what happens to your sessions. If the update fails, the dialog keeps the failed step and its error and offers **Check again** or **Close**. `pmux update --progress` reports the same stages on stderr for other tools.
 
+### Fixed
+
+- A Windows install stops `pmuxd` when that executable is in the install directory or the update store, then starts the installed daemon. Signing in still leaves a running daemon alone. Setup also grants SYSTEM and Administrators access to existing install files that an in-app update locked to the current user, so those files can be replaced.
+
 ## [0.3.71] - 2026-11-20
 
 ### Fixed

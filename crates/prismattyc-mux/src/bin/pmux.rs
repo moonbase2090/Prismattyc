@@ -477,6 +477,8 @@ fn parse_argv(args: impl IntoIterator<Item = String>) -> Result<Cli> {
 }
 
 fn main() -> Result<()> {
+    // Before anything starts a child: see keep_std_handles_private.
+    prismattyc_mux::platform::keep_std_handles_private();
     if prismattyc_mux::plugins::print_bundled_identity()? {
         return Ok(());
     }

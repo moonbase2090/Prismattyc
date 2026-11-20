@@ -814,6 +814,37 @@ pub fn detach_command(command: &mut std::process::Command) {
     }
 }
 
+/// Stop this process's standard handles from passing to children unasked.
+///
+/// A Windows child inherits every inheritable handle its parent holds, not
+/// only the three it is given. A command whose output a caller reads through
+/// a pipe would then pass that pipe on to anything it starts, and a daemon
+/// started that way keeps the caller waiting for the end of output until the
+/// daemon exits. A child that asks to inherit a standard handle still gets
+/// it: the standard library duplicates the handle for that child. Elsewhere
+/// this does nothing; Unix descriptors above 2 are closed on exec already.
+pub fn keep_std_handles_private() {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{
+            SetHandleInformation, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+        };
+        use windows_sys::Win32::System::Console::{
+            GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+        };
+        for id in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            // SAFETY: GetStdHandle has no preconditions; SetHandleInformation
+            // only changes flags on a valid handle this process owns.
+            unsafe {
+                let handle = GetStdHandle(id);
+                if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
+                    SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
+                }
+            }
+        }
+    }
+}
+
 /// Detach `command` and spawn it without inheriting the caller's stdio pipes.
 ///
 /// On Windows, `Command` sets `bInheritHandles`, so a detached `pmuxd` keeps

@@ -7,7 +7,7 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 
 use super::manifest::validate_plugin_id;
-use super::package::{digest, valid_digest, MAX_PACKAGE_BYTES};
+use super::package::{digest, valid_digest, Package, MAX_PACKAGE_BYTES};
 use crate::release_update::{download_bounded, fetch_release_json, Release, REPOSITORY};
 
 const CATALOG_TAG_PREFIX: &str = "pmux-plugins-v";
@@ -225,6 +225,35 @@ impl Catalog {
         self.0.values().filter(|entry| entry.entry.id == id && version.is_none_or(|version| entry.entry.version == version))
             .max_by_key(|entry| Version::parse(&entry.entry.version).expect("validated catalog version"))
             .context("plug-in version is not in the trusted catalog; refresh discovery or update the core package")
+    }
+
+    pub(super) fn newest_compatible_bundle(
+        &self,
+        id: &str,
+        after: Option<&str>,
+    ) -> Result<Option<&TrustedEntry>> {
+        let after = after.map(Version::parse).transpose()?;
+        let mut candidates = self
+            .0
+            .values()
+            .filter(|entry| entry.entry.id == id)
+            .map(|entry| {
+                let version =
+                    Version::parse(&entry.entry.version).expect("validated catalog version");
+                (version, entry)
+            })
+            .filter(|(version, _)| after.as_ref().is_none_or(|after| version > after))
+            .collect::<Vec<_>>();
+        candidates.sort_by(|(a, _), (b, _)| b.cmp(a));
+        for (_, entry) in candidates {
+            let Source::Bundled(bytes) = entry.source else {
+                continue;
+            };
+            if Package::parse(bytes)?.manifest.compatibility().is_ok() {
+                return Ok(Some(entry));
+            }
+        }
+        Ok(None)
     }
 
     fn insert(&mut self, entry: TrustedEntry) -> Result<()> {

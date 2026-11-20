@@ -200,11 +200,14 @@ pub fn foreground_command(root: u32) -> Option<String> {
 
 /// Resume known agents without replaying their startup prompt. Preserve
 /// explicit session selection and recognized model, configuration and policy
-/// options. Hermes keeps its launch arguments; other agents reopen idle.
-/// Non-agent commands stay unchanged.
+/// options. Hermes also preserves its profile and provider. Other known
+/// agents reopen idle; non-agent commands stay unchanged.
 #[must_use]
 pub fn resume_args(args: Vec<String>) -> Vec<String> {
     use crate::inject_submit::InjectAgent;
+    if let Some(prefix) = hermes_launch_prefix(&args) {
+        return resume_hermes_args(args, prefix);
+    }
     let Some(program) = args.first() else {
         return args;
     };
@@ -335,6 +338,183 @@ pub fn resume_args(args: Vec<String>) -> Vec<String> {
             restored.push(session.unwrap_or_else(|| "--last".into()));
         }
         _ => unreachable!(),
+    }
+    restored.extend(options);
+    restored
+}
+
+fn hermes_launch_prefix(args: &[String]) -> Option<usize> {
+    use crate::inject_submit::{classify_agent_argv0, InjectAgent};
+    let program = args.first()?;
+    if classify_agent_argv0(program) == Some(InjectAgent::Hermes) {
+        return Some(1);
+    }
+    let name = Path::new(program)
+        .file_name()?
+        .to_str()?
+        .to_ascii_lowercase();
+    let version = name
+        .strip_suffix(".exe")
+        .unwrap_or(&name)
+        .strip_prefix("python")?;
+    if !(version.is_empty()
+        || version.as_bytes()[0].is_ascii_digit()
+            && version
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || byte == b'.'))
+    {
+        return None;
+    }
+    let mut index = 1;
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-I" | "-E" | "-s" | "-S" | "-B" | "-u" | "-P" | "-O" | "-OO" => index += 1,
+            "-W" | "-X" => {
+                args.get(index + 1)?;
+                index += 2;
+            }
+            "-m" => {
+                return (args.get(index + 1)?.as_str() == "hermes_cli.main").then_some(index + 2)
+            }
+            script if !script.starts_with('-') => {
+                return (classify_agent_argv0(script) == Some(InjectAgent::Hermes))
+                    .then_some(index + 1);
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+fn resume_hermes_args(args: Vec<String>, prefix: usize) -> Vec<String> {
+    enum Session {
+        Latest,
+        Named(String),
+        Id(String),
+    }
+    let mut session = None;
+    let mut options = Vec::new();
+    let mut chat = false;
+    let mut index = prefix;
+    while let Some(arg) = args.get(index) {
+        if arg == "--" {
+            break;
+        }
+        let (flag, inline) = if let Some(pair) = arg.split_once('=') {
+            (pair.0, Some(pair.1))
+        } else if matches!(
+            arg.as_bytes(),
+            [b'-', b'q' | b'z' | b'm' | b'r' | b'c' | b's' | b't', _, ..]
+        ) {
+            (&arg[..2], Some(&arg[2..]))
+        } else {
+            (arg.as_str(), None)
+        };
+        if matches!(
+            flag,
+            "-q" | "--query" | "--query-file" | "-z" | "--image" | "--usage-file" | "--format"
+        ) || (flag == "--oneshot" && !chat)
+        {
+            if matches!(flag, "-q" | "--query" | "--query-file" | "-z")
+                || (flag == "--oneshot" && !chat)
+            {
+                session.get_or_insert(Session::Latest);
+            }
+            if inline.is_none() {
+                index += 1;
+            }
+        } else if matches!(flag, "--resume" | "-r" | "--continue" | "-c") {
+            let value = inline.map(str::to_owned).or_else(|| {
+                args.get(index + 1)
+                    .filter(|value| {
+                        !value.starts_with('-')
+                            || value.as_str() == "-"
+                            || value.contains(' ')
+                            || value.parse::<f64>().is_ok()
+                    })
+                    .map(|value| {
+                        index += 1;
+                        value.clone()
+                    })
+            });
+            if matches!(flag, "--resume" | "-r") {
+                let Some(value) = value else { break };
+                session = Some(Session::Id(value));
+            } else if !matches!(session, Some(Session::Id(_))) {
+                session = Some(value.map_or(Session::Latest, Session::Named));
+            }
+        } else if matches!(flag, "--help" | "-h" | "--version" | "-V") {
+            return args;
+        } else if matches!(flag, "--oneshot" | "--quiet" | "-Q") {
+            // A restored session is interactive, with no queued startup turn.
+        } else if matches!(
+            flag,
+            "--profile"
+                | "-p"
+                | "--model"
+                | "-m"
+                | "--provider"
+                | "--reasoning"
+                | "--toolsets"
+                | "-t"
+                | "--skills"
+                | "-s"
+                | "--in"
+                | "--base-url"
+                | "--api-key"
+                | "--max-turns"
+                | "--run-budget"
+                | "--source"
+        ) {
+            if inline.is_some() {
+                options.push(arg.clone());
+            } else if let Some(value) = args.get(index + 1) {
+                options.extend([arg.clone(), value.clone()]);
+                index += 1;
+            } else {
+                break;
+            }
+        } else if matches!(
+            flag,
+            "--no-restore-cwd"
+                | "--worktree"
+                | "-w"
+                | "--accept-hooks"
+                | "--checkpoints"
+                | "--yolo"
+                | "--pass-session-id"
+                | "--ignore-user-config"
+                | "--ignore-rules"
+                | "--safe-mode"
+                | "--tui"
+                | "--native"
+                | "--tui-native"
+                | "--cli"
+                | "--dev"
+                | "--verbose"
+                | "-v"
+                | "--create-if-missing"
+        ) && inline.is_none()
+        {
+            options.push(arg.clone());
+        } else if !arg.starts_with('-') && !chat {
+            if arg != "chat" {
+                return args;
+            }
+            chat = true;
+        } else {
+            // Unknown option arity makes the remaining launch arguments ambiguous.
+            break;
+        }
+        index += 1;
+    }
+    let mut restored = args[..prefix].to_vec();
+    restored.push("chat".into());
+    match session {
+        Some(Session::Latest) => restored.push("--continue".into()),
+        Some(Session::Named(name)) => restored.push(format!("--continue={name}")),
+        Some(Session::Id(id)) => restored.push(format!("--resume={id}")),
+        None => {}
     }
     restored.extend(options);
     restored
@@ -1739,12 +1919,12 @@ mod tests {
             resume_args(args(&["cursor-agent", "do the thing"])),
             args(&["cursor-agent"])
         );
-        // Anything else is saved as it ran.
-        assert_eq!(resume_args(args(&["sleep", "30"])), args(&["sleep", "30"]));
         assert_eq!(
             resume_args(args(&["hermes", "--profile", "demo", "chat"])),
-            args(&["hermes", "--profile", "demo", "chat"])
+            args(&["hermes", "chat", "--profile", "demo"])
         );
+        // Anything else is saved as it ran.
+        assert_eq!(resume_args(args(&["sleep", "30"])), args(&["sleep", "30"]));
         assert_eq!(
             resume_args(args(&["echo", "claude"])),
             args(&["echo", "claude"])
@@ -1797,6 +1977,295 @@ mod tests {
             assert_eq!(saved, expected);
             assert_eq!(resume_args(saved), expected);
         }
+    }
+
+    #[test]
+    fn hermes_resume_keeps_a_profile_without_history_interactive() {
+        let input = ["hermes", "--profile", "empty"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(resume_args(input), ["hermes", "chat", "--profile", "empty"]);
+    }
+
+    #[test]
+    fn hermes_resume_removes_query_inputs_and_single_query_modes() {
+        let args = |items: &[&str]| {
+            items
+                .iter()
+                .map(|item| (*item).to_owned())
+                .collect::<Vec<_>>()
+        };
+        for input in [
+            vec!["hermes", "chat", "-q", "do the task", "--model", "one"],
+            vec!["hermes", "chat", "--query=do the task", "--model", "one"],
+            vec!["hermes", "chat", "-qdo the task", "--model", "one"],
+            vec![
+                "hermes",
+                "chat",
+                "--query-file",
+                "prompt.txt",
+                "--model",
+                "one",
+            ],
+            vec!["hermes", "--oneshot", "do the task", "--model", "one"],
+            vec!["hermes", "-zdo the task", "--model", "one"],
+            vec![
+                "hermes",
+                "chat",
+                "--query",
+                "--text with dashes",
+                "--oneshot",
+                "-Q",
+                "--format=stream-json",
+                "--image",
+                "image.png",
+                "--usage-file",
+                "usage.json",
+                "--model",
+                "one",
+            ],
+        ] {
+            assert_eq!(
+                resume_args(args(&input)),
+                args(&["hermes", "chat", "--continue", "--model", "one"])
+            );
+        }
+    }
+
+    #[test]
+    fn hermes_resume_preserves_profile_model_and_session_selection() {
+        let args = |items: &[&str]| {
+            items
+                .iter()
+                .map(|item| (*item).to_owned())
+                .collect::<Vec<_>>()
+        };
+        for (input, expected) in [
+            (
+                vec!["hermes", "chat", "--continue=--yolo", "-q", "task"],
+                vec!["hermes", "chat", "--continue=--yolo"],
+            ),
+            (
+                vec!["hermes", "chat", "--resume=--other-session", "-q", "task"],
+                vec!["hermes", "chat", "--resume=--other-session"],
+            ),
+            (
+                vec!["hermes", "chat", "-c", "-1", "-q", "task"],
+                vec!["hermes", "chat", "--continue=-1"],
+            ),
+            (
+                vec![
+                    "hermes",
+                    "chat",
+                    "--run-budget",
+                    "-1",
+                    "--model",
+                    "one",
+                    "-q",
+                    "task",
+                ],
+                vec![
+                    "hermes",
+                    "chat",
+                    "--continue",
+                    "--run-budget",
+                    "-1",
+                    "--model",
+                    "one",
+                ],
+            ),
+            (
+                vec![
+                    "hermes",
+                    "--profile=demo",
+                    "chat",
+                    "-c",
+                    "named session",
+                    "-mone",
+                    "--provider=custom",
+                    "-q",
+                    "task",
+                ],
+                vec![
+                    "hermes",
+                    "chat",
+                    "--continue=named session",
+                    "--profile=demo",
+                    "-mone",
+                    "--provider=custom",
+                ],
+            ),
+            (
+                vec![
+                    "hermes",
+                    "chat",
+                    "--resume=session-1",
+                    "--continue",
+                    "other",
+                    "--in",
+                    "/work",
+                    "--cli",
+                    "--ignore-rules",
+                    "-q",
+                    "task",
+                ],
+                vec![
+                    "hermes",
+                    "chat",
+                    "--resume=session-1",
+                    "--in",
+                    "/work",
+                    "--cli",
+                    "--ignore-rules",
+                ],
+            ),
+            (
+                vec![
+                    "hermes",
+                    "chat",
+                    "--continue",
+                    "other",
+                    "-rsession-2",
+                    "--model",
+                    "two",
+                    "--reasoning",
+                    "high",
+                ],
+                vec![
+                    "hermes",
+                    "chat",
+                    "--resume=session-2",
+                    "--model",
+                    "two",
+                    "--reasoning",
+                    "high",
+                ],
+            ),
+        ] {
+            let saved = resume_args(args(&input));
+            assert_eq!(saved, args(&expected));
+            assert_eq!(resume_args(saved), args(&expected));
+        }
+    }
+
+    #[test]
+    fn hermes_resume_preserves_other_commands_and_stops_at_unknown_arity() {
+        let args = |items: &[&str]| {
+            items
+                .iter()
+                .map(|item| (*item).to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            resume_args(args(&["hermes", "--profile", "demo", "gateway", "run"])),
+            args(&["hermes", "--profile", "demo", "gateway", "run"])
+        );
+        assert_eq!(
+            resume_args(args(&[
+                "hermes",
+                "chat",
+                "--model",
+                "one",
+                "--future-option",
+                "value",
+                "-q",
+                "task"
+            ])),
+            args(&["hermes", "chat", "--model", "one"])
+        );
+        assert_eq!(
+            resume_args(args(&["hermes", "chat", "--", "-q", "task"])),
+            args(&["hermes", "chat"])
+        );
+    }
+
+    #[test]
+    fn hermes_resume_supports_python_script_and_module_launchers() {
+        let args = |items: &[&str]| {
+            items
+                .iter()
+                .map(|item| (*item).to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            resume_args(args(&[
+                "/opt/bin/python3.14",
+                "-I",
+                "/opt/Fixture Apps/hermes",
+                "chat",
+                "-q",
+                "task",
+                "--profile",
+                "demo"
+            ])),
+            args(&[
+                "/opt/bin/python3.14",
+                "-I",
+                "/opt/Fixture Apps/hermes",
+                "chat",
+                "--continue",
+                "--profile",
+                "demo"
+            ])
+        );
+        assert_eq!(
+            resume_args(args(&[
+                "python3",
+                "-X",
+                "utf8",
+                "-m",
+                "hermes_cli.main",
+                "chat",
+                "--resume",
+                "session-3",
+                "-q",
+                "task"
+            ])),
+            args(&[
+                "python3",
+                "-X",
+                "utf8",
+                "-m",
+                "hermes_cli.main",
+                "chat",
+                "--resume=session-3"
+            ])
+        );
+        assert_eq!(
+            resume_args(args(&["python3", "-c", "print('hermes')", "-q", "task"])),
+            args(&["python3", "-c", "print('hermes')", "-q", "task"])
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn saved_hermes_command_drops_query_and_keeps_resume_context() {
+        let spawn = crate::SpawnSpec {
+            program: "hermes".into(),
+            argv: [
+                "--profile",
+                "demo",
+                "chat",
+                "--resume",
+                "conversation-123",
+                "--model",
+                "model one",
+                "--provider",
+                "custom",
+                "-q",
+                "run the original task",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+            cwd: None,
+            env: Default::default(),
+        };
+        assert_eq!(
+            replay_spawn_command(&spawn, None).as_deref(),
+            Some("hermes chat --resume=conversation-123 --profile demo --model 'model one' --provider custom")
+        );
     }
 
     #[test]

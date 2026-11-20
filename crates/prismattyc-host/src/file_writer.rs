@@ -179,7 +179,8 @@ impl Handle {
         self.asynchronous
     }
 
-    #[cfg(all(test, target_os = "linux"))]
+    /// Block until the render status write for `pid_path` has finished. Used
+    /// by the opt-in UI change lines and by tests.
     pub(super) fn wait_for_render_status(&self, pid_path: &Path) {
         self.wait_for(WriteKey::RenderStatus(pid_path.to_path_buf()));
     }

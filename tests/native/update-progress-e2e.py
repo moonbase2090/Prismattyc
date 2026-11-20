@@ -15,6 +15,16 @@ older version) placed there, so the app updates itself as a user's would.
 download of the release file for component NAME short. The dialog must then
 hold step 1 with the error and offer Check again or Close.
 
+--save chooses Save and restart and checks that the sessions come back. Before
+the update it opens two tabs: a plain session and one whose window is split in
+two panes, and prints a one-time marker into every pane. After the relaunch the
+sessions must have the same session and pane IDs, every marker must be in its
+pane's scrollback, and the app must show the same tabs. It writes before/after
+state (before.json, after.json) and captures (before.png, after-notice.png,
+after.png). The restart code runs from the installed release, so to test a
+branch's restart, build it as the newest version: the flow is then Restart
+components (no download), which runs the same save and restore.
+
 The drive waits on signals, never on fixed time or polling:
 - pmuxd prints its socket path when it listens;
 - with PRISMATTYC_UI_EVENTS=1 the app prints a line after a presented frame in
@@ -221,6 +231,7 @@ def main():
     parser.add_argument('--fail-download', choices=BINARIES)
     parser.add_argument('--timeout', type=int, default=600)
     parser.add_argument('--key-relay', type=Path)
+    parser.add_argument('--save', action='store_true', help='choose Save and restart and check the sessions return')
     args = parser.parse_args()
     assert not (args.fail_download and not sys.platform.startswith('linux')), '--fail-download is Linux only'
     out = args.out.resolve()
@@ -240,7 +251,9 @@ def main():
     config = out / 'config.toml'
     config.write_text('splash = false\nstart_at_login = false\nautomatic_update_checks = false\n'
                       'install_agent_skills = false\nchrome_style = "graphite"\n'
-                      f'[keys]\nupdate_restart = "{BINDING}"\n')
+                      f'[keys]\nupdate_restart = "{BINDING}"\n'
+                      # A known shell, so the marker command below is exact.
+                      + ('[mux]\nshell = "cmd.exe"\n' if os.name == 'nt' else ''))
     env = {k: v for k, v in os.environ.items() if not k.startswith(('PMUX', 'PRISMATTYC_', 'XDG_'))}
     # Windows requires a socket directory that pmux secures itself, so there the
     # private LOCALAPPDATA below holds the default socket.
@@ -324,11 +337,42 @@ exec {real} "$@"
     def dialog_selected(ui):
         return (ui.get('dialog') or {}).get('selected')
 
+    def pane_ids():
+        """{session name: [(session id, pane ids)]} from `pmux ls`."""
+        found, current = {}, None
+        for line in cli('ls').splitlines():
+            words = line.split()
+            if line.startswith('session '):
+                current = words[1]
+                found[current] = {'id': line.split('(id ')[1].split(')')[0], 'panes': []}
+            elif words[:1] == ['pane'] and current:
+                found[current]['panes'].append(words[1])
+        return found
+
+    def await_marker(session, pane, marker):
+        """Wait until the daemon shows `marker` in the pane: a watching attach
+        prints one line per screen revision."""
+        socket = ['--socket', str(socket_path)] if socket_path else []
+        watch = subprocess.Popen([str(bins / ('pmux' + EXE)), *socket, 'attach', session, '--watch', '--json',
+                                  '--pane', pane], env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                 text=True, errors='replace')
+        reader = LineReader(watch, out / f'watch-{pane}.log', lambda line: marker in line)
+        try:
+            reader.await_line(lambda line: marker in line, f'marker in pane {pane}', 60)
+        finally:
+            watch.terminate()
+            watch.wait(10)
+            reader.thread.join(10)
+
+    def host_state():
+        return {'sessions': pane_ids(), 'tabs': json.loads(cli('tab', 'list', '--json'))}
+
     try:
         result['update_check'] = json.loads(subprocess.run(
             [str(bins / ('pmux' + EXE)), 'update', '--check', '--json'], env=env, capture_output=True,
             text=True, timeout=120).stdout or '{}')
-        assert result['update_check'].get('update_available'), result['update_check']
+        update = bool(result['update_check'].get('update_available'))
+        assert update or args.save, result['update_check']
         socket = ['--socket', str(socket_path)] if socket_path else []
         daemon = subprocess.Popen([str(bins / ('pmuxd' + EXE)), *socket], env=env, cwd=out / 'project',
                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')
@@ -337,7 +381,31 @@ exec {real} "$@"
         readers.append(daemon_out)
         daemon_out.await_line(lambda line: line.strip().endswith('pmux.sock'), 'daemon socket line', 60)
         cli('new', '--no-attach', 'work')
-        host = subprocess.Popen([str(bins / ('prismattyc-host' + EXE)), '--no-splash', '--attach-session', 'work'],
+        attach = ['--attach-session', 'work']
+        markers = {}
+        if args.save:
+            # A second session whose window is split in two panes.
+            cli('layout', 'save', 'work', '--name', 'split-view')
+            layout = next(out.rglob('split-view.json'))
+            saved = json.loads(layout.read_text())
+            leaf = saved['windows'][0]['root']
+            saved['session'] = 'split-view'
+            saved['windows'][0]['root'] = {'kind': 'split', 'axis': 'vertical', 'ratio': 0.5,
+                                           'first': leaf, 'second': dict(leaf)}
+            layout.write_text(json.dumps(saved))
+            cli('layout', 'apply', 'split-view')
+            attach += ['--attach-session', 'split-view']
+            for session, found in pane_ids().items():
+                for pane in found['panes'] if session in ('work', 'split-view') else []:
+                    # The typed line differs from the printed one, so only
+                    # the output (and later the scrollback) holds the marker.
+                    nonce = f'{pane}x{os.getpid()}'
+                    markers[pane] = (session, f'KEEP-{nonce}')
+                    typed = f'echo KEEP-^{nonce}' if os.name == 'nt' else f"printf 'KEEP-%s\\n' {nonce}"
+                    cli('send', pane, typed, '--enter')
+                    await_marker(session, pane, f'KEEP-{nonce}')
+            assert len(markers) == 3, markers
+        host = subprocess.Popen([str(bins / ('prismattyc-host' + EXE)), '--no-splash', *attach],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                 errors='replace')
         owned.append(host)
@@ -345,14 +413,21 @@ exec {real} "$@"
         readers.append(app)
         change(lambda ui: True, 'first presented frame')
         keys = Keys(host.pid, args.key_relay)
+        if args.save:
+            before = host_state()
+            result['before'] = before
+            (out / 'before.json').write_text(json.dumps(before, indent=2))
+            latest = max(frames.glob('frame-*.png'), default=None)
+            if latest:
+                shutil.copy(latest, out / 'before.png')
         keys.press('y', ctrl=True, shift=True)
         opened = change(lambda ui: (ui.get('panel') or {}).get('page') == 'maintenance'
                         and panel_selected(ui) is not None, 'update panel')
         rows = [row.removesuffix(': ') for row in (window().get('space_details') or {}).get('rows', [])]
         select(rows, panel_selected(opened['ui']), 'Update and restart all components', panel_selected)
         consent = change(lambda ui: dialog_state(ui) == 'consent', 'restart dialog', 120)
-        select(window()['restart_modal']['rows'], dialog_selected(consent['ui']), 'Restart without saving',
-               dialog_selected)
+        select(window()['restart_modal']['rows'], dialog_selected(consent['ui']),
+               'Save and restart' if args.save else 'Restart without saving', dialog_selected)
         change(lambda ui: dialog_state(ui) == 'running', 'progress view')
         if args.fail_download:
             failed = change(lambda ui: dialog_state(ui) == 'failed', 'held failure', args.timeout)
@@ -367,9 +442,41 @@ exec {real} "$@"
         else:
             result['relaunch_line'] = app.await_line(lambda line: line.startswith(FONT), 'relaunched app',
                                                      args.timeout).strip()
+            # The relaunched app numbers its frames from 1 again; keep the
+            # first run's frames before it overwrites them.
+            shutil.copytree(frames, out / 'frames-first')
             result['after'] = json.loads(cli('versions'))
             record('update finished and the app relaunched on daemon '
                    + str(result['after'].get('daemon', {}).get('version')))
+            if args.save:
+                # The result notice is shown after the windows reopened.
+                notice = change(lambda ui: (ui.get('panel') or {}).get('page') in ('update', 'result'),
+                                'restore result', 120)
+                shutil.copy(frames / f"frame-{notice['seq']:06d}.png", out / 'after-notice.png')
+                result['notice_rows'] = (window().get('space_details') or {}).get('rows', [])
+                after = host_state()
+                result['after_state'] = after
+                (out / 'after.json').write_text(json.dumps(after, indent=2))
+                for name in ('work', 'split-view'):
+                    assert after['sessions'].get(name) == before['sessions'][name], (name, before, after)
+                record('both sessions came back with their session and pane IDs, including the split pane')
+                for pane, (session, marker) in markers.items():
+                    history = cli('save-buffer', pane, '-', '--history')
+                    assert marker in history, (pane, marker, history[-2000:])
+                record(f'all {len(markers)} scrollback markers are back in their panes')
+                def titles(state):
+                    # `tab list --json`: one manifest per app process, each
+                    # with its windows (views) and their tabs.
+                    return sorted(tab.get('title', '') for manifest in state['tabs']
+                                  for view in manifest.get('views', []) for tab in view.get('tabs', []))
+                assert titles(before) and titles(after) == titles(before), (before['tabs'], after['tabs'])
+                record('the app reopened the same tabs without asking')
+                pid = json.loads(cli('render-status', '--json')).get('host_pid')
+                keys.close()
+                keys = Keys(pid, args.key_relay)
+                keys.press('Escape')
+                closed = change(lambda ui: ui.get('panel') is None, 'panel closed')
+                shutil.copy(frames / f"frame-{closed['seq']:06d}.png", out / 'after.png')
     except BaseException as error:
         result['error'] = f'{type(error).__name__}: {error}'
         raise
@@ -394,16 +501,20 @@ exec {real} "$@"
             dialog = event['ui'].get('dialog') or {}
             if dialog.get('step'):
                 captures.setdefault(f"{dialog['state']}-step{dialog['step'][0]}", event['seq'])
+        first = out / 'frames-first' if (out / 'frames-first').is_dir() else frames
         for name, seq in captures.items():
-            frame = frames / f'frame-{seq:06d}.png'
+            frame = first / f'frame-{seq:06d}.png'
             if frame.exists():
                 shutil.copy(frame, out / f'{name}.png')
         result['captures'] = captures
         if 'error' not in result:
-            expected = ['Download'] if args.fail_download else ['Download', 'Verify', 'Install', 'Restart']
+            update = result.get('update_check', {}).get('update_available')
+            expected = (['Download'] if args.fail_download else
+                        ['Download', 'Verify', 'Install', 'Restart'] if update else ['Restart'])
             downloads = [line for line in steps if line.startswith('Step 1 of 4: Download')]
             failed = [line for line in steps if line.startswith(FAILED)]
-            if stages == expected and len(downloads) >= 2 and bool(failed) == bool(args.fail_download):
+            if (stages == expected and (len(downloads) >= 2 or not update)
+                    and bool(failed) == bool(args.fail_download)):
                 result['status'] = 'PASS'
                 record('stages in order: ' + ' > '.join(stages))
         # A relaunched app and a restarted daemon are new processes; look each

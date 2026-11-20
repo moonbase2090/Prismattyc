@@ -69,10 +69,7 @@ fn x11_window_id(window: &Window) -> String {
 }
 
 fn xdotool(args: &[&str]) -> bool {
-    Command::new("xdotool")
-        .args(args)
-        .stdout(Stdio::null())
-        .status()
+    prismattyc_process::status(Command::new("xdotool").args(args).stdout(Stdio::null()))
         .expect("xdotool is installed on the test image")
         .success()
 }

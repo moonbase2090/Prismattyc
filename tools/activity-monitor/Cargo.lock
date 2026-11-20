@@ -1605,6 +1605,7 @@ dependencies = [
  "libc",
  "log",
  "nix 0.28.0",
+ "prismattyc-process",
  "serial2",
  "shared_library",
  "shell-words",
@@ -1637,6 +1638,7 @@ dependencies = [
 name = "prismattyc-core"
 version = "0.3.71"
 dependencies = [
+ "prismattyc-process",
  "serde",
  "unicode-width",
 ]
@@ -1680,6 +1682,7 @@ dependencies = [
  "postcard",
  "prismattyc-core",
  "prismattyc-emulator",
+ "prismattyc-process",
  "prismattyc-protocol",
  "prismattyc-render",
  "prismattyc-winres",
@@ -1698,6 +1701,13 @@ dependencies = [
  "ureq",
  "url",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "prismattyc-process"
+version = "0.3.71"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

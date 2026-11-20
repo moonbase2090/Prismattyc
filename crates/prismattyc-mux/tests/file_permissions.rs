@@ -4,18 +4,19 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::process::Command;
 
 #[test]
 fn restart_repairs_modes_and_preserves_sessions_mail_and_pane_logs() {
     let script =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/native/file-permissions-e2e.py");
-    let output = Command::new("python3")
-        .arg(script)
-        .arg("--bins")
-        .arg(Path::new(env!("CARGO_BIN_EXE_pmux")).parent().unwrap())
-        .output()
-        .unwrap();
+    let output = prismattyc_process::spawn(
+        prismattyc_process::capture_command("python3")
+            .arg(script)
+            .arg("--bins")
+            .arg(Path::new(env!("CARGO_BIN_EXE_pmux")).parent().unwrap()),
+    )
+    .and_then(std::process::Child::wait_with_output)
+    .unwrap();
     assert!(
         output.status.success(),
         "{}",

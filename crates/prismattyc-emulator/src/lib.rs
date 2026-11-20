@@ -2407,12 +2407,13 @@ mod tests {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            std::process::Command::new("kill")
-                .args(["-0", &pid.to_string()])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .is_ok_and(|status| status.success())
+            prismattyc_process::status(
+                std::process::Command::new("kill")
+                    .args(["-0", &pid.to_string()])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null()),
+            )
+            .is_ok_and(|status| status.success())
         }
     }
 

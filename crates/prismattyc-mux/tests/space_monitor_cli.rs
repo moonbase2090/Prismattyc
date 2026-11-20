@@ -6,7 +6,6 @@
 mod support;
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 struct Home {
@@ -38,7 +37,7 @@ impl Home {
     }
 
     fn output(&self, args: &[&str]) -> std::process::Output {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_pmux"));
+        let mut command = prismattyc_process::capture_command(env!("CARGO_BIN_EXE_pmux"));
         support::clear_command_env(&mut command);
         command
             .env("HOME", self.root.join("home"))
@@ -52,7 +51,9 @@ impl Home {
                 self.root.join("launcher dir/monitor"),
             )
             .args(args);
-        command.output().expect("run pmux")
+        prismattyc_process::spawn(&mut command)
+            .and_then(std::process::Child::wait_with_output)
+            .expect("run pmux")
     }
 
     fn pmux(&self, args: &[&str]) -> String {

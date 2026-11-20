@@ -102,13 +102,14 @@ pub(crate) fn file_users(paths: &[std::path::PathBuf], mapped_only: bool) -> io:
     }
     // lsof resolves mapped vnodes after an app rename; proc_pidpath retains
     // the original executable path on macOS.
-    let mut child = command
-        .arg("--")
-        .args(paths)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
+    let mut child = prismattyc_process::spawn(
+        command
+            .arg("--")
+            .args(paths)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )?;
     let deadline = Instant::now() + Duration::from_secs(2);
     while child.try_wait()?.is_none() {
         if Instant::now() >= deadline {

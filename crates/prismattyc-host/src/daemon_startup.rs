@@ -3,12 +3,14 @@ use std::path::Path;
 use std::process::Stdio;
 
 pub(crate) fn ensure_pmuxd_started(pmux: &Path, socket: &Path) -> Result<()> {
-    let output = prismattyc_mux::platform::hidden_command(pmux)
-        .arg("up")
-        .env("PMUX_SOCKET", socket)
-        .stdin(Stdio::null())
-        .output()
-        .with_context(|| format!("start pmuxd using {}", pmux.display()))?;
+    let output = prismattyc_process::spawn(
+        prismattyc_mux::platform::hidden_capture_command(pmux)
+            .arg("up")
+            .env("PMUX_SOCKET", socket)
+            .stdin(Stdio::null()),
+    )
+    .and_then(std::process::Child::wait_with_output)
+    .with_context(|| format!("start pmuxd using {}", pmux.display()))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -33,7 +35,7 @@ pub(crate) fn ensure_pmuxd_started(pmux: &Path, socket: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
+
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(0);
@@ -47,11 +49,13 @@ mod tests {
 
     impl Drop for PrivateMux {
         fn drop(&mut self) {
-            let _ = Command::new(&self.pmux)
-                .arg("stop")
-                .env("PMUX_SOCKET", &self.socket)
-                .stdin(Stdio::null())
-                .output();
+            let _ = prismattyc_process::spawn(
+                prismattyc_process::capture_command(&self.pmux)
+                    .arg("stop")
+                    .env("PMUX_SOCKET", &self.socket)
+                    .stdin(Stdio::null()),
+            )
+            .and_then(std::process::Child::wait_with_output);
             let _ = std::fs::remove_dir_all(&self.root);
             let _ = std::fs::remove_dir_all(&self.spaces);
         }
@@ -87,22 +91,26 @@ mod tests {
         assert!(prismattyc_mux::list_spaces(&spaces).unwrap().is_empty());
         ensure_pmuxd_started(&private_mux.pmux, &private_mux.socket).unwrap();
 
-        let status = Command::new(&private_mux.pmux)
-            .args(["status"])
-            .env("PMUX_SOCKET", &private_mux.socket)
-            .output()
-            .unwrap();
+        let status = prismattyc_process::spawn(
+            prismattyc_process::capture_command(&private_mux.pmux)
+                .args(["status"])
+                .env("PMUX_SOCKET", &private_mux.socket),
+        )
+        .and_then(std::process::Child::wait_with_output)
+        .unwrap();
         assert!(status.status.success());
         assert!(
             String::from_utf8_lossy(&status.stdout).contains("status: running"),
             "pmuxd did not report ready: {}",
             String::from_utf8_lossy(&status.stdout)
         );
-        let spaces_output = Command::new(&private_mux.pmux)
-            .args(["space", "ls"])
-            .env("PMUX_SOCKET", &private_mux.socket)
-            .output()
-            .unwrap();
+        let spaces_output = prismattyc_process::spawn(
+            prismattyc_process::capture_command(&private_mux.pmux)
+                .args(["space", "ls"])
+                .env("PMUX_SOCKET", &private_mux.socket),
+        )
+        .and_then(std::process::Child::wait_with_output)
+        .unwrap();
         assert!(spaces_output.status.success());
         assert!(
             String::from_utf8_lossy(&spaces_output.stdout).contains("default"),

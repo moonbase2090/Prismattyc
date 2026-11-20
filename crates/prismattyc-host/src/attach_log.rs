@@ -2203,15 +2203,16 @@ mod tests {
             .to_path_buf();
         let socket = mux_socket().unwrap();
         let daemon = Daemon(
-            std::process::Command::new(binaries.join("pmuxd"))
-                .arg("--socket")
-                .arg(&socket)
-                .args(["--", "/bin/sh"])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::inherit())
-                .spawn()
-                .unwrap(),
+            prismattyc_process::spawn(
+                std::process::Command::new(binaries.join("pmuxd"))
+                    .arg("--socket")
+                    .arg(&socket)
+                    .args(["--", "/bin/sh"])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::inherit()),
+            )
+            .unwrap(),
         );
         // pmuxd answers on its socket before it adopts its first session into
         // the default Space, and publishes its pid only after that. Every
@@ -2253,10 +2254,15 @@ mod tests {
                 client_id: None,
             })
             .unwrap();
-        let created = std::process::Command::new(binaries.join("pmux"))
-            .args(["new", "identity-peer", "--no-attach"])
-            .output()
-            .unwrap();
+        let created = prismattyc_process::spawn(
+            prismattyc_process::capture_command(binaries.join("pmux")).args([
+                "new",
+                "identity-peer",
+                "--no-attach",
+            ]),
+        )
+        .and_then(std::process::Child::wait_with_output)
+        .unwrap();
         assert!(created.status.success(), "{created:?}");
         let snapshot = live_snapshot().unwrap();
         let session = snapshot

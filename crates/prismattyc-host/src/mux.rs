@@ -6257,17 +6257,18 @@ mod tests {
             command.env_remove(key);
         }
         let mut guard = PrivateMuxServer {
-            child: command
-                .arg("--socket")
-                .arg(&socket)
-                .args(["--", "/bin/sh", "-c", "exec sleep 999"])
-                .env("XDG_DATA_HOME", &data)
-                .env("XDG_CONFIG_HOME", &data)
-                .env("PMUX_SESSION_AGENTS", data.join("session-agents.json"))
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .expect("spawn target/debug/pmuxd; build prismattyc-mux first"),
+            child: prismattyc_process::spawn(
+                command
+                    .arg("--socket")
+                    .arg(&socket)
+                    .args(["--", "/bin/sh", "-c", "exec sleep 999"])
+                    .env("XDG_DATA_HOME", &data)
+                    .env("XDG_CONFIG_HOME", &data)
+                    .env("PMUX_SESSION_AGENTS", data.join("session-agents.json"))
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null()),
+            )
+            .expect("spawn target/debug/pmuxd; build prismattyc-mux first"),
             socket: socket.clone(),
             data: root,
         };
@@ -6290,12 +6291,14 @@ mod tests {
     #[cfg(unix)]
     fn create_scrollback_session(server: &PrivateMuxServer, name: &str) {
         let script = "printf 'PERSISTED_SCROLLBACK_MARKER\\n'; for i in $(seq 1 100); do printf 'scroll line %03d\\n' \"$i\"; done; exec cat";
-        let output = Command::new(mux_binary("pmux"))
-            .arg("--socket")
-            .arg(&server.socket)
-            .args(["new", "--no-attach", name, "--", "/bin/sh", "-c", script])
-            .output()
-            .expect("start scrollback fixture session");
+        let output = prismattyc_process::spawn(
+            prismattyc_process::capture_command(mux_binary("pmux"))
+                .arg("--socket")
+                .arg(&server.socket)
+                .args(["new", "--no-attach", name, "--", "/bin/sh", "-c", script]),
+        )
+        .and_then(std::process::Child::wait_with_output)
+        .expect("start scrollback fixture session");
         assert!(output.status.success(), "start session: {output:?}");
     }
 
@@ -6583,11 +6586,12 @@ mod tests {
 
     #[cfg(unix)]
     fn signal_server(server: &PrivateMuxServer, signal: &str) {
-        let status = Command::new("kill")
-            .arg(signal)
-            .arg(server.child.id().to_string())
-            .status()
-            .expect("run kill");
+        let status = prismattyc_process::status(
+            Command::new("kill")
+                .arg(signal)
+                .arg(server.child.id().to_string()),
+        )
+        .expect("run kill");
         assert!(status.success(), "kill {signal} pmuxd");
     }
 
@@ -6838,10 +6842,9 @@ mod tests {
     fn async_promote_is_dropped_when_the_nested_attach_is_killed_mid_connect() {
         let server = private_mux_server();
         let (mut runtime, pane, attach, mut adopted) = pending_real_promote(&server);
-        let status = Command::new("kill")
-            .args(["-KILL", &attach.to_string()])
-            .status()
-            .unwrap();
+        let status =
+            prismattyc_process::status(Command::new("kill").args(["-KILL", &attach.to_string()]))
+                .unwrap();
         assert!(status.success());
         let deadline = Instant::now() + Duration::from_secs(5);
         while prismattyc_mux::procinfo::pid_alive(attach) {
@@ -8635,26 +8638,27 @@ mod tests {
     #[test]
     fn reopening_log_pane_restores_output_without_replaying_alerts() {
         let server = private_mux_server();
-        let created = Command::new(mux_binary("pmux"))
+        let created = prismattyc_process::spawn(prismattyc_process::capture_command(mux_binary("pmux"))
             .arg("--socket")
             .arg(&server.socket)
             .args([
                 "new", "--no-attach", "alerts", "--", "/bin/sh", "-c",
                 "printf '\\007\\033]9;old alert\\007OLD_OUTPUT\\n'; while IFS= read -r label; do printf '\\007\\033]9;%s\\007%s\\n' \"$label\" \"$label\"; done",
-            ])
-            .output()
+            ])).and_then(std::process::Child::wait_with_output)
             .unwrap();
         assert!(created.status.success(), "{created:?}");
 
         // Wait for the server to retain the initial output before attaching.
         let deadline = Instant::now() + Duration::from_secs(6);
         loop {
-            let output = Command::new(mux_binary("pmux"))
-                .arg("--socket")
-                .arg(&server.socket)
-                .args(["attach", "alerts", "--json"])
-                .output()
-                .unwrap();
+            let output = prismattyc_process::spawn(
+                prismattyc_process::capture_command(mux_binary("pmux"))
+                    .arg("--socket")
+                    .arg(&server.socket)
+                    .args(["attach", "alerts", "--json"]),
+            )
+            .and_then(std::process::Child::wait_with_output)
+            .unwrap();
             if String::from_utf8_lossy(&output.stdout).contains("OLD_OUTPUT") {
                 break;
             }

@@ -13,6 +13,7 @@ name = "prismattyc"
 path = "src/main.rs"
 
 [dependencies]
+prismattyc-process = { path = "../prismattyc-process" }
 anyhow.workspace = true
 crossterm.workspace = true
 portable-pty.workspace = true

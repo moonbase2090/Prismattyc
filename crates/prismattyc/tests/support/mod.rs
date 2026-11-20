@@ -249,9 +249,9 @@ impl PtyUx {
             let _ = self.child.wait();
             return;
         };
-        let _ = std::process::Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .status();
+        let _ = prismattyc_process::status(
+            std::process::Command::new("kill").args(["-TERM", &pid.to_string()]),
+        );
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
             if self.already_reaped() {
@@ -264,9 +264,9 @@ impl PtyUx {
             return;
         }
         if let Some(pid) = self.child.process_id() {
-            let _ = std::process::Command::new("kill")
-                .args(["-KILL", &pid.to_string()])
-                .status();
+            let _ = prismattyc_process::status(
+                std::process::Command::new("kill").args(["-KILL", &pid.to_string()]),
+            );
         }
         let _ = self.child.wait();
     }

@@ -49,16 +49,17 @@ fn exercise() {
     let socket = host_mux_socket().expect("private PMUX_SOCKET");
     let log_dir = runtime();
     let _daemon = Daemon(
-        Command::new(&pmuxd)
-            .env("PRISMATTYC_DEFAULT_SPACE", "0")
-            .arg("--socket")
-            .arg(&socket)
-            .args(["--", "/bin/sh"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(std::fs::File::create(log_dir.join("pmuxd.log")).unwrap())
-            .spawn()
-            .unwrap(),
+        prismattyc_process::spawn(
+            Command::new(&pmuxd)
+                .env("PRISMATTYC_DEFAULT_SPACE", "0")
+                .arg("--socket")
+                .arg(&socket)
+                .args(["--", "/bin/sh"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(std::fs::File::create(log_dir.join("pmuxd.log")).unwrap()),
+        )
+        .unwrap(),
     );
     wait_for_daemon();
     run_pmux(&["new", "--no-attach", "loose-seat"]);
@@ -1115,10 +1116,11 @@ fn fixture_bin(name: &str) -> PathBuf {
 }
 
 fn run_pmux(args: &[&str]) {
-    let output = Command::new(fixture_bin("pmux"))
-        .args(args)
-        .output()
-        .unwrap();
+    let output = prismattyc_process::spawn(
+        prismattyc_process::capture_command(fixture_bin("pmux")).args(args),
+    )
+    .and_then(std::process::Child::wait_with_output)
+    .unwrap();
     assert!(
         output.status.success(),
         "pmux {args:?}: {}",

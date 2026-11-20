@@ -117,6 +117,17 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install --yes --no-install-recommends pkg-config libfontconfig1-dev libfreetype6-dev
 
+      - name: Check process launch behavior and bypass controls
+        run: |
+          rustup component add clippy
+          cargo fetch --locked
+          python scripts/check-process-boundary_test.py
+          cargo test -p prismattyc-process --locked
+
+      - name: Check native process launch boundary
+        if: runner.os != 'Linux'
+        run: python scripts/check-process-boundary.py
+
       - name: Exercise production archives through native adapters
         run: python scripts/test-plugin-runtime.py --bundle target/native-plugin-bundle --feature production
 
@@ -526,7 +537,7 @@ jobs:
           cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
           [ -f "$cargo_env" ] && . "$cargo_env"
           [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
-          cargo clippy --workspace --all-targets --locked -- -D warnings
+          python3 scripts/check-process-boundary.py
 
   # The activity monitor ships in release builds but keeps its own lockfile
   # outside the workspace. --locked also fails when a version bump leaves its

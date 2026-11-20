@@ -27,6 +27,33 @@ use std::{
 const COMMAND_BOUND: Duration = Duration::from_millis(100);
 const FRAME_TURN: Duration = Duration::from_millis(20);
 
+#[cfg(test)]
+struct TestClock {
+    paused_at: Instant,
+    resumed_at: Option<Instant>,
+}
+#[cfg(test)]
+impl TestClock {
+    fn now(&self) -> Instant {
+        self.paused_at
+            + self
+                .resumed_at
+                .map_or(Duration::ZERO, |start| start.elapsed())
+    }
+}
+#[cfg(test)]
+fn fixture_response<T>(
+    receiver: &mpsc::Receiver<T>,
+    clock: Option<&Arc<Mutex<TestClock>>>,
+) -> Result<T, mpsc::RecvTimeoutError> {
+    if clock.is_some_and(|clock| clock.lock().unwrap().resumed_at.is_none()) {
+        // A paused fixture awaits completion, with a hang guard, not a speed assertion.
+        receiver.recv_timeout(Duration::from_secs(2))
+    } else {
+        receiver.recv_timeout(COMMAND_BOUND)
+    }
+}
+
 type Task = Box<dyn FnOnce(&mut Worker) + Send>;
 #[cfg(test)]
 type BeforeRequest = Box<dyn FnOnce(&mpsc::SyncSender<Message>) + Send>;
@@ -66,6 +93,8 @@ struct Worker {
     native: DesktopNative,
     shared: Arc<Shared>,
     clock: Instant,
+    #[cfg(test)]
+    test_clock: Option<Arc<Mutex<TestClock>>>,
     next_frame: Instant,
     notified: bool,
     #[cfg(test)]
@@ -75,6 +104,11 @@ struct Worker {
 }
 impl Worker {
     fn now(&mut self, supplied: Instant) -> Instant {
+        #[cfg(test)]
+        if let Some(clock) = &self.test_clock {
+            self.clock = self.clock.max(clock.lock().unwrap().now());
+            return self.clock;
+        }
         self.clock = self.clock.max(supplied).max(Instant::now());
         self.clock
     }
@@ -153,12 +187,28 @@ pub struct NativeService {
     exited: mpsc::Receiver<()>,
     #[cfg(test)]
     before_request: Option<BeforeRequest>,
+    #[cfg(test)]
+    test_clock: Option<Arc<Mutex<TestClock>>>,
 }
 impl NativeService {
     pub fn new(
         socket: UnixStream,
         geometry: Geometry,
         now: Instant,
+    ) -> Result<Self, AuthorityError> {
+        Self::start(
+            socket,
+            geometry,
+            now,
+            #[cfg(test)]
+            None,
+        )
+    }
+    fn start(
+        socket: UnixStream,
+        geometry: Geometry,
+        now: Instant,
+        #[cfg(test)] test_clock: Option<Arc<Mutex<TestClock>>>,
     ) -> Result<Self, AuthorityError> {
         let shutdown = socket.try_clone()?;
         let shared = Arc::new(Shared {
@@ -172,6 +222,8 @@ impl NativeService {
         let ready = sender.clone();
         let worker_shared = Arc::clone(&shared);
         let (initialized, initial) = mpsc::sync_channel(1);
+        #[cfg(test)]
+        let worker_clock = test_clock.clone();
         #[cfg(test)]
         let (finished, exited) = mpsc::channel();
         thread::Builder::new()
@@ -197,6 +249,8 @@ impl NativeService {
                             native,
                             shared: worker_shared,
                             clock: now,
+                            #[cfg(test)]
+                            test_clock: worker_clock,
                             next_frame: now,
                             notified: false,
                             #[cfg(test)]
@@ -246,7 +300,11 @@ impl NativeService {
                     }
                 }
             })?;
-        let cached = match initial.recv_timeout(COMMAND_BOUND) {
+        #[cfg(test)]
+        let response = fixture_response(&initial, test_clock.as_ref());
+        #[cfg(not(test))]
+        let response = initial.recv_timeout(COMMAND_BOUND);
+        let cached = match response {
             Ok(Ok(snapshot)) => snapshot,
             Ok(Err(error)) => return Err(error),
             Err(_) => {
@@ -271,6 +329,8 @@ impl NativeService {
             exited,
             #[cfg(test)]
             before_request: None,
+            #[cfg(test)]
+            test_clock,
         })
     }
     fn request<R: Send + 'static>(
@@ -291,7 +351,11 @@ impl NativeService {
             let _ = sender.send((result, worker.snapshot()));
         });
         let response = if self.sender.try_send(Message::Call(task)).is_ok() {
-            receiver.recv_timeout(COMMAND_BOUND).ok()
+            #[cfg(test)]
+            let response = fixture_response(&receiver, self.test_clock.as_ref());
+            #[cfg(not(test))]
+            let response = receiver.recv_timeout(COMMAND_BOUND);
+            response.ok()
         } else {
             None
         };

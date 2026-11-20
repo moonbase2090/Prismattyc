@@ -24,8 +24,9 @@ fn control(literal: &[u8], sequence: u64) -> Vec<u8> {
     bytes[24..32].copy_from_slice(&1u64.to_le_bytes());
     bytes
 }
-fn receive(client: &UnixStream, rights: usize, bound: Duration) -> (Vec<u8>, Option<OwnedFd>) {
-    let deadline = Instant::now() + bound;
+fn receive(client: &UnixStream, rights: usize) -> (Vec<u8>, Option<OwnedFd>) {
+    // Protocol deadlines use the fixture clock; this only bounds a hung fixture.
+    let deadline = Instant::now() + Duration::from_secs(2);
     let mut bytes = vec![0; 4];
     let mut used = 0;
     let mut descriptors = Vec::new();
@@ -63,10 +64,15 @@ fn setup() -> (NativeService, UnixStream, OwnedFd, mpsc::Receiver<()>) {
     let (host, client) = fd::socket_pair().unwrap();
     let mut client = UnixStream::from(client);
     client.set_nonblocking(true).unwrap();
-    let mut service = NativeService::new(
+    let now = Instant::now();
+    let mut service = NativeService::start(
         host.into(),
         Geometry::new(1, 1, 8, 16).unwrap(),
-        Instant::now(),
+        now,
+        Some(Arc::new(Mutex::new(TestClock {
+            paused_at: now,
+            resumed_at: None,
+        }))),
     )
     .unwrap();
     let (tx, rx) = mpsc::channel();
@@ -84,7 +90,7 @@ fn setup() -> (NativeService, UnixStream, OwnedFd, mpsc::Receiver<()>) {
     hello[32..36].copy_from_slice(&offer.capability_id.get().to_le_bytes());
     hello[40..56].copy_from_slice(&offer.value);
     client.write_all(&hello).unwrap();
-    let (reply, descriptor) = receive(&client, 1, Duration::from_millis(200));
+    let (reply, descriptor) = receive(&client, 1);
     assert_eq!(u16::from_le_bytes(reply[4..6].try_into().unwrap()), 9);
     (service, client, descriptor.unwrap(), rx)
 }
@@ -92,13 +98,30 @@ fn activate() -> (NativeService, UnixStream, OwnedFd) {
     let (mut service, mut client, descriptor, wake) = setup();
     let producer = Producer::new(descriptor.try_clone().unwrap());
     producer.publish(1, &frame_literal());
+    advance_time(&service, FRAME_TURN);
     client.write_all(&control(literals::ACTIVATE, 2)).unwrap();
     wake.recv_timeout(Duration::from_secs(2)).unwrap();
     service.poll(Instant::now()).unwrap();
-    let (active, _) = receive(&client, 0, Duration::from_millis(200));
+    let (active, _) = receive(&client, 0);
     assert_eq!(&active[4..6], &4u16.to_le_bytes());
     assert_eq!(service.scene().unwrap().frame().context.sequence.get(), 1);
     (service, client, descriptor)
+}
+fn advance_time(service: &NativeService, duration: Duration) {
+    let mut clock = service.test_clock.as_ref().unwrap().lock().unwrap();
+    assert!(clock.resumed_at.is_none());
+    clock.paused_at += duration;
+}
+fn resume_time(service: &NativeService) {
+    // Resume at this real instant. Protocol time advances by elapsed wall time,
+    // and fixture_response restores the unchanged real COMMAND_BOUND.
+    service
+        .test_clock
+        .as_ref()
+        .unwrap()
+        .lock()
+        .unwrap()
+        .resumed_at = Some(Instant::now());
 }
 fn stop(service: &mut NativeService) {
     service.close();
@@ -136,7 +159,7 @@ fn control_and_ring_progress_continue_while_a_paint_snapshot_is_held() {
             client
                 .write_all(&control(literals::PING_IDLE, frame + 1))
                 .unwrap();
-            let (pong, _) = receive(&client, 0, Duration::from_millis(100));
+            let (pong, _) = receive(&client, 0);
             assert_eq!(&pong[4..6], &15u16.to_le_bytes());
             assert_eq!(&pong[16..24], &(frame + 1).to_le_bytes());
             if frame >= 16 && start.elapsed() >= Duration::from_millis(200) {
@@ -173,6 +196,7 @@ fn revoke_between_snapshot_and_ack_never_releases_active() {
     let (mut service, mut client, descriptor, wake) = setup();
     let producer = Producer::new(descriptor);
     producer.publish(1, &frame_literal());
+    advance_time(&service, FRAME_TURN);
     client.write_all(&control(literals::ACTIVATE, 2)).unwrap();
     wake.recv_timeout(Duration::from_secs(2)).unwrap();
     service
@@ -198,7 +222,7 @@ fn revoke_between_snapshot_and_ack_never_releases_active() {
             w.native.acknowledge_installation(token, now)
         })
         .unwrap());
-    let (ended, _) = receive(&client, 0, Duration::from_millis(100));
+    let (ended, _) = receive(&client, 0);
     assert_eq!(&ended[4..6], &14u16.to_le_bytes());
     assert!(service.scene().is_none());
     stop(&mut service);
@@ -239,6 +263,7 @@ fn a_stalled_worker_fails_closed_without_holding_the_ui_command() {
         })))
         .unwrap();
     waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+    resume_time(&service);
     assert!(!service.take_revocation());
     assert!(service.pty_bytes(Instant::now()).is_err());
     assert!(!service.available());
@@ -298,7 +323,7 @@ fn a_maximum_slot_turn_keeps_the_public_revoke_bounded_or_fails_closed() {
     hello[32..36].copy_from_slice(&offer.capability_id.get().to_le_bytes());
     hello[40..56].copy_from_slice(&offer.value);
     client.write_all(&hello).unwrap();
-    let (_reply, descriptor) = receive(&client, 1, Duration::from_millis(200));
+    let (_reply, descriptor) = receive(&client, 1);
     let producer = Producer::new(descriptor.unwrap());
     let mut bytes = frame_literal();
     let cell = bytes[128..144].to_vec();
@@ -354,11 +379,13 @@ fn a_maximum_slot_turn_keeps_the_public_revoke_bounded_or_fails_closed() {
     let mut activate = control(literals::ACTIVATE, 2);
     activate[8..16].copy_from_slice(&2u64.to_le_bytes());
     activate[24..32].copy_from_slice(&2u64.to_le_bytes());
+    advance_time(&service, FRAME_TURN);
     client.write_all(&activate).unwrap();
     entry.recv_timeout(Duration::from_secs(2)).unwrap();
     service.before_request = Some(Box::new(move |_| {
         release.send(()).unwrap();
     }));
+    resume_time(&service);
     let started = Instant::now();
     let result = service.pty_bytes(started);
     let elapsed = started.elapsed();
@@ -439,7 +466,7 @@ fn a_full_ring_drains_to_the_newest_pending_scene_between_control_requests() {
         != 5
     {}
     // The worker handles and flushes the queued PING between these ring turns.
-    let (pong, _) = receive(&client, 0, Duration::from_millis(100));
+    let (pong, _) = receive(&client, 0);
     assert_eq!(&pong[4..6], &15u16.to_le_bytes());
     assert_eq!(producer.counter(128).load(Ordering::Acquire), 5);
     assert_eq!(service.scene().unwrap().frame().context.sequence.get(), 1);

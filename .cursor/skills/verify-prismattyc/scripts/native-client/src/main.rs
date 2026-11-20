@@ -393,6 +393,7 @@ fn report(control: &mut UnixStream, mut value: serde_json::Value) -> Result<()> 
         tv_sec: 0,
         tv_nsec: 0,
     };
+    // SAFETY: now is initialized and exclusively borrowed for this call.
     ensure!(
         unsafe { libc::clock_gettime(clock, &mut now) } == 0,
         "probe monotonic clock"

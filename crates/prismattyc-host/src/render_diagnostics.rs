@@ -8,6 +8,7 @@ fn thread_cpu_time() -> Option<Duration> {
         tv_sec: 0,
         tv_nsec: 0,
     };
+    // SAFETY: time is initialized and exclusively borrowed for this call.
     if unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) } != 0 {
         return None;
     }

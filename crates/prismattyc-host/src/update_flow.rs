@@ -51,6 +51,10 @@ pub(super) struct Resume {
     /// back. An app from before this field asks before restoring instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     restored: Option<Restored>,
+    /// Every app window's tabs, size and place when the user chose Save and
+    /// restart. Used only when the sessions came back with their IDs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    views: Vec<restart::WindowState>,
 }
 
 /// Which saved sessions the restarted daemon brought back, by name.
@@ -167,6 +171,17 @@ pub(super) fn action(app: &mut App, action: Action) {
                 return;
             };
             let plan = plan.clone();
+            let save = matches!(action, Action::SaveAndContinue);
+            // Record each window now, while its sessions are still running.
+            // A window without sessions (only blank terminals) is not kept.
+            let views: Vec<_> = if save {
+                app.windows
+                    .values_mut()
+                    .filter_map(|host| restart::save_window_view(host).ok())
+                    .collect()
+            } else {
+                Vec::new()
+            };
             let meter = Meter::new(plan.update_available);
             let stop = Arc::new(AtomicBool::new(false));
             // The dialog turns into the update's progress.
@@ -190,8 +205,7 @@ pub(super) fn action(app: &mut App, action: Action) {
                 let report = |event| {
                     let _ = proxy.send_event(UserAction::FullUpdate(event));
                 };
-                let result = install(plan, matches!(action, Action::SaveAndContinue), &report)
-                    .map_err(|e| format!("{e:#}"));
+                let result = install(plan, save, views, &report).map_err(|e| format!("{e:#}"));
                 report(Event::Installed(result));
             });
         }
@@ -368,7 +382,12 @@ pub(super) fn snapshot_path(prefix: &str) -> Result<PathBuf> {
     )))
 }
 
-fn install(plan: Plan, save: bool, report: &dyn Fn(Event)) -> Result<Resume> {
+fn install(
+    plan: Plan,
+    save: bool,
+    views: Vec<restart::WindowState>,
+    report: &dyn Fn(Event),
+) -> Result<Resume> {
     let pmux = find_mux_bin();
     require_same_sessions(&plan, &pmux)?;
     let file = snapshot_path("update")?;
@@ -379,6 +398,11 @@ fn install(plan: Plan, save: bool, report: &dyn Fn(Event)) -> Result<Resume> {
         Ok((notice, restored)) => Ok(Resume {
             notice,
             backup,
+            views: if restored.is_some() {
+                views
+            } else {
+                Vec::new()
+            },
             restored,
         }),
         Err(error) => {
@@ -662,7 +686,23 @@ fn relaunch(resume: &Resume) -> Result<()> {
     }
 }
 
-pub(super) fn resume(app: &mut App) {
+/// After an update that kept the sessions, open every saved app window on
+/// them. Returns false when there is nothing to open, so the app opens its
+/// usual first window. The update notice is shown by [`resume`].
+pub(super) fn open_saved_windows(app: &mut App, event_loop: &ActiveEventLoop) -> bool {
+    let Some(raw) = std::env::var_os("PRISMATTYC_COMPLETE_UPDATE") else {
+        return false;
+    };
+    let Ok(resume) = serde_json::from_str::<Resume>(&raw.to_string_lossy()) else {
+        return false;
+    };
+    if resume.restored.is_none() || resume.views.is_empty() {
+        return false;
+    }
+    restart::reopen(app, event_loop, &resume.views) > 0
+}
+
+pub(super) fn resume(app: &mut App, windows_reopened: bool) {
     let Some(raw) = std::env::var_os("PRISMATTYC_COMPLETE_UPDATE") else {
         return;
     };
@@ -689,7 +729,9 @@ pub(super) fn resume(app: &mut App) {
             ));
         }
         app.full_update = Flow::Idle;
-        reopen_views(app);
+        if !windows_reopened {
+            reopen_views(app);
+        }
         show(app, &text, &[]);
         return;
     }
@@ -813,6 +855,7 @@ echo note >&2"#,
                 restored: vec!["work".into()],
                 lost: Vec::new(),
             }),
+            views: Vec::new(),
         };
         let round: Resume = serde_json::from_str(&serde_json::to_string(&newer).unwrap()).unwrap();
         assert_eq!(round.restored, newer.restored);

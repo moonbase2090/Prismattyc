@@ -75,7 +75,8 @@ macOS adds these cases:
   before upload. It compares literal pixels with real iTerm2 PNG output.
 - `animation` supplies 150 distinct 64×64 checker images at 30 Hz for five
   seconds in a small window. A separate owned process paces input independently
-  of capture I/O and records send jitter. Producer monotonic timestamps report
+  of capture I/O and records send jitter. Darwin uses critical kqueue timers
+  to limit power-aware timer coalescing. Producer monotonic timestamps report
   generated, admitted and READY generations during the five-second window.
   Every admitted generation must be presented with the literal crop and
   nearest-sampled pixels; an unadmitted generation must never appear. Admission

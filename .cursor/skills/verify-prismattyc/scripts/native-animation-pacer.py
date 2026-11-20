@@ -6,7 +6,26 @@ import json
 from pathlib import Path
 import select
 import socket
+import sys
 import time
+
+
+DARWIN_TIMER_NANOSECONDS = 0x00000004
+DARWIN_TIMER_CRITICAL = 0x00000020
+
+def wait_tick(scheduled, timer):
+    while (remaining := scheduled - time.monotonic_ns()) > 0:
+        try:
+            if timer is None:
+                select.select([], [], [], remaining / 1_000_000_000)
+            else:
+                # Darwin sys/event.h: nanoseconds and minimal timer coalescing.
+                timer.control([select.kevent(1, filter=select.KQ_FILTER_TIMER,
+                                             flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                                             fflags=DARWIN_TIMER_NANOSECONDS | DARWIN_TIMER_CRITICAL,
+                                             data=remaining)], 1, None)
+        except InterruptedError:
+            continue
 
 
 def main():
@@ -16,7 +35,8 @@ def main():
     parser.add_argument('--out', type=Path, required=True)
     args = parser.parse_args()
     records = []
-    report = {'status': 'FAIL', 'frequency_hz': 30, 'requested': 150, 'records': records}
+    timer = select.kqueue() if sys.platform == 'darwin' else None
+    report = {'status': 'FAIL', 'frequency_hz': 30, 'requested': 150, 'records': records, 'timer': 'kqueue critical nanoseconds' if timer is not None else 'select'}
     try:
         with socket.socket(fileno=args.fd) as control:
             start = time.monotonic_ns()
@@ -24,12 +44,7 @@ def main():
             print(json.dumps({'event': 'pacing-start', 'start_ns': start}), flush=True)
             for generation in range(1, 151):
                 scheduled = start + (generation - 1) * 1_000_000_000 // 30
-                while (remaining := scheduled - time.monotonic_ns()) > 0:
-                    # This timer defines the workload rate, not readiness or success.
-                    try:
-                        select.select([], [], [], remaining / 1_000_000_000)
-                    except InterruptedError:
-                        continue
+                wait_tick(scheduled, timer)
                 before = time.monotonic_ns()
                 command = f'load 1 {generation} 64 64 1 1 {args.images / f"animation-{generation}.rgba"}\n'
                 control.sendall(command.encode())
@@ -45,6 +60,8 @@ def main():
         report['error'] = repr(error)
         raise
     finally:
+        if timer is not None:
+            timer.close()
         report['generated'] = len(records)
         args.out.write_text(json.dumps(report, indent=2) + '\n')
     return 0 if report['status'] == 'PASS' else 1

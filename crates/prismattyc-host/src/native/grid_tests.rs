@@ -118,3 +118,65 @@ fn geometry_and_cursor_come_from_the_same_snapshot_and_bounds_are_explicit() {
     assert_eq!(grid.cell(0, 2), None);
     assert_eq!(grid.cell(usize::MAX, usize::MAX), None);
 }
+
+#[test]
+fn find_maps_declared_wide_ascii_and_full_clusters_to_grid_columns() {
+    let frame = frame();
+    let grid = NativeGrid::new(&frame);
+    assert_eq!(
+        grid.matches("a", false),
+        [GridMatch {
+            row: 0,
+            start_column: 0,
+            end_column: 1,
+        }]
+    );
+    let cluster = "e\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}";
+    assert_eq!(
+        grid.matches(cluster, true),
+        [GridMatch {
+            row: 0,
+            start_column: 2,
+            end_column: 2,
+        }]
+    );
+    assert_eq!(
+        grid.matches("\u{301}", true),
+        [GridMatch {
+            row: 0,
+            start_column: 2,
+            end_column: 2,
+        }]
+    );
+    assert_eq!(
+        grid.matches("b", false),
+        [GridMatch {
+            row: 1,
+            start_column: 0,
+            end_column: 0,
+        }]
+    );
+    assert!(grid.matches("a", true).is_empty());
+    assert!(grid.matches("b", true).is_empty());
+    assert!(grid.matches("AB", false).is_empty());
+    assert!(grid.matches("", false).is_empty());
+    assert_eq!(grid.row_text(1), "B");
+    assert_eq!(grid.row_text(2), "");
+}
+
+#[test]
+fn find_maps_unicode_lowercase_expansion_to_the_original_cell() {
+    let mut frame = frame();
+    frame.cells[4].glyph = Glyph::Scalar('\u{130}');
+    let grid = NativeGrid::new(&frame);
+    assert_eq!(
+        grid.matches("i\u{307}", false),
+        [GridMatch {
+            row: 1,
+            start_column: 0,
+            end_column: 0,
+        }]
+    );
+    assert!(grid.matches("i\u{307}", true).is_empty());
+    assert!(grid.matches(" ", true).is_empty());
+}

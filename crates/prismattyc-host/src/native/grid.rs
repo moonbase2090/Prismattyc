@@ -26,6 +26,13 @@ pub struct CellView<'a> {
     pub cell: &'a Cell,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GridMatch {
+    pub row: usize,
+    pub start_column: usize,
+    pub end_column: usize,
+}
+
 /// A view borrows the same snapshot that owns the installed image placements.
 #[derive(Clone, Copy)]
 pub struct NativeGrid<'a> {
@@ -58,6 +65,74 @@ impl<'a> NativeGrid<'a> {
             Glyph::Cluster(index) => Text::Cluster(&self.frame.clusters[index as usize]),
         };
         Some(CellView { text, cell })
+    }
+
+    pub fn row_text(self, row: usize) -> String {
+        if row >= self.rows() {
+            return String::new();
+        }
+        self.extract_text([0, row], [self.columns() - 1, row])
+    }
+
+    /// Match complete row text and map scalar offsets back to declared cells.
+    /// A match inside a cluster selects that cluster's entire cell span.
+    pub fn matches(self, query: &str, case_sensitive: bool) -> Vec<GridMatch> {
+        let fold = |text: &str| {
+            if case_sensitive {
+                text.chars().collect::<Vec<_>>()
+            } else {
+                text.chars().flat_map(char::to_lowercase).collect()
+            }
+        };
+        let query = fold(query);
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let mut matches = Vec::new();
+        for row in 0..self.rows() {
+            let mut characters = Vec::new();
+            let mut columns = Vec::new();
+            for column in 0..self.columns() {
+                let view = self.cell(column, row).unwrap();
+                if view.text == Text::Continuation {
+                    continue;
+                }
+                let end = column + usize::from(view.cell.width()) - 1;
+                let mut append = |character: char| {
+                    if case_sensitive {
+                        characters.push(character);
+                        columns.push((column, end));
+                    } else {
+                        for folded in character.to_lowercase() {
+                            characters.push(folded);
+                            columns.push((column, end));
+                        }
+                    }
+                };
+                match view.text {
+                    Text::Scalar(character) => append(character),
+                    Text::Cluster(text) => text.chars().for_each(append),
+                    Text::Continuation => {}
+                }
+            }
+            while characters.last() == Some(&' ') {
+                characters.pop();
+                columns.pop();
+            }
+            for (offset, window) in characters.windows(query.len()).enumerate() {
+                if window == query {
+                    let found = GridMatch {
+                        row,
+                        start_column: columns[offset].0,
+                        end_column: columns[offset + query.len() - 1].1,
+                    };
+                    if matches.last() != Some(&found) {
+                        matches.push(found);
+                    }
+                }
+            }
+        }
+        matches
     }
 
     /// Native sessions have no scrollback. Coordinates are inclusive grid cells.

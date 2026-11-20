@@ -4,13 +4,14 @@
 
 #![cfg(unix)]
 
-use std::process::{Command, Output};
+use std::process::Output;
 
 fn prism(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_prismattyc"))
-        .args(args)
-        .output()
-        .expect("run prism")
+    prismattyc_process::spawn(
+        prismattyc_process::capture_command(env!("CARGO_BIN_EXE_prismattyc")).args(args),
+    )
+    .and_then(std::process::Child::wait_with_output)
+    .expect("run prism")
 }
 
 fn stdout(o: &Output) -> String {

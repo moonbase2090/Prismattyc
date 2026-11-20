@@ -30,13 +30,13 @@ pub(crate) fn open(host: &mut HostState) {
         crate::rail_toast(host, &format!(" opening {NAME} "));
         return;
     }
-    match crate::pmux_command()
-        .args(["space", "monitor"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+    match prismattyc_process::spawn(
+        crate::pmux_command()
+            .args(["space", "monitor"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped()),
+    ) {
         Ok(child) => {
             host.activity_monitor.0 = Some(child);
             crate::rail_toast(host, &format!(" opening {NAME} "));

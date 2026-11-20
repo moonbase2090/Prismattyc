@@ -68,15 +68,17 @@ fn budget_diagnostic_is_emitted_once_by_a_real_child() {
         }
         return;
     }
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "history_budget_tests::budget_diagnostic_is_emitted_once_by_a_real_child",
-            "--nocapture",
-        ])
-        .env(CHILD_FLAG, "1")
-        .output()
-        .unwrap();
+    let output = prismattyc_process::spawn(
+        prismattyc_process::capture_command(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "history_budget_tests::budget_diagnostic_is_emitted_once_by_a_real_child",
+                "--nocapture",
+            ])
+            .env(CHILD_FLAG, "1"),
+    )
+    .and_then(std::process::Child::wait_with_output)
+    .unwrap();
     assert!(output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert_eq!(

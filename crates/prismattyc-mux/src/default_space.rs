@@ -95,7 +95,7 @@ pub fn ensure(
 }
 
 fn run_pmux(pmux: &Path, socket: &Path, args: &[&str]) -> Result<()> {
-    let mut command = crate::platform::hidden_command(pmux);
+    let mut command = crate::platform::hidden_capture_command(pmux);
     command
         .arg("--socket")
         .arg(socket)
@@ -107,8 +107,8 @@ fn run_pmux(pmux: &Path, socket: &Path, args: &[&str]) -> Result<()> {
     if let Some(home) = crate::platform::home_dir() {
         command.current_dir(home);
     }
-    let output = command
-        .output()
+    let output = prismattyc_process::spawn(&mut command)
+        .and_then(std::process::Child::wait_with_output)
         .with_context(|| format!("run {}", pmux.display()))?;
     if !output.status.success() {
         bail!(

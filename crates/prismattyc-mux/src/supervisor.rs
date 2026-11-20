@@ -162,14 +162,15 @@ fn send_cell_exited(
     };
     let body = serde_json::to_vec(&job).map_err(|e| e.to_string())?;
 
-    let mut child = crate::platform::hidden_command(&exe)
-        .arg(INTERNAL_SEND_ARG)
-        .env_clear()
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("spawn clean sender: {e}"))?;
+    let mut child = prismattyc_process::spawn(
+        crate::platform::hidden_command(&exe)
+            .arg(INTERNAL_SEND_ARG)
+            .env_clear()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped()),
+    )
+    .map_err(|e| format!("spawn clean sender: {e}"))?;
 
     if let Some(mut stdin) = child.stdin.take() {
         stdin

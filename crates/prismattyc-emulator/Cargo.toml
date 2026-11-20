@@ -22,4 +22,5 @@ vte.workspace = true
 nix = { version = "0.28", features = ["term"] }
 
 [dev-dependencies]
+prismattyc-process = { path = "../prismattyc-process" }
 serde_json = "1.0.151"

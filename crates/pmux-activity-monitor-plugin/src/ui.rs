@@ -248,6 +248,18 @@ pub struct Ui {
     last_tier: Tier,
     /// First screen row and number of list rows drawn in the last frame, for clicks.
     list_lines: (u16, usize),
+    /// Details: the selected line (an index into the last frame's lines).
+    detail_cursor: usize,
+    /// Details: scroll to keep the cursor on screen after a key moved it.
+    follow_cursor: bool,
+    /// Details: every activity line is expanded unless it is in `flipped`.
+    expand_all: bool,
+    /// Details: activities whose state differs from `expand_all`.
+    flipped: std::collections::HashSet<String>,
+    /// Details, last frame: the key of each activity line (`None` for headings).
+    detail_keys: Vec<Option<String>>,
+    /// Details, last frame: first screen row, and the line index on each row.
+    detail_hits: (u16, Vec<usize>),
 }
 
 impl Default for Ui {
@@ -272,6 +284,12 @@ impl Default for Ui {
             page: 10,
             last_tier: Tier::Medium,
             list_lines: (0, 0),
+            detail_cursor: 0,
+            follow_cursor: false,
+            expand_all: false,
+            flipped: std::collections::HashSet::new(),
+            detail_keys: Vec::new(),
+            detail_hits: (0, Vec::new()),
         }
     }
 }
@@ -629,8 +647,7 @@ impl Ui {
             }
             (Screen::List, KeyCode::Char('d')) => {
                 if self.selected.is_some() {
-                    self.screen = Screen::Details;
-                    self.timeline_offset = 0;
+                    self.open_details();
                 }
             }
             (Screen::List, KeyCode::Char('f')) => self.filter = self.filter.next(),
@@ -641,27 +658,97 @@ impl Ui {
             ) => {
                 self.screen = Screen::List;
             }
-            (Screen::Timeline | Screen::Details, KeyCode::Up | KeyCode::Char('k')) => {
+            (Screen::Details, KeyCode::Up | KeyCode::Char('k')) => self.move_cursor(-1),
+            (Screen::Details, KeyCode::Down | KeyCode::Char('j')) => self.move_cursor(1),
+            (Screen::Details, KeyCode::PageUp) => self.move_cursor(-page),
+            (Screen::Details, KeyCode::PageDown) => self.move_cursor(page),
+            (Screen::Details, KeyCode::Home | KeyCode::Char('g')) => {
+                self.move_cursor(isize::MIN / 2)
+            }
+            (Screen::Details, KeyCode::End | KeyCode::Char('G')) => {
+                self.move_cursor(isize::MAX / 2)
+            }
+            (Screen::Details, KeyCode::Enter | KeyCode::Char(' ')) => {
+                self.toggle_line(self.detail_cursor)
+            }
+            (Screen::Details, KeyCode::Char('e')) => self.toggle_all(),
+            (Screen::Timeline, KeyCode::Up | KeyCode::Char('k')) => {
                 self.timeline_offset = self.timeline_offset.saturating_sub(1);
             }
-            (Screen::Timeline | Screen::Details, KeyCode::Down | KeyCode::Char('j')) => {
-                self.timeline_offset += 1
-            }
-            (Screen::Timeline | Screen::Details, KeyCode::PageUp) => {
+            (Screen::Timeline, KeyCode::Down | KeyCode::Char('j')) => self.timeline_offset += 1,
+            (Screen::Timeline, KeyCode::PageUp) => {
                 self.timeline_offset = self.timeline_offset.saturating_sub(page as usize);
             }
-            (Screen::Timeline | Screen::Details, KeyCode::PageDown) => {
-                self.timeline_offset += page as usize
-            }
-            (Screen::Timeline | Screen::Details, KeyCode::Home | KeyCode::Char('g')) => {
-                self.timeline_offset = 0
-            }
-            (Screen::Timeline | Screen::Details, KeyCode::End | KeyCode::Char('G')) => {
+            (Screen::Timeline, KeyCode::PageDown) => self.timeline_offset += page as usize,
+            (Screen::Timeline, KeyCode::Home | KeyCode::Char('g')) => self.timeline_offset = 0,
+            (Screen::Timeline, KeyCode::End | KeyCode::Char('G')) => {
                 self.timeline_offset = usize::MAX / 2
             }
             _ => {}
         }
         false
+    }
+
+    fn open_details(&mut self) {
+        self.screen = Screen::Details;
+        self.timeline_offset = 0;
+        self.detail_cursor = 0;
+        self.follow_cursor = false;
+    }
+
+    /// Moves the details cursor to the nearest activity line in that direction.
+    fn move_cursor(&mut self, by: isize) {
+        if self.detail_keys.is_empty() {
+            return;
+        }
+        let last = self.detail_keys.len() - 1;
+        let target = (self.detail_cursor as isize)
+            .saturating_add(by)
+            .clamp(0, last as isize) as usize;
+        // Headings are not selectable: take the nearest activity in the
+        // direction of travel, else the nearest one the other way.
+        let pick = |step: isize| {
+            let mut at = target as isize;
+            while at >= 0 && at <= last as isize {
+                if self.detail_keys[at as usize].is_some() {
+                    return Some(at as usize);
+                }
+                at += step;
+            }
+            None
+        };
+        let step: isize = if by < 0 { -1 } else { 1 };
+        if let Some(found) = pick(step).or_else(|| pick(-step)) {
+            self.detail_cursor = found;
+            self.follow_cursor = true;
+        }
+    }
+
+    fn is_expanded(&self, key: &str) -> bool {
+        self.expand_all != self.flipped.contains(key)
+    }
+
+    /// Expands or collapses one activity line in place.
+    fn toggle_line(&mut self, line: usize) {
+        let Some(Some(key)) = self.detail_keys.get(line) else {
+            return;
+        };
+        if !self.flipped.remove(key) {
+            self.flipped.insert(key.clone());
+        }
+        self.follow_cursor = true;
+    }
+
+    /// One key for every line: expand them all, or collapse them all.
+    fn toggle_all(&mut self) {
+        let all_open = self
+            .detail_keys
+            .iter()
+            .flatten()
+            .all(|key| self.is_expanded(key));
+        self.expand_all = !all_open;
+        self.flipped.clear();
+        self.follow_cursor = true;
     }
 
     pub fn event(&mut self, event: &Event, hosts: &mut [Host], now: u64) -> bool {
@@ -699,8 +786,7 @@ impl Ui {
                 if let Some(Row::Seat(host, id)) = rows.get(self.list_offset + line) {
                     let target = (*host, id.clone());
                     if self.selected.as_ref() == Some(&target) {
-                        self.screen = Screen::Details;
-                        self.timeline_offset = 0;
+                        self.open_details();
                     } else {
                         self.selected = Some(target);
                     }
@@ -708,6 +794,18 @@ impl Ui {
             }
             (Screen::List, MouseKind::Scroll(Scroll::Up)) => self.step(&rows, -1),
             (Screen::List, MouseKind::Scroll(Scroll::Down)) => self.step(&rows, 1),
+            (Screen::Details, MouseKind::Down(MouseButton::Left)) => {
+                let (top, rows_shown) = &self.detail_hits;
+                let line = mouse
+                    .row
+                    .checked_sub(*top)
+                    .and_then(|row| rows_shown.get(usize::from(row)))
+                    .copied();
+                if let Some(line) = line {
+                    self.detail_cursor = line;
+                    self.toggle_line(line);
+                }
+            }
             (Screen::Timeline | Screen::Details, MouseKind::Scroll(Scroll::Up)) => {
                 self.timeline_offset = self.timeline_offset.saturating_sub(3);
             }
@@ -1898,35 +1996,99 @@ fn draw_details(
                 .map(|activity| (None, Some(activity))),
         );
     }
+    ui.detail_keys = lines
+        .iter()
+        .map(|(_, activity)| activity.map(model::Activity::key))
+        .collect();
+    ui.detail_cursor = ui.detail_cursor.min(lines.len().saturating_sub(1));
+    if ui
+        .detail_keys
+        .get(ui.detail_cursor)
+        .is_some_and(Option::is_none)
+    {
+        // The cursor sat on a line that is now a heading: take the next activity.
+        if let Some(next) = ui.detail_keys.iter().position(Option::is_some) {
+            ui.detail_cursor = next;
+        }
+    }
     let height = usize::from(bottom - y);
     ui.page = height.saturating_sub(1).max(1);
-    ui.timeline_offset = ui.timeline_offset.min(lines.len().saturating_sub(height));
     let width = usize::from(limit.saturating_sub(area.x));
     let show_tool = width >= 48;
-    for (line, (group, activity)) in lines
+    // Rows each line takes: one, plus wrapped text for an expanded activity.
+    let rows_of: Vec<usize> = lines
         .iter()
-        .skip(ui.timeline_offset)
-        .take(height)
-        .enumerate()
-    {
-        let row_y = y + line as u16;
+        .map(|(_, activity)| match activity {
+            Some(activity) if ui.is_expanded(&activity.key()) => {
+                activity_text(activity, ui, area.x + 2, limit, show_tool)
+                    .len()
+                    .max(1)
+            }
+            _ => 1,
+        })
+        .collect();
+    ui.timeline_offset = ui.timeline_offset.min(lines.len().saturating_sub(1));
+    if ui.follow_cursor {
+        ui.follow_cursor = false;
+        let cursor = ui.detail_cursor;
+        let first_activity = ui.detail_keys.iter().position(Option::is_some);
+        if cursor < ui.timeline_offset {
+            ui.timeline_offset = cursor;
+        }
+        // On the first activity, show the heading above it too.
+        if first_activity == Some(cursor) {
+            ui.timeline_offset = 0;
+        }
+        // Scroll down until the whole cursor line fits.
+        while ui.timeline_offset < cursor
+            && rows_of[ui.timeline_offset..=cursor].iter().sum::<usize>() > height
+        {
+            ui.timeline_offset += 1;
+        }
+    }
+    let mut hits = Vec::new();
+    let mut row_y = y;
+    for (index, (group, activity)) in lines.iter().enumerate().skip(ui.timeline_offset) {
+        if row_y >= bottom {
+            break;
+        }
         if let Some(group) = group {
             draw_task_heading(paint, area.x, row_y, limit, group, clock);
+            hits.push(index);
+            row_y += 1;
             continue;
         }
         if let Some(activity) = activity {
+            let selected = index == ui.detail_cursor;
+            let used = if ui.is_expanded(&activity.key()) {
+                rows_of[index]
+            } else {
+                1
+            };
+            let shown = used.min(usize::from(bottom - row_y));
+            if selected {
+                paint.fill(
+                    Rect::new(area.x, row_y, limit - area.x, shown as u16),
+                    Style::new().bg(palette.selection),
+                );
+            }
             draw_activity(
                 paint,
                 area.x + 2,
                 row_y,
+                bottom,
                 limit,
                 activity,
                 ui,
                 clock,
                 show_tool,
+                used > 1 || ui.is_expanded(&activity.key()),
             );
+            hits.extend(std::iter::repeat_n(index, shown));
+            row_y += shown as u16;
         }
     }
+    ui.detail_hits = (y, hits);
 }
 
 fn draw_task_heading(
@@ -1960,46 +2122,32 @@ fn draw_task_heading(
     paint.text(x + 2, y, limit, &summary, fg(palette.muted));
 }
 
-#[allow(clippy::too_many_arguments)]
-fn draw_activity(
-    paint: &mut Painter<'_, '_>,
-    left: u16,
-    y: u16,
-    limit: u16,
+/// Where an activity line puts its parts, shared by drawing and by sizing an
+/// expanded line, so the timing column stays at the same place either way.
+struct ActivityLayout {
+    /// Left edge of the action/tool/target area.
+    target_x: u16,
+    tail: String,
+    tail_x: u16,
+    /// Room for the target on the first row, beside the timing column.
+    target_width: usize,
+    /// Room for each following row of an expanded target.
+    rest_width: usize,
+}
+
+fn activity_layout(
     activity: &model::Activity<'_>,
     ui: &Ui,
-    clock: Clock,
+    left: u16,
+    limit: u16,
     show_tool: bool,
-) {
+) -> ActivityLayout {
     use model::Outcome;
-    let palette = *paint.palette;
-    let age = model::short_age(clock.wall_ms.saturating_sub(activity.at_ms));
-    paint.right(left + 4, y, 4, &age, fg(palette.muted));
-    let mut x = left + 5;
-    let (glyph, color) = match activity.outcome {
-        Outcome::Succeeded => ('✓', palette.state(SeatState::Working)),
-        Outcome::Failed => ('✗', palette.failed),
-        Outcome::Running => ('…', palette.state(SeatState::Working)),
-        Outcome::NoResult => ('?', palette.muted),
-        Outcome::Note(_) => ('·', palette.muted),
-    };
-    paint.text(x, y, limit, &glyph.to_string(), fg(color));
-    x += 2;
-    let Some(action) = activity.action else {
-        if let Outcome::Note(text) = activity.outcome {
-            paint.text(x, y, limit, text, fg(palette.muted));
-        }
-        return;
-    };
-    paint.text(x, y, limit, action.word(), fg(palette.text));
+    let mut x = left + 5 + 2;
     x += 8;
     if show_tool {
-        if let Some(tool) = activity.tool {
-            paint.text(x, y, limit, &truncate(tool, 10), fg(palette.muted));
-        }
         x += 11;
     }
-    // The result sits at the right edge so durations line up.
     let result = match activity.outcome {
         Outcome::Running => "running".to_owned(),
         Outcome::NoResult => "no result".to_owned(),
@@ -2033,22 +2181,146 @@ fn draw_activity(
     };
     let tail_width = tail.chars().count() as u16;
     let tail_x = limit.saturating_sub(tail_width + 1).max(x);
-    let target_width = usize::from(tail_x.saturating_sub(x + 1));
-    if let Some(target) = activity.target {
-        paint.text(
-            x,
-            y,
-            limit,
-            &truncate(target, target_width),
-            fg(palette.text),
-        );
+    ActivityLayout {
+        target_x: x,
+        tail,
+        tail_x,
+        target_width: usize::from(tail_x.saturating_sub(x + 1)),
+        rest_width: usize::from(limit.saturating_sub(x + 1)),
     }
+}
+
+/// The target text of an expanded activity, wrapped to the rows it will use.
+/// The text is the same redacted string the collapsed line shortens.
+fn activity_text(
+    activity: &model::Activity<'_>,
+    ui: &Ui,
+    left: u16,
+    limit: u16,
+    show_tool: bool,
+) -> Vec<String> {
+    let layout = activity_layout(activity, ui, left, limit, show_tool);
+    wrap_rows(
+        activity.target.unwrap_or_default(),
+        layout.target_width,
+        layout.rest_width,
+    )
+}
+
+/// How many leading characters of `chars` fit in `budget` terminal cells. A
+/// character wider than the budget still goes alone, so wrapping always advances.
+fn chars_within(chars: &[char], budget: usize) -> usize {
+    let mut used = 0;
+    for (index, character) in chars.iter().enumerate() {
+        used += prismattyc_core::char_display_width(*character);
+        if used > budget {
+            return index.max(1);
+        }
+    }
+    chars.len()
+}
+
+/// Breaks `text` into rows: the first `first` cells wide, the rest `rest`,
+/// preferring to break after a space. Never loses a character, and no row is
+/// wider in terminal cells than its budget (one wide character excepted when
+/// the budget is a single cell).
+fn wrap_rows(text: &str, first: usize, rest: usize) -> Vec<String> {
+    let mut rows = Vec::new();
+    let mut chars: Vec<char> = text.chars().collect();
+    let mut width = first;
+    if width == 0 {
+        // No room beside the timing column: the text starts on the next row.
+        rows.push(String::new());
+        width = rest;
+    }
+    let mut width_now = width.max(1);
+    while !chars.is_empty() {
+        let fit = chars_within(&chars, width_now);
+        if fit == chars.len() {
+            rows.push(chars.drain(..).collect());
+            break;
+        }
+        let mut cut = fit;
+        if let Some(space) = chars[..fit].iter().rposition(|c| *c == ' ') {
+            if space + 1 > fit / 2 {
+                cut = space + 1;
+            }
+        }
+        rows.push(chars.drain(..cut).collect());
+        width_now = rest.max(1);
+    }
+    if rows.is_empty() {
+        rows.push(String::new());
+    }
+    rows
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_activity(
+    paint: &mut Painter<'_, '_>,
+    left: u16,
+    y: u16,
+    bottom: u16,
+    limit: u16,
+    activity: &model::Activity<'_>,
+    ui: &Ui,
+    clock: Clock,
+    show_tool: bool,
+    expanded: bool,
+) {
+    use model::Outcome;
+    let palette = *paint.palette;
+    let age = model::short_age(clock.wall_ms.saturating_sub(activity.at_ms));
+    paint.right(left + 4, y, 4, &age, fg(palette.muted));
+    let mut x = left + 5;
+    let (glyph, color) = match activity.outcome {
+        Outcome::Succeeded => ('✓', palette.state(SeatState::Working)),
+        Outcome::Failed => ('✗', palette.failed),
+        Outcome::Running => ('…', palette.state(SeatState::Working)),
+        Outcome::NoResult => ('?', palette.muted),
+        Outcome::Note(_) => ('·', palette.muted),
+    };
+    paint.text(x, y, limit, &glyph.to_string(), fg(color));
+    x += 2;
+    let Some(action) = activity.action else {
+        if let Outcome::Note(text) = activity.outcome {
+            paint.text(x, y, limit, text, fg(palette.muted));
+        }
+        return;
+    };
+    paint.text(x, y, limit, action.word(), fg(palette.text));
+    x += 8;
+    if show_tool {
+        if let Some(tool) = activity.tool {
+            paint.text(x, y, limit, &truncate(tool, 10), fg(palette.muted));
+        }
+    }
+    // The result sits at the right edge so durations line up.
+    let layout = activity_layout(activity, ui, left, limit, show_tool);
     let tail_color = if activity.outcome == Outcome::Failed {
         palette.failed
     } else {
         palette.muted
     };
-    paint.text(tail_x, y, limit, &tail, fg(tail_color));
+    if expanded {
+        let rows = activity_text(activity, ui, left, limit, show_tool);
+        for (index, row) in rows.iter().enumerate() {
+            let row_y = y + index as u16;
+            if row_y >= bottom {
+                break;
+            }
+            paint.text(layout.target_x, row_y, limit, row, fg(palette.text));
+        }
+    } else if let Some(target) = activity.target {
+        paint.text(
+            layout.target_x,
+            y,
+            limit,
+            &truncate(target, layout.target_width),
+            fg(palette.text),
+        );
+    }
+    paint.text(layout.tail_x, y, limit, &layout.tail, fg(tail_color));
 }
 
 impl Palette {
@@ -2102,7 +2374,9 @@ fn draw_footer(
             ("?", "keys"),
         ],
         Screen::Details => &[
-            ("↑↓", "scroll"),
+            ("↑↓", "select"),
+            ("⏎", "expand"),
+            ("e", "all"),
             ("esc", "back"),
             ("i", "IDs"),
             ("q", "quit"),
@@ -2127,7 +2401,7 @@ fn draw_footer(
         _ if idle => &[0],
         Screen::List => &[0, 1, 2, 3, 4, 6, 7, 9, 10, 11, 12, 8, 5],
         Screen::Timeline => &[0, 1, 2, 3, 4],
-        Screen::Details => &[0, 1, 2, 3],
+        Screen::Details => &[0, 1, 2, 3, 4, 5],
     };
     let mut x = area.x + 1;
     for index in order.iter().filter(|index| keep.contains(index)) {
@@ -2145,7 +2419,7 @@ fn draw_help(paint: &mut Painter<'_, '_>, area: Rect) {
         ("g G", "first or last"),
         ("Tab", "next host (Shift-Tab: previous)"),
         ("Enter → l", "open the timeline"),
-        ("d", "open selected seat details"),
+        ("d", "open details (Enter, e expand lines)"),
         ("x / X / R", "remove / clear / rescan; no-agent rows hide"),
         (":", "open monitor commands"),
         ("i", "show or hide run and operation ids"),
@@ -2534,7 +2808,7 @@ mod tests {
  windo│ g G         first or last                              │
  ● win│ Tab         next host (Shift-Tab: previous)            │
       │ Enter → l   open the timeline                          │
-      │ d           open selected seat details                 │
+      │ d           open details (Enter, e expand lines)       │
       │ x / X / R   remove / clear / rescan; no-agent rows hide│
       │ :           open monitor commands                      │
       │ i           show or hide run and operation ids         │
@@ -3503,9 +3777,14 @@ mod tests {
         assert!(top.contains("seat-a"), "{top}");
         assert!(top.lines().all(|line| line.chars().count() <= 40), "{top}");
         assert_eq!(monitor.ui.timeline_offset, 0);
-        press(&mut monitor, KeyCode::Down);
+        // Down moves the selected line; once it passes the last visible row the
+        // list scrolls to keep it on screen.
+        for _ in 0..5 {
+            press(&mut monitor, KeyCode::Down);
+            draw(&mut monitor, 40, 9);
+        }
         let (scrolled, ..) = draw(&mut monitor, 40, 9);
-        assert_eq!(monitor.ui.timeline_offset, 1, "{scrolled}");
+        assert!(monitor.ui.timeline_offset >= 1, "{scrolled}");
         assert_ne!(top, scrolled, "scrolling must change the visible rows");
         assert!(
             top.contains("task-b") && !scrolled.contains("task-b  1"),
@@ -3513,8 +3792,10 @@ mod tests {
         );
         press_char(&mut monitor, 'g');
         let (back, ..) = draw(&mut monitor, 40, 9);
-        assert_eq!(monitor.ui.timeline_offset, 0);
-        assert_eq!(back, top);
+        // One row is free here, so the first activity itself stays on screen.
+        assert_eq!(monitor.ui.detail_cursor, 1, "{back}");
+        assert_eq!(monitor.ui.timeline_offset, 1, "{back}");
+        assert!(back.contains("tool"), "{back}");
         Ok(())
     }
 
@@ -3736,5 +4017,222 @@ mod tests {
         let key =
             KeyEvent::press(KeyCode::Char('c')).modifiers(lunatui_term::Modifiers::new().control());
         assert!(monitor.event(&Event::Key(key)));
+    }
+
+    const LONG_COMMAND: &str = "run-checks --suite activity-monitor-plugin --reporter verbose --token [redacted] --out build/results/activity-monitor-plugin.json";
+
+    /// One seat with a command that is far wider than the pane, then a short one.
+    fn long_command_seat() -> Result<Monitor> {
+        use crate::model::tests::record_detail;
+        use serde_json::json;
+        let mut monitor = Monitor::new(vec!["mac".into()], Palette::DARK, 0);
+        monitor.now_ms = NOW;
+        let at = |seq, kind, ms, detail| {
+            record_detail("long-seat", seq, kind, NOW - ms, "run-ffffffff1", detail)
+        };
+        monitor.hosts[0].apply(
+            page_in(
+                "e1",
+                vec![
+                    at(
+                        1,
+                        "command_started",
+                        40_000,
+                        json!({"tool": "tool-run", "command": LONG_COMMAND, "task": "task-z", "operation_id": "op-long"}),
+                    )?,
+                    at(
+                        2,
+                        "command_failed",
+                        10_000,
+                        json!({"exit_code": 2, "duration_ms": 30_000, "operation_id": "op-long"}),
+                    )?,
+                    at(
+                        3,
+                        "command_started",
+                        6_000,
+                        json!({"tool": "tool-run", "command": "ls", "operation_id": "op-short"}),
+                    )?,
+                    at(
+                        4,
+                        "command_finished",
+                        5_000,
+                        json!({"duration_ms": 1_000, "operation_id": "op-short"}),
+                    )?,
+                ],
+                None,
+            )?,
+            0,
+        );
+        open_details(&mut monitor, "long-seat");
+        Ok(monitor)
+    }
+
+    /// The frame with all whitespace removed, to look for text that wrapped.
+    fn compact(text: &str) -> String {
+        // The timing column shares the first row with the start of the text.
+        text.replace("30s  exit 2", "").split_whitespace().collect()
+    }
+
+    /// The text of the rows below `heading`, with the leading columns removed.
+    fn rows_after(text: &str, heading: &str) -> Vec<String> {
+        text.lines()
+            .skip_while(|line| !line.contains(heading))
+            .skip(1)
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn enter_expands_the_selected_line_in_place_and_again_collapses_it() -> Result<()> {
+        let mut monitor = long_command_seat()?;
+        let (collapsed, ..) = draw(&mut monitor, 60, 24);
+        assert!(!collapsed.contains("out build/results"), "{collapsed}");
+        assert!(
+            collapsed.contains('…'),
+            "the long command is cut: {collapsed}"
+        );
+        // The newest activity (the short `ls`) is selected first.
+        press(&mut monitor, KeyCode::Enter);
+        let (short_open, ..) = draw(&mut monitor, 60, 24);
+        assert_eq!(
+            rows_after(&short_open, "task-z").len(),
+            rows_after(&collapsed, "task-z").len()
+        );
+        // Down selects the long command; Enter wraps all of it onto more rows.
+        press(&mut monitor, KeyCode::Down);
+        press(&mut monitor, KeyCode::Enter);
+        let (open, ..) = draw(&mut monitor, 60, 24);
+        assert!(
+            compact(&open).contains(&compact(LONG_COMMAND)),
+            "the whole command is on screen:\n{open}"
+        );
+        assert!(open.contains("[redacted]"), "{open}");
+        assert!(!open.contains('…'), "nothing is cut when expanded:\n{open}");
+        press(&mut monitor, KeyCode::Enter);
+        let (closed, ..) = draw(&mut monitor, 60, 24);
+        assert_eq!(closed, collapsed, "collapsing restores the lines");
+        Ok(())
+    }
+
+    #[test]
+    fn an_expanded_line_keeps_its_timing_column_where_it_was() -> Result<()> {
+        let mut monitor = long_command_seat()?;
+        draw(&mut monitor, 60, 24);
+        press(&mut monitor, KeyCode::Down);
+        let (collapsed, ..) = draw(&mut monitor, 60, 24);
+        let duration = |text: &str| {
+            let line = line_of(text, "exit 2");
+            (column_of(line, "30s"), column_of(line, "exit 2"))
+        };
+        let before = duration(&collapsed);
+        press(&mut monitor, KeyCode::Enter);
+        let (open, ..) = draw(&mut monitor, 60, 24);
+        assert_eq!(duration(&open), before, "{open}");
+        assert!(
+            line_of(&open, "exit 2").contains("run-checks"),
+            "the timing stays on the first row of the line:\n{open}"
+        );
+        // Every wrapped row stays left of the timing column and inside the pane.
+        for line in open.lines() {
+            assert!(line.chars().count() <= 60, "{line}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn e_expands_every_line_and_collapses_them_all_again() -> Result<()> {
+        let mut monitor = long_command_seat()?;
+        let (collapsed, ..) = draw(&mut monitor, 60, 24);
+        press_char(&mut monitor, 'e');
+        let (all, ..) = draw(&mut monitor, 60, 24);
+        assert!(compact(&all).contains(&compact(LONG_COMMAND)), "{all}");
+        assert!(!all.contains('…'), "{all}");
+        // One line collapsed by hand is expanded again by e, then all close.
+        press(&mut monitor, KeyCode::Enter);
+        press_char(&mut monitor, 'e');
+        let (again, ..) = draw(&mut monitor, 60, 24);
+        assert_eq!(again, all);
+        press_char(&mut monitor, 'e');
+        let (none, ..) = draw(&mut monitor, 60, 24);
+        assert_eq!(none, collapsed);
+        Ok(())
+    }
+
+    #[test]
+    fn a_click_selects_and_toggles_the_line_under_it() -> Result<()> {
+        let mut monitor = long_command_seat()?;
+        let (text, ..) = draw(&mut monitor, 60, 24);
+        let row = text
+            .lines()
+            .position(|line| line.contains("exit 2"))
+            .expect("the long command row") as u16;
+        click(&mut monitor, MouseKind::Down(MouseButton::Left), row);
+        let (open, ..) = draw(&mut monitor, 60, 24);
+        assert!(compact(&open).contains(&compact(LONG_COMMAND)), "{open}");
+        // The same row now holds the first part of the same line; a click closes it.
+        click(&mut monitor, MouseKind::Down(MouseButton::Left), row);
+        let (closed, ..) = draw(&mut monitor, 60, 24);
+        assert_eq!(closed, text);
+        // A click on a heading does nothing.
+        let heading = text
+            .lines()
+            .position(|line| line.contains("task-z"))
+            .unwrap() as u16;
+        click(&mut monitor, MouseKind::Down(MouseButton::Left), heading);
+        let (same, ..) = draw(&mut monitor, 60, 24);
+        assert_eq!(same, text);
+        Ok(())
+    }
+
+    #[test]
+    fn the_expanded_text_is_exactly_the_text_the_collapsed_line_cuts() {
+        // The monitor shows the command it was given (pmux already redacted
+        // it); wrapping neither adds nor drops a character of it.
+        for width in [1, 7, 12, 40] {
+            let rows = wrap_rows(LONG_COMMAND, width, width + 3);
+            assert_eq!(rows.concat(), LONG_COMMAND, "width {width}");
+            assert!(rows[0].chars().count() <= width.max(1));
+            assert!(rows[1..].iter().all(|row| row.chars().count() <= width + 3));
+        }
+        // No room beside the timing column: the text starts on the next row.
+        let rows = wrap_rows("abc def", 0, 4);
+        assert_eq!(rows[0], "");
+        assert_eq!(rows[1..].concat(), "abc def");
+    }
+
+    #[test]
+    fn wide_characters_wrap_by_terminal_cells_not_by_character_count() {
+        use prismattyc_core::line_display_width;
+        // Each CJK character is two cells wide: four cells hold two of them.
+        let rows = wrap_rows("資料/output.txt", 4, 4);
+        assert_eq!(rows.concat(), "資料/output.txt");
+        assert_eq!(rows[0], "資料");
+        for (width, text) in [
+            (4, "資料/output.txt"),
+            (5, "日本語のファイル名.log"),
+            (3, "a資b料c"),
+        ] {
+            let rows = wrap_rows(text, width, width);
+            assert_eq!(rows.concat(), text, "width {width}");
+            assert!(
+                rows.iter().all(|row| line_display_width(row) <= width),
+                "width {width}: {rows:?}"
+            );
+        }
+        // A single wide character in a one-cell budget still advances.
+        assert_eq!(wrap_rows("資料", 1, 1), vec!["資", "料"]);
+    }
+
+    #[test]
+    fn the_selected_line_scrolls_into_view_when_expanded_lines_fill_the_pane() -> Result<()> {
+        let mut monitor = long_command_seat()?;
+        press_char(&mut monitor, 'e');
+        press(&mut monitor, KeyCode::Down);
+        let (text, ..) = draw(&mut monitor, 40, 12);
+        assert!(text.contains("exit 2"), "{text}");
+        press(&mut monitor, KeyCode::Up);
+        let (text, ..) = draw(&mut monitor, 40, 12);
+        assert!(text.contains(" ls"), "{text}");
+        Ok(())
     }
 }

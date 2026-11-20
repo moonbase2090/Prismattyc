@@ -365,6 +365,22 @@ upload response and captured host frames from an allocated desktop.
 
 ## Verify bundles and updater migration
 
+Run the CLI restart check in clean macOS and Windows VMs at the PR head.
+Prepare the reviewed bundle with the Launch recipe. Build and run the check
+with the guest's native toolchain.
+
+```sh
+python3 scripts/test-plugin-runtime.py --bundle "$verify_bundle" \
+  --feature restart-migration --out "$verify_evidence/cli-plugin-migration"
+```
+
+On Windows, use `python` and PowerShell paths. Require a live session to
+preserve the old daemon and report plug-in migration as `pending`. After the
+session stops, require `pmux restart --daemon` to report `reconciled`, with the
+enabled monitor on the newer bundled digest and its original grant. The
+explicitly disabled connector must stay disabled. Keep the before, deferred,
+restart, and after JSON files as receipts.
+
 Physical metadata must come from each executable before installed forwarding:
 
 ```sh

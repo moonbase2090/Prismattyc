@@ -2,17 +2,18 @@
 #![cfg(unix)]
 
 use std::path::Path;
-use std::process::Command;
 
 fn run(case: &str) -> serde_json::Value {
     let script =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/native/login-restore-e2e.py");
     let bins = Path::new(env!("CARGO_BIN_EXE_pmux")).parent().unwrap();
-    let output = Command::new("python3")
-        .arg(script)
-        .args(["--bins", bins.to_str().unwrap(), "--case", case])
-        .output()
-        .expect("run isolated restart test");
+    let output = prismattyc_process::spawn(
+        prismattyc_process::capture_command("python3")
+            .arg(script)
+            .args(["--bins", bins.to_str().unwrap(), "--case", case]),
+    )
+    .and_then(std::process::Child::wait_with_output)
+    .expect("run isolated restart test");
     assert!(
         output.status.success(),
         "{}",

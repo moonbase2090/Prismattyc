@@ -90,9 +90,8 @@ fn attach_all(executable: &Path, socket: &Path) -> Result<(std::process::Child, 
     for (id, name) in &sessions {
         command.args(["--attach-session", id, "--attach-title", name]);
     }
-    let mut child = command
-        .spawn()
-        .context("could not open the attached window")?;
+    let mut child =
+        prismattyc_process::spawn(&mut command).context("could not open the attached window")?;
     let started = Instant::now();
     let ready = loop {
         if let Some(status) = child.try_wait()? {

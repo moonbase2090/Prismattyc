@@ -10,3 +10,6 @@ description = "Small Windows cmd-directory forwarder. The file name selects ../b
 [[bin]]
 name = "prismattyc-cmd-forwarder"
 path = "src/main.rs"
+
+[dependencies]
+prismattyc-process = { path = "../prismattyc-process" }

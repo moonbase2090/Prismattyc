@@ -224,11 +224,11 @@ fn blocked_checkpoint_writer_does_not_block_control_requests() {
     let socket = socket_path();
     let fifo = persist_path(&data.0).with_extension("json.tmp");
     std::fs::create_dir_all(fifo.parent().unwrap()).unwrap();
-    assert!(Command::new("mkfifo")
-        .arg(&fifo)
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        prismattyc_process::status(Command::new("mkfifo").arg(&fifo))
+            .unwrap()
+            .success()
+    );
     let mut reader = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK)
@@ -368,19 +368,20 @@ fn start_server(socket: &Path, data: &Path, program: &str, argv: &[&str]) -> Ser
     );
     clear_command_env(&mut command);
     let guard = ServerGuard {
-        child: command
-            .arg("--socket")
-            .arg(socket)
-            .arg("--")
-            .arg(program)
-            .args(argv)
-            .env("XDG_DATA_HOME", data)
-            .env("PMUX_PANE_LOG", persist_path(data))
-            .env("PMUX_SESSION_AGENTS", data.join("session-agents.json"))
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn pmuxd"),
+        child: prismattyc_process::spawn(
+            command
+                .arg("--socket")
+                .arg(socket)
+                .arg("--")
+                .arg(program)
+                .args(argv)
+                .env("XDG_DATA_HOME", data)
+                .env("PMUX_PANE_LOG", persist_path(data))
+                .env("PMUX_SESSION_AGENTS", data.join("session-agents.json"))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .expect("spawn pmuxd"),
         socket: socket.to_path_buf(),
     };
     for _ in 0..100 {

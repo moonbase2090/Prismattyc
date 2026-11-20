@@ -13,6 +13,7 @@ pub enum Request {
         refresh: bool,
     },
     List,
+    StartupReconciliation,
     Endpoints,
     Inspect {
         id: String,
@@ -118,6 +119,10 @@ pub enum Reply {
     List {
         installed: Vec<Installed>,
         states: Vec<Status>,
+    },
+    StartupReconciliation {
+        changed: Vec<String>,
+        failures: Vec<String>,
     },
     Inspection {
         state: Status,

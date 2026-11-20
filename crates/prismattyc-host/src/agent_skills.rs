@@ -68,9 +68,8 @@ pub fn start(config_enabled: bool, pmux: std::path::PathBuf) {
         .spawn(move || {
             let result = state_file.and_then(|state_file| {
                 install_once(&state_file, VERSION, false, || {
-                    let output = std::process::Command::new(&pmux)
-                        .args(["skills", "install", "--agent", "detected"])
-                        .output()
+                    let output = prismattyc_process::spawn(prismattyc_process::capture_command(&pmux)
+                        .args(["skills", "install", "--agent", "detected"])).and_then(std::process::Child::wait_with_output)
                         .map_err(|error| {
                             anyhow::anyhow!("run `pmux skills install --agent detected`: {error}")
                         })?;

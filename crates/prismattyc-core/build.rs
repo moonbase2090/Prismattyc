@@ -2,7 +2,6 @@
 //! even if the Cargo semver has not.
 
 use std::path::PathBuf;
-use std::process::Command;
 
 fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -16,15 +15,17 @@ fn main() {
         println!("cargo:rerun-if-changed={}", refs.display());
     }
 
-    let hash = Command::new("git")
-        .args(["rev-parse", "--short=12", "HEAD"])
-        .current_dir(&repo)
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .and_then(|out| String::from_utf8(out.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_default();
+    let hash = prismattyc_process::spawn(
+        prismattyc_process::capture_command("git")
+            .args(["rev-parse", "--short=12", "HEAD"])
+            .current_dir(&repo),
+    )
+    .and_then(std::process::Child::wait_with_output)
+    .ok()
+    .filter(|out| out.status.success())
+    .and_then(|out| String::from_utf8(out.stdout).ok())
+    .map(|s| s.trim().to_string())
+    .filter(|s| !s.is_empty())
+    .unwrap_or_default();
     println!("cargo:rustc-env=PRISMATTYC_GIT_HASH={hash}");
 }

@@ -45,7 +45,6 @@ pub fn install(runtime: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
 
     #[test]
     fn panic_child() {
@@ -76,12 +75,14 @@ mod tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         }
         for _ in 0..2 {
-            let output = Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "panic_log::tests::panic_child", "--nocapture"])
-                .env("PRISMATTYC_PANIC_TEST_DIR", &runtime)
-                .env("RUST_BACKTRACE", "0")
-                .output()
-                .unwrap();
+            let output = prismattyc_process::spawn(
+                prismattyc_process::capture_command(std::env::current_exe().unwrap())
+                    .args(["--exact", "panic_log::tests::panic_child", "--nocapture"])
+                    .env("PRISMATTYC_PANIC_TEST_DIR", &runtime)
+                    .env("RUST_BACKTRACE", "0"),
+            )
+            .and_then(std::process::Child::wait_with_output)
+            .unwrap();
             assert_eq!(output.status.code(), Some(101));
             assert!(
                 String::from_utf8_lossy(&output.stderr).contains("host panic persistence proof")

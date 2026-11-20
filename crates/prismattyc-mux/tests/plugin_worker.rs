@@ -212,14 +212,15 @@ fn revocation_does_not_wait_for_a_pending_host_import_or_publish_its_reply() {
 #[test]
 fn worker_parent_eof_exits_without_acquiring_a_daemon_lock_or_spawning_a_shell() {
     use std::process::{Command, Stdio};
-    let mut child = Command::new(executable())
-        .arg(INTERNAL_WORKER_ARG)
-        .env_clear()
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut child = prismattyc_process::spawn(
+        Command::new(executable())
+            .arg(INTERNAL_WORKER_ARG)
+            .env_clear()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
     drop(child.stdin.take());
     let start = Instant::now();
     while child.try_wait().unwrap().is_none() {

@@ -44,14 +44,15 @@ impl Fixture {
             server: None,
         };
         f.server = Some(
-            f.command(env!("CARGO_BIN_EXE_pmuxd"))
-                .arg("--socket")
-                .arg(&f.socket)
-                .args(["--", "/bin/sh", "-c", "exec sleep 999"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap(),
+            prismattyc_process::spawn(
+                f.command(env!("CARGO_BIN_EXE_pmuxd"))
+                    .arg("--socket")
+                    .arg(&f.socket)
+                    .args(["--", "/bin/sh", "-c", "exec sleep 999"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null()),
+            )
+            .unwrap(),
         );
         let deadline = Instant::now() + Duration::from_secs(5);
         while UnixStream::connect(&f.socket).is_err() {
@@ -69,7 +70,7 @@ impl Fixture {
     }
 
     fn command(&self, binary: &str) -> Command {
-        let mut cmd = Command::new(binary);
+        let mut cmd = prismattyc_process::capture_command(binary);
         support::clear_command_env(&mut cmd);
         cmd.env("XDG_DATA_HOME", &self.dir)
             .env("XDG_CONFIG_HOME", self.dir.join("config"))
@@ -81,9 +82,8 @@ impl Fixture {
     }
 
     fn cli(&self, args: &[&str]) -> Output {
-        self.command(env!("CARGO_BIN_EXE_pmux"))
-            .args(args)
-            .output()
+        prismattyc_process::spawn(self.command(env!("CARGO_BIN_EXE_pmux")).args(args))
+            .and_then(std::process::Child::wait_with_output)
             .unwrap()
     }
 
@@ -244,18 +244,20 @@ fn space_id_attach_requires_ownership_and_never_starts_a_daemon() {
     let other = space("other").clone();
     let session = work.active_session.0.to_string();
     fn attach(f: &Fixture, session: &str, space_id: &str) -> Output {
-        f.command(env!("CARGO_BIN_EXE_pmux"))
-            .env("PMUX_ATTACH", env!("CARGO_BIN_EXE_pmux-attach"))
-            .args([
-                "attach",
-                "--session-id",
-                session,
-                "--space-id",
-                space_id,
-                "--json",
-            ])
-            .output()
-            .unwrap()
+        prismattyc_process::spawn(
+            f.command(env!("CARGO_BIN_EXE_pmux"))
+                .env("PMUX_ATTACH", env!("CARGO_BIN_EXE_pmux-attach"))
+                .args([
+                    "attach",
+                    "--session-id",
+                    session,
+                    "--space-id",
+                    space_id,
+                    "--json",
+                ]),
+        )
+        .and_then(std::process::Child::wait_with_output)
+        .unwrap()
     }
 
     let owned = attach(&f, &session, work.id.as_str());

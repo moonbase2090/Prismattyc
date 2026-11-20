@@ -723,21 +723,6 @@ mod windows {
 }
 
 #[cfg(unix)]
-pub use std::os::unix::process::CommandExt as Exec;
-#[cfg(windows)]
-pub trait Exec {
-    fn exec(&mut self) -> io::Error;
-}
-#[cfg(windows)]
-impl Exec for std::process::Command {
-    fn exec(&mut self) -> io::Error {
-        match self.status() {
-            Ok(status) => std::process::exit(status.code().unwrap_or(1)),
-            Err(error) => error,
-        }
-    }
-}
-#[cfg(unix)]
 pub use rustix::process::Signal;
 #[cfg(windows)]
 #[derive(Clone, Copy)]
@@ -785,6 +770,13 @@ pub fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Com
     command
 }
 
+/// Capture output without allocating a console window on Windows.
+pub fn hidden_capture_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let mut command = prismattyc_process::capture_command(program);
+    hide_console(&mut command);
+    command
+}
+
 /// Hide a console child's window. No effect on Unix. Do not call this on a
 /// command that then goes through [`detach_command`]: the later call replaces
 /// these flags.
@@ -822,6 +814,37 @@ pub fn detach_command(command: &mut std::process::Command) {
     }
 }
 
+/// Stop this process's standard handles from passing to children unasked.
+///
+/// A Windows child inherits every inheritable handle its parent holds, not
+/// only the three it is given. A command whose output a caller reads through
+/// a pipe would then pass that pipe on to anything it starts, and a daemon
+/// started that way keeps the caller waiting for the end of output until the
+/// daemon exits. A child that asks to inherit a standard handle still gets
+/// it: the standard library duplicates the handle for that child. Elsewhere
+/// this does nothing; Unix descriptors above 2 are closed on exec already.
+pub fn keep_std_handles_private() {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{
+            SetHandleInformation, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+        };
+        use windows_sys::Win32::System::Console::{
+            GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+        };
+        for id in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            // SAFETY: GetStdHandle has no preconditions; SetHandleInformation
+            // only changes flags on a valid handle this process owns.
+            unsafe {
+                let handle = GetStdHandle(id);
+                if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
+                    SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
+                }
+            }
+        }
+    }
+}
+
 /// Detach `command` and spawn it without inheriting the caller's stdio pipes.
 ///
 /// On Windows, `Command` sets `bInheritHandles`, so a detached `pmuxd` keeps
@@ -838,7 +861,7 @@ pub fn spawn_detached(command: &mut std::process::Command) -> io::Result<std::pr
     }
     #[cfg(not(windows))]
     {
-        command.spawn()
+        prismattyc_process::spawn(command)
     }
 }
 
@@ -916,7 +939,7 @@ fn spawn_without_parent_stdio(
                 restore.restore[index] = true;
             }
         }
-        let child = command.spawn();
+        let child = prismattyc_process::spawn(command);
         drop(restore);
         child
     }
@@ -1149,7 +1172,7 @@ pub fn spawn_probe(
             return Err(io::Error::last_os_error());
         }
         command.creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW);
-        let mut child = command.spawn()?;
+        let mut child = prismattyc_process::spawn(command)?;
         if AssignProcessToJobObject(job.0, child.as_raw_handle()) == 0 {
             let error = io::Error::last_os_error();
             let _ = child.kill();

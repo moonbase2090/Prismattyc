@@ -13,7 +13,7 @@ Run these commands from the repository root:
 cargo fmt --all --check
 cargo check --workspace --locked
 cargo test --workspace --locked -- --test-threads=1
-cargo clippy --workspace --all-targets --locked -- -D warnings
+python3 scripts/check-process-boundary.py
 ```
 
 Use one test thread for the full workspace. Some tests start real processes

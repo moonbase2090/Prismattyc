@@ -60,25 +60,141 @@ fn start_server_with_env(socket: &Path, root: &Path, env: &[(&str, &str)]) -> Se
     for (key, value) in env {
         command.env(key, value);
     }
-    let guard = ServerGuard {
-        child: command
-            .arg("--socket")
-            .arg(socket)
-            .args(["--", "/bin/sh", "-c", "exec sleep 999"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn pmuxd"),
+    let stderr_path = root.join("daemon.stderr");
+    let mut guard = ServerGuard {
+        child: prismattyc_process::spawn(
+            command
+                .arg("--socket")
+                .arg(socket)
+                .args(["--", "/bin/sh", "-c", "exec sleep 999"])
+                .stdout(Stdio::piped())
+                .stderr(std::fs::File::create(&stderr_path).unwrap()),
+        )
+        .expect("spawn pmuxd"),
         socket: socket.to_path_buf(),
         root: root.to_path_buf(),
     };
-    for _ in 0..100 {
-        if socket.exists() {
-            return guard;
-        }
-        std::thread::sleep(Duration::from_millis(20));
+    if let Err(error) = wait_for_server_ready(&mut guard.child, socket, &stderr_path) {
+        panic!("{error}");
     }
-    panic!("server did not publish {}", socket.display());
+    guard
+}
+
+fn wait_for_server_ready(
+    child: &mut Child,
+    socket: &Path,
+    stderr_path: &Path,
+) -> Result<(), String> {
+    use std::io::{Error, ErrorKind, Read};
+    use std::os::fd::AsRawFd;
+
+    let mut stdout = Vec::new();
+    let result = (|| {
+        let fd = child
+            .stdout
+            .as_ref()
+            .expect("capture pmuxd stdout")
+            .as_raw_fd();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags == -1 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1
+        {
+            return Err(Error::last_os_error());
+        }
+        let ready = format!("{}\n", socket.display());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(Error::new(
+                    ErrorKind::TimedOut,
+                    "readiness deadline elapsed",
+                ));
+            }
+            let mut event = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let count = unsafe { libc::poll(&mut event, 1, remaining.as_millis().max(1) as i32) };
+            if count == -1 {
+                let error = Error::last_os_error();
+                if error.kind() == ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error);
+            }
+            if count == 0 {
+                return Err(Error::new(
+                    ErrorKind::TimedOut,
+                    "readiness deadline elapsed",
+                ));
+            }
+            let mut bytes = [0; 4096];
+            match child.stdout.as_mut().unwrap().read(&mut bytes) {
+                Ok(0) => {
+                    return Err(Error::new(
+                        ErrorKind::UnexpectedEof,
+                        "pmuxd closed stdout before announcing readiness",
+                    ));
+                }
+                Ok(count) => stdout.extend_from_slice(&bytes[..count]),
+                Err(error)
+                    if matches!(error.kind(), ErrorKind::Interrupted | ErrorKind::WouldBlock) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
+            if stdout
+                .split_inclusive(|byte| *byte == b'\n')
+                .any(|line| line == ready.as_bytes())
+            {
+                return Ok(());
+            }
+        }
+    })();
+    result.map_err(|error| {
+        let status = match child.try_wait() {
+            Ok(Some(status)) => status.to_string(),
+            Ok(None) => "still running".into(),
+            Err(error) => format!("could not read status: {error}"),
+        };
+        let stderr = std::fs::read_to_string(stderr_path)
+            .unwrap_or_else(|error| format!("could not read stderr: {error}"));
+        format!(
+            "pmuxd did not announce readiness on {}: {error}; status={status}; stdout={:?}; stderr={stderr}",
+            socket.display(),
+            String::from_utf8_lossy(&stdout),
+        )
+    })
+}
+
+#[test]
+fn an_existing_socket_is_not_a_daemon_readiness_signal() {
+    use std::os::unix::net::UnixListener;
+
+    let root = temp_root("startup-failure");
+    let socket = socket_path(&root);
+    let stale = UnixListener::bind(&socket).unwrap();
+    let stderr_path = root.join("daemon.stderr");
+    let mut child = prismattyc_process::spawn(Command::new("/bin/sh")
+        .args([
+            "-c",
+            "printf 'STARTUP_STDOUT_LITERAL\\n'; printf 'STARTUP_ERROR_LITERAL\\n' >&2; exit 17",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(std::fs::File::create(&stderr_path).unwrap()))
+        .unwrap();
+    assert_eq!(child.wait().unwrap().code(), Some(17));
+
+    let error = wait_for_server_ready(&mut child, &socket, &stderr_path)
+        .expect_err("a socket owned by another process is not readiness");
+    assert!(error.contains("exit status: 17"), "{error}");
+    assert!(error.contains("STARTUP_STDOUT_LITERAL"), "{error}");
+    assert!(error.contains("STARTUP_ERROR_LITERAL"), "{error}");
+
+    drop(stale);
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 fn apply_isolation(command: &mut Command, root: &Path) {
@@ -97,7 +213,7 @@ fn apply_isolation(command: &mut Command, root: &Path) {
 }
 
 fn pmux(socket: &Path, root: &Path, extra: &[(&str, &str)], args: &[&str]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_pmux"));
+    let mut command = prismattyc_process::capture_command(env!("CARGO_BIN_EXE_pmux"));
     clear_command_env(&mut command);
     apply_isolation(&mut command, root);
     command
@@ -108,7 +224,9 @@ fn pmux(socket: &Path, root: &Path, extra: &[(&str, &str)], args: &[&str]) -> Ou
     for (key, value) in extra {
         command.env(key, value);
     }
-    command.output().expect("run pmux")
+    prismattyc_process::spawn(&mut command)
+        .and_then(std::process::Child::wait_with_output)
+        .expect("run pmux")
 }
 
 fn text(output: &Output) -> String {
@@ -173,17 +291,17 @@ fn restart_plan_never_reports_a_locked_unresponsive_daemon_as_empty() {
     struct Resume(u32);
     impl Drop for Resume {
         fn drop(&mut self) {
-            let _ = Command::new("kill")
-                .args(["-CONT", &self.0.to_string()])
-                .status();
+            let _ = prismattyc_process::status(
+                Command::new("kill").args(["-CONT", &self.0.to_string()]),
+            );
         }
     }
     let _resume = Resume(pid);
-    assert!(Command::new("kill")
-        .args(["-STOP", &pid.to_string()])
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        prismattyc_process::status(Command::new("kill").args(["-STOP", &pid.to_string()]))
+            .unwrap()
+            .success()
+    );
     let output = pmux(&socket, &root, &[], &["restart", "--plan", "--json"]);
     fail(&output, "Could not read running sessions");
     let detail = text(&output);
@@ -198,10 +316,12 @@ fn restart_plan_never_reports_a_locked_unresponsive_daemon_as_empty() {
         .as_str()
         .unwrap()
         .contains(&format!("pid {pid}")));
-    let mut duplicate = Command::new(env!("CARGO_BIN_EXE_pmuxd"));
+    let mut duplicate = prismattyc_process::capture_command(env!("CARGO_BIN_EXE_pmuxd"));
     clear_command_env(&mut duplicate);
     apply_isolation(&mut duplicate, &root);
-    let refused = duplicate.arg("--socket").arg(&socket).output().unwrap();
+    let refused = prismattyc_process::spawn(duplicate.arg("--socket").arg(&socket))
+        .and_then(std::process::Child::wait_with_output)
+        .unwrap();
     fail(&refused, "daemon lock");
     assert!(
         text(&refused).contains(&format!("pid {pid}")),
@@ -469,16 +589,18 @@ fn session_configuration_restores_names_directories_and_commands_without_replay(
     let cwd = root.join("project");
     std::fs::create_dir(&cwd).unwrap();
     let cwd = cwd.canonicalize().unwrap();
-    let mut create = Command::new(env!("CARGO_BIN_EXE_pmux"));
+    let mut create = prismattyc_process::capture_command(env!("CARGO_BIN_EXE_pmux"));
     clear_command_env(&mut create);
     apply_isolation(&mut create, &root);
-    ok(&create
-        .current_dir(&cwd)
-        .arg("--socket")
-        .arg(&socket)
-        .args(["new", "--no-attach", "work"])
-        .output()
-        .unwrap());
+    ok(
+        &prismattyc_process::spawn(create.current_dir(&cwd).arg("--socket").arg(&socket).args([
+            "new",
+            "--no-attach",
+            "work",
+        ]))
+        .and_then(std::process::Child::wait_with_output)
+        .unwrap(),
+    );
     let file = root.join("configuration.json");
     let launch = "printf restored >> launches".to_string();
     ok(&pmux(
@@ -558,16 +680,18 @@ fn restore_replays_the_saved_command_into_a_pane_that_looks_busy() {
     let cwd = root.join("project");
     std::fs::create_dir(&cwd).unwrap();
     let cwd = cwd.canonicalize().unwrap();
-    let mut create = Command::new(env!("CARGO_BIN_EXE_pmux"));
+    let mut create = prismattyc_process::capture_command(env!("CARGO_BIN_EXE_pmux"));
     clear_command_env(&mut create);
     apply_isolation(&mut create, &root);
-    ok(&create
-        .current_dir(&cwd)
-        .arg("--socket")
-        .arg(&socket)
-        .args(["new", "--no-attach", "work"])
-        .output()
-        .unwrap());
+    ok(
+        &prismattyc_process::spawn(create.current_dir(&cwd).arg("--socket").arg(&socket).args([
+            "new",
+            "--no-attach",
+            "work",
+        ]))
+        .and_then(std::process::Child::wait_with_output)
+        .unwrap(),
+    );
     let file = root.join("configuration.json");
     let launch = "printf restored >> launches".to_string();
     ok(&pmux(
@@ -661,6 +785,138 @@ fn a_saved_agent_resumes_instead_of_replaying_its_startup_prompt() {
     assert!(
         !command.contains("secret"),
         "the prompt was saved: {command}"
+    );
+    drop(server);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn hermes_saved_restart_does_not_replay_the_startup_query() {
+    use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
+    use std::os::unix::net::UnixListener;
+
+    let root = temp_root("hermes-restart");
+    let socket = socket_path(&root);
+    let observations = root.join("argv.sock");
+    let listener = UnixListener::bind(&observations).unwrap();
+    let await_readable = |fd: BorrowedFd<'_>| {
+        let mut ready = libc::pollfd {
+            fd: fd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert_eq!(
+            unsafe { libc::poll(&mut ready, 1, 20_000) },
+            1,
+            "no launch signal"
+        );
+    };
+    let receive_argv = || {
+        await_readable(listener.as_fd());
+        let (peer, _) = listener.accept().unwrap();
+        await_readable(peer.as_fd());
+        serde_json::from_reader::<_, Vec<String>>(peer).unwrap()
+    };
+    let fixture = root.join("hermes");
+    std::fs::write(
+        &fixture,
+        r#"#!/usr/bin/env python3
+import json, os, socket, sys
+with socket.socket(socket.AF_UNIX) as peer:
+    peer.connect(os.environ["FIXTURE_ARGV_SOCKET"])
+    peer.sendall(json.dumps(sys.argv[1:]).encode())
+# Keep this fixture child alive until its owning private daemon stops it.
+os.execv("/bin/sleep", ["sleep", "999"])
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        &fixture,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let server = start_server_with_env(
+        &socket,
+        &root,
+        &[("FIXTURE_ARGV_SOCKET", observations.to_str().unwrap())],
+    );
+    ok(&pmux(
+        &socket,
+        &root,
+        &[],
+        &[
+            "new",
+            "--no-attach",
+            "--no-agent",
+            "work",
+            "--",
+            fixture.to_str().unwrap(),
+            "--profile",
+            "demo",
+            "chat",
+            "--resume",
+            "conversation-123",
+            "--model",
+            "model one",
+            "--provider",
+            "custom",
+            "-q",
+            "run the original task",
+        ],
+    ));
+    assert_eq!(
+        receive_argv(),
+        [
+            "--profile",
+            "demo",
+            "chat",
+            "--resume",
+            "conversation-123",
+            "--model",
+            "model one",
+            "--provider",
+            "custom",
+            "-q",
+            "run the original task",
+        ]
+    );
+    let file = root.join("configuration.json");
+    ok(&pmux(
+        &socket,
+        &root,
+        &[],
+        &["session-config", "save", file.to_str().unwrap()],
+    ));
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    let work = saved["space"]["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["name"] == "work")
+        .unwrap();
+    ok(&pmux(&socket, &root, &[], &["stop", "work"]));
+    ok(&pmux(
+        &socket,
+        &root,
+        &[],
+        &["session-config", "restore", file.to_str().unwrap()],
+    ));
+    assert_eq!(
+        receive_argv(),
+        [
+            "chat",
+            "--resume=conversation-123",
+            "--profile",
+            "demo",
+            "--model",
+            "model one",
+            "--provider",
+            "custom",
+        ]
+    );
+    assert_eq!(
+        work["windows"][0]["root"]["command"],
+        format!("{} chat --resume=conversation-123 --profile demo --model 'model one' --provider custom", fixture.display())
     );
     drop(server);
     std::fs::remove_dir_all(root).unwrap();
@@ -1115,16 +1371,18 @@ fn restore_skips_a_saved_command_with_a_line_break_and_restores_the_rest() {
         let cwd = root.join(name);
         std::fs::create_dir(&cwd).unwrap();
         let cwd = cwd.canonicalize().unwrap();
-        let mut create = Command::new(env!("CARGO_BIN_EXE_pmux"));
+        let mut create = prismattyc_process::capture_command(env!("CARGO_BIN_EXE_pmux"));
         clear_command_env(&mut create);
         apply_isolation(&mut create, &root);
-        ok(&create
-            .current_dir(&cwd)
-            .arg("--socket")
-            .arg(&socket)
-            .args(["new", "--no-attach", name])
-            .output()
-            .unwrap());
+        ok(&prismattyc_process::spawn(
+            create.current_dir(&cwd).arg("--socket").arg(&socket).args([
+                "new",
+                "--no-attach",
+                name,
+            ]),
+        )
+        .and_then(std::process::Child::wait_with_output)
+        .unwrap());
         dirs.push(cwd);
     }
     let file = root.join("configuration.json");

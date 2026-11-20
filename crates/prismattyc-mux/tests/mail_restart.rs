@@ -69,16 +69,17 @@ fn start_server(socket: &Path, data: &Path) -> ServerGuard {
     let mut command = Command::new(env!("CARGO_BIN_EXE_pmuxd"));
     clear_command_env(&mut command);
     let guard = ServerGuard {
-        child: command
-            .arg("--socket")
-            .arg(socket)
-            .args(["--", "/bin/sh", "-c", "exec sleep 999"])
-            .env("XDG_DATA_HOME", data)
-            .env("PMUX_SESSION_AGENTS", data.join("session-agents.json"))
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn pmuxd"),
+        child: prismattyc_process::spawn(
+            command
+                .arg("--socket")
+                .arg(socket)
+                .args(["--", "/bin/sh", "-c", "exec sleep 999"])
+                .env("XDG_DATA_HOME", data)
+                .env("PMUX_SESSION_AGENTS", data.join("session-agents.json"))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .expect("spawn pmuxd"),
         socket: socket.to_path_buf(),
     };
     for _ in 0..100 {

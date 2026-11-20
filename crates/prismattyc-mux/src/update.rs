@@ -116,10 +116,7 @@ fn find_repo() -> Result<PathBuf> {
 }
 
 fn run_git(repo: &Path, args: &[&str]) -> Result<()> {
-    let status = Command::new("git")
-        .args(args)
-        .current_dir(repo)
-        .status()
+    let status = prismattyc_process::status(Command::new("git").args(args).current_dir(repo))
         .with_context(|| format!("git {}", args.join(" ")))?;
     if !status.success() {
         bail!("git {} failed ({status})", args.join(" "));
@@ -128,11 +125,13 @@ fn run_git(repo: &Path, args: &[&str]) -> Result<()> {
 }
 
 fn git_stdout(repo: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(repo)
-        .output()
-        .with_context(|| format!("git {}", args.join(" ")))?;
+    let out = prismattyc_process::spawn(
+        prismattyc_process::capture_command("git")
+            .args(args)
+            .current_dir(repo),
+    )
+    .and_then(std::process::Child::wait_with_output)
+    .with_context(|| format!("git {}", args.join(" ")))?;
     if !out.status.success() {
         bail!(
             "git {} failed: {}",
@@ -153,13 +152,15 @@ impl NativeBuild {
         let python = if cfg!(windows) { "python" } else { "python3" };
         let helper = repo.join("scripts/release/plugin_bundle_provenance.py");
         let run = |operation: &str| -> Result<String> {
-            let result = Command::new(python)
-                .arg(&helper)
-                .arg(operation)
-                .current_dir(repo)
-                .stderr(std::process::Stdio::inherit())
-                .output()
-                .context("prepare the source build's verified plug-in bundle")?;
+            let result = prismattyc_process::spawn(
+                prismattyc_process::capture_command(python)
+                    .arg(&helper)
+                    .arg(operation)
+                    .current_dir(repo)
+                    .stderr(std::process::Stdio::inherit()),
+            )
+            .and_then(std::process::Child::wait_with_output)
+            .context("prepare the source build's verified plug-in bundle")?;
             anyhow::ensure!(
                 result.status.success(),
                 "plug-in build preparation failed before cargo installation"
@@ -190,10 +191,7 @@ impl NativeBuild {
 }
 
 fn cargo_install(repo: &Path, build: &NativeBuild, args: &[&str]) -> Result<()> {
-    let status = build
-        .command("cargo", repo)
-        .args(args)
-        .status()
+    let status = prismattyc_process::status(build.command("cargo", repo).args(args))
         .with_context(|| format!("cargo {}", args.join(" ")))?;
     if !status.success() {
         bail!("cargo {} failed ({status})", args.join(" "));
@@ -334,7 +332,7 @@ fn run_source_update(args: impl IntoIterator<Item = impl AsRef<str>>) -> Result<
 fn rebuild_macos_bundle(repo: &Path, build: &NativeBuild) -> bool {
     let script = repo.join("scripts/install-prismattyc-host-macos.sh");
     eprintln!("prismattyc update: rebuilding macOS Prismattyc.app bundle");
-    match build.command("bash", repo).arg(&script).status() {
+    match prismattyc_process::status(build.command("bash", repo).arg(&script)) {
         Ok(status) if status.success() => true,
         Ok(status) => {
             eprintln!(
@@ -368,7 +366,7 @@ fn rebuild_macos_bundle(_repo: &Path, _build: &NativeBuild) -> bool {
 fn install_man_pages(repo: &Path) {
     let script = repo.join("scripts/install-man.sh");
     eprintln!("prismattyc update: installing man page");
-    match Command::new("bash").arg(&script).current_dir(repo).status() {
+    match prismattyc_process::status(Command::new("bash").arg(&script).current_dir(repo)) {
         Ok(status) if status.success() => {}
         Ok(status) => eprintln!(
             "prismattyc update: warning: man page install failed ({status}); \

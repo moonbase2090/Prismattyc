@@ -53,19 +53,20 @@ fn start_server(socket: &Path, data: &Path) -> ServerGuard {
     let mut command = Command::new(env!("CARGO_BIN_EXE_pmuxd"));
     clear_command_env(&mut command);
     let guard = ServerGuard {
-        child: command
-            .arg("--socket")
-            .arg(socket)
-            .args(["--", "/bin/sh", "-c", "exec sleep 999"])
-            .env("SHELL", "/bin/sh")
-            .env("HOME", data)
-            .env("XDG_CONFIG_HOME", data.join("config"))
-            .env("XDG_DATA_HOME", data)
-            .env("PMUX_SESSION_AGENTS", data.join("session-agents.json"))
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn pmuxd"),
+        child: prismattyc_process::spawn(
+            command
+                .arg("--socket")
+                .arg(socket)
+                .args(["--", "/bin/sh", "-c", "exec sleep 999"])
+                .env("SHELL", "/bin/sh")
+                .env("HOME", data)
+                .env("XDG_CONFIG_HOME", data.join("config"))
+                .env("XDG_DATA_HOME", data)
+                .env("PMUX_SESSION_AGENTS", data.join("session-agents.json"))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .expect("spawn pmuxd"),
         socket: socket.to_path_buf(),
         data: data.to_path_buf(),
     };
@@ -83,7 +84,7 @@ fn pmux(socket: &Path, data: &Path, args: &[&str]) -> Output {
 }
 
 fn pmux_env(socket: &Path, data: &Path, extra: &[(&str, &str)], args: &[&str]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_pmux"));
+    let mut command = prismattyc_process::capture_command(env!("CARGO_BIN_EXE_pmux"));
     clear_command_env(&mut command);
     command
         .arg("--socket")
@@ -100,7 +101,9 @@ fn pmux_env(socket: &Path, data: &Path, extra: &[(&str, &str)], args: &[&str]) -
     for (key, value) in extra {
         command.env(key, value);
     }
-    command.output().expect("run pmux")
+    prismattyc_process::spawn(&mut command)
+        .and_then(std::process::Child::wait_with_output)
+        .expect("run pmux")
 }
 
 fn text(output: &Output) -> String {

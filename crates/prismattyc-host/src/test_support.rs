@@ -90,14 +90,15 @@ pub(crate) fn mux_bin_dir() -> &'static PathBuf {
             } else {
                 build.arg("build");
             }
-            let status = build
-                .args(["-p", "prismattyc-mux", "--bins", "--locked", "--profile"])
-                .arg(if profile == "debug" { "dev" } else { profile })
-                .arg("--target-dir")
-                .arg(&layout.target_dir)
-                .current_dir(workspace)
-                .status()
-                .expect("build private mux fixture binaries");
+            let status = prismattyc_process::status(
+                build
+                    .args(["-p", "prismattyc-mux", "--bins", "--locked", "--profile"])
+                    .arg(if profile == "debug" { "dev" } else { profile })
+                    .arg("--target-dir")
+                    .arg(&layout.target_dir)
+                    .current_dir(workspace),
+            )
+            .expect("build private mux fixture binaries");
             assert!(status.success(), "private mux fixture binary build failed");
         }
         for name in names {

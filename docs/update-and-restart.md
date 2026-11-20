@@ -30,17 +30,23 @@ also saves a snapshot first and reports where it was written or why it was not.
 
 ## Update and restart all components
 
-Choose **Update and restart all components** in the update panel. The panel
-checks the latest release and lists the running sessions. Continuing stops
-all programs in those sessions and restarts the app, including local terminals.
-Save unsaved work in your programs before continuing.
+Choose **Update and restart all components** in the update panel. The app
+checks the latest release and opens **Restart to update** with the installed
+and new versions (or **Restart components** when you already have the newest
+release). Restarting stops all programs in the running sessions and restarts
+the app, including local terminals. Save unsaved work in your programs first.
+
+The footer counts the running sessions. Choose **Show** (click it, or move to
+it and press Enter) to list their names, and **Hide** to fold the list again.
 
 Choose one of these actions:
 
-- **Save and continue** saves session names, working directories, foreground
-  commands, agent bindings, pane layouts, and Space ownership before updating.
-- **Continue without saving** updates and restarts without saving a session configuration.
-- **Cancel** leaves the sessions and running components alone.
+- **Save and restart** saves session names, working directories, foreground
+  commands, agent bindings, pane layouts, and Space ownership, so you can
+  recreate the sessions afterwards.
+- **Restart without saving** updates and restarts without saving a session
+  configuration. The sessions are discarded.
+- **Cancel** (or Esc) leaves the sessions and running components alone.
 
 The updater downloads and verifies the release before stopping sessions.
 It installs the release, restarts the daemon and supervised MCP adapters,
@@ -65,11 +71,16 @@ The configuration file stays available after restoration.
 For a program launched directly in a pane, saving preserves its original
 command and arguments. For an interactive shell, it captures the current
 foreground command instead. Known agents omit their startup prompt when
-restored. Claude and Codex keep an explicit saved conversation selector and
-recognized model, configuration, and permission options. Without a saved
-selector, Claude uses `--continue` and Codex uses `resume --last`. Other known
-agents reopen without startup arguments. For Claude and Codex, unknown options
-and subsequent arguments are omitted because their meaning cannot be determined
+restored. Claude, Codex, and Hermes keep an explicit saved conversation
+selector and recognized model, configuration, and permission options. Hermes
+also keeps its profile and provider options. Without a saved selector, Claude
+uses `--continue` and Codex uses `resume --last`. Hermes replaces a startup query
+with `chat --continue`. Without a query or selector, Hermes reopens an ordinary
+chat, which also works for profiles with no conversation history. Hermes drops
+query files, attachments, and single-query output modes. Its non-chat
+subcommands keep their arguments. Other known agents reopen
+without startup arguments. For Claude, Codex, and Hermes, unknown options and
+subsequent arguments are omitted because their meaning cannot be determined
 safely.
 
 Restore reports sessions with unavailable working directories and continues

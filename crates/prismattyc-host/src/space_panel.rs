@@ -838,7 +838,7 @@ fn command(host: &mut HostState, args: Vec<String>, kind: &'static str) {
     let socket = host_mux_socket();
     std::thread::spawn(move || {
         let result = (|| -> Result<Payload, String> {
-            let mut cmd = pmux_command();
+            let mut cmd = pmux_capture_command();
             if let Some(socket) = socket {
                 cmd.arg("--socket").arg(socket);
             }
@@ -846,9 +846,8 @@ fn command(host: &mut HostState, args: Vec<String>, kind: &'static str) {
             if kind == "maintenance" {
                 cmd.arg("--json");
             }
-            let output = cmd
-                .stdin(std::process::Stdio::null())
-                .output()
+            let output = prismattyc_process::spawn(cmd.stdin(std::process::Stdio::null()))
+                .and_then(std::process::Child::wait_with_output)
                 .map_err(|e| e.to_string())?;
             if !output.status.success() {
                 return Err(format!(
@@ -953,7 +952,8 @@ pub(super) fn status(host: &HostState) -> Option<serde_json::Value> {
     let (header, rows) = rows(host)?;
     Some(
         serde_json::json!({"header":header,"rows":rows.iter().map(|row| format!("{}: {}", row.name, row.describe)).collect::<Vec<_>>(),
-        "loading":host.space_panel.as_ref()?.pending.is_some()}),
+        "loading":host.space_panel.as_ref()?.pending.is_some(),
+        "selected":host.context_menu.as_ref().map(|menu| menu.selected)}),
     )
 }
 

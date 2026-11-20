@@ -186,6 +186,15 @@ def main():
             quartz.CFRelease(event)
         time.sleep(.15)
 
+    def choose_option(label):
+        """Pick a choice in the Update and restart modal by its label."""
+        rows = status()['restart_modal']['rows']
+        index = next(i for i, text in enumerate(rows) if text.startswith(label + ':'))
+        key(115)  # Home.
+        for _ in range(index):
+            key(125)  # Down.
+        key(36)  # Enter.
+
     def choose(label):
         def ready_rows():
             panel = status().get('space_details')
@@ -262,17 +271,17 @@ def main():
             key(32, (1 << 18) | (1 << 19))  # Ctrl-Alt-U.
             wait(lambda: status().get('space_details'), 'maintenance menu')
             choose('Update and restart all components')
-            wait(lambda: any('Save and continue:' in r for r in status()['space_details']['rows']), 'session consent')
+            wait(lambda: status().get('restart_modal'), 'session consent')
             capture('session-consent')
-            choose('Cancel')
+            choose_option('Cancel')
             assert json.loads(cli('versions'))['daemon']['pid'] == old_pid
             assert marker.read_text() == 'x'
             record('cancel preserves daemon and command')
             key(53)  # Escape.
             key(32, (1 << 18) | (1 << 19))
             choose('Update and restart all components')
-            wait(lambda: any('Save and continue:' in r for r in status()['space_details']['rows']), 'second consent')
-            choose('Save and continue')
+            wait(lambda: status().get('restart_modal'), 'second consent')
+            choose_option('Save and restart')
             wait(lambda: render_status()['host_instance'] != initial_instance and any('Restore sessions:' in r for r in (status().get('space_details') or {}).get('rows', [])), 'replacement host restore offer', timeout=90)
             (out / 'before-restore.json').write_text(json.dumps(snapshot(), indent=2))
             assert not any(s['name'] == 'work' for s in snapshot()['sessions']), 'startup recreated a session before restore consent'

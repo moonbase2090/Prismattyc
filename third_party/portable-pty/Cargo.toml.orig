@@ -9,6 +9,7 @@ license = "MIT"
 documentation = "https://docs.rs/portable-pty"
 
 [dependencies]
+prismattyc-process = { path = "../../crates/prismattyc-process" }
 anyhow = "1.0"
 downcast-rs = "1.0"
 filedescriptor = { version="0.8.3", path = "../filedescriptor" }

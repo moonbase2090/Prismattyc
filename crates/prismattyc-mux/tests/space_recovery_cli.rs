@@ -5,7 +5,6 @@
 mod support;
 
 use std::path::PathBuf;
-use std::process::Command;
 
 struct Home {
     root: PathBuf,
@@ -47,7 +46,7 @@ impl Home {
     }
 
     fn pmux_output(&self, args: &[&str]) -> std::process::Output {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_pmux"));
+        let mut command = prismattyc_process::capture_command(env!("CARGO_BIN_EXE_pmux"));
         support::clear_command_env(&mut command);
         command
             .env("HOME", self.root.join("home"))
@@ -56,7 +55,9 @@ impl Home {
             .env("XDG_STATE_HOME", self.root.join("state"))
             .env("XDG_CONFIG_HOME", self.root.join("config"))
             .args(args);
-        command.output().expect("run pmux")
+        prismattyc_process::spawn(&mut command)
+            .and_then(std::process::Child::wait_with_output)
+            .expect("run pmux")
     }
 
     fn pmux(&self, args: &[&str]) -> String {

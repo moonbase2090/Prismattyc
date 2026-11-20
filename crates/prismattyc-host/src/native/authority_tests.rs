@@ -463,6 +463,254 @@ fn stale_drain_is_bounded_to_four_records_without_advancing_current_authority() 
 }
 
 #[test]
+fn resize_answers_an_already_received_ping_instead_of_dropping_its_queued_reply() {
+    let now = Instant::now();
+    let (mut native, mut client) = owner(now);
+    let _producer = active(&mut native, &mut client, now);
+    client
+        .write_all(&control(literals::PING_IDLE, 1, 1, 3))
+        .unwrap();
+    native.poll(now).unwrap();
+    assert!(native.after_reply.is_some());
+    native
+        .resize(Geometry::new(2, 1, 9, 17).unwrap(), now)
+        .unwrap();
+    assert!(native.scene().is_none());
+    native.poll(now).unwrap();
+    client.set_nonblocking(true).unwrap();
+    let (ended, descriptor) = response(&client, 0);
+    assert!(descriptor.is_none());
+    assert_eq!(opcode(&ended), 14);
+    assert_eq!(
+        (
+            value(&ended, 8),
+            value(&ended, 16),
+            value(&ended, 24),
+            value(&ended, 32)
+        ),
+        (1, 3, 1, 2)
+    );
+    assert_eq!(u32::from_le_bytes(ended[40..44].try_into().unwrap()), 1);
+}
+
+fn assert_ended(bytes: &[u8], sequence: u64, reason: u8) {
+    assert_eq!(opcode(bytes), 14);
+    assert_eq!(
+        (
+            value(bytes, 8),
+            value(bytes, 16),
+            value(bytes, 24),
+            value(bytes, 32)
+        ),
+        (1, sequence, 1, 2)
+    );
+    assert_eq!(bytes[40..48], [reason, 0, 0, 0, 0, 0, 0, 0]);
+}
+
+#[test]
+fn revocation_answers_each_pending_ping_once_and_preserves_partial_records() {
+    for (reason, reason_byte) in [
+        (EndReason::Resize, 1),
+        (EndReason::PtyOutput, 2),
+        (EndReason::LeaseExpired, 3),
+        (EndReason::Release, 4),
+    ] {
+        // The send cap splits a real sendmsg without depending on kernel buffer pressure.
+        for stage in 0..3 {
+            let now = Instant::now();
+            let (mut native, mut client) = owner(now);
+            let _producer = active(&mut native, &mut client, now);
+            let scene = Arc::downgrade(native.scene().unwrap());
+            client.set_nonblocking(true).unwrap();
+            client
+                .write_all(&control(literals::PING_IDLE, 1, 1, 3))
+                .unwrap();
+            if stage > 0 {
+                native.poll(now).unwrap();
+                assert!(native.after_reply.is_some());
+            }
+            if stage == 2 {
+                native.endpoint.limit_send(std::num::NonZeroUsize::new(1));
+                native.poll(now).unwrap();
+                native.endpoint.limit_send(None);
+            }
+            assert!(native.revoke(reason, now).unwrap());
+            assert!(scene.upgrade().is_none());
+            assert!(native.scene().is_none());
+            assert!(native.available());
+            native.poll(now).unwrap();
+            if stage == 0 {
+                native.poll(now).unwrap();
+            }
+            let (reply, descriptor) = response(&client, 0);
+            assert!(descriptor.is_none());
+            if stage == 2 {
+                assert_eq!(opcode(&reply), 15);
+                assert_eq!(reply.len(), 48);
+                assert_eq!(
+                    (value(&reply, 8), value(&reply, 16), value(&reply, 24)),
+                    (1, 3, 1)
+                );
+            } else {
+                assert_ended(&reply, 3, reason_byte);
+            }
+            assert_eq!(
+                client.read(&mut [0]).unwrap_err().kind(),
+                io::ErrorKind::WouldBlock
+            );
+            client
+                .write_all(&control(literals::PING_IDLE, 1, 1, 4))
+                .unwrap();
+            native.poll(now).unwrap();
+            native.poll(now).unwrap();
+            assert_ended(&response(&client, 0).0, 4, reason_byte);
+            let offer = native
+                .prepare_offer(NonZeroU32::new(2).unwrap(), now)
+                .unwrap();
+            native.authorize_written_offer(offer.receipt.clone());
+            client.write_all(&hello(&offer)).unwrap();
+            native.poll(now).unwrap();
+            native.poll(now).unwrap();
+            let (setup, descriptor) = response(&client, 1);
+            assert_eq!(opcode(&setup), 9);
+            assert_eq!(
+                (value(&setup, 8), value(&setup, 16), value(&setup, 24)),
+                (2, 1, 2)
+            );
+            drop(descriptor);
+            assert_eq!(
+                client.read(&mut [0]).unwrap_err().kind(),
+                io::ErrorKind::WouldBlock
+            );
+        }
+    }
+}
+
+#[test]
+fn revocation_answers_an_activation_waiting_for_its_first_frame() {
+    let now = Instant::now();
+    let (mut native, mut client) = owner(now);
+    let _producer = setup(&mut native, &mut client, now);
+    client.set_nonblocking(true).unwrap();
+    client
+        .write_all(&control(literals::ACTIVATE, 1, 1, 2))
+        .unwrap();
+    native.poll(now).unwrap();
+    assert!(matches!(
+        native.session.as_ref().unwrap().phase,
+        Phase::AwaitFrame(_)
+    ));
+    assert!(native.after_reply.is_none());
+    native.pty_bytes(now).unwrap();
+    native.poll(now).unwrap();
+    assert_ended(&response(&client, 0).0, 2, 2);
+    assert_eq!(
+        client.read(&mut [0]).unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
+}
+
+#[test]
+fn revocation_finishes_a_setup_with_its_descriptor_without_reviving_the_session() {
+    for partial in [false, true] {
+        let now = Instant::now();
+        let (mut native, mut client) = owner(now);
+        client.set_nonblocking(true).unwrap();
+        let offer = native
+            .prepare_offer(NonZeroU32::new(1).unwrap(), now)
+            .unwrap();
+        native.authorize_written_offer(offer.receipt.clone());
+        client.write_all(&hello(&offer)).unwrap();
+        native.poll(now).unwrap();
+        if partial {
+            native.endpoint.limit_send(std::num::NonZeroUsize::new(1));
+            native.poll(now).unwrap();
+            native.endpoint.limit_send(None);
+        }
+        native.pty_bytes(now).unwrap();
+        native.poll(now).unwrap();
+        let (setup, descriptor) = response(&client, 1);
+        assert_eq!(opcode(&setup), 9);
+        assert_eq!((value(&setup, 8), value(&setup, 24)), (1, 1));
+        assert!(descriptor.is_some());
+        assert!(native.session.is_none());
+        assert!(native.scene().is_none());
+        assert_eq!(
+            client.read(&mut [0]).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
+}
+
+#[test]
+fn revocation_never_activates_a_session_from_its_pending_active_reply() {
+    for partial in [false, true] {
+        let now = Instant::now();
+        let (mut native, mut client) = owner(now);
+        let producer = setup(&mut native, &mut client, now);
+        publish(&producer, frame_literals::FRAME_INITIAL, 1, 1, 1);
+        client.set_nonblocking(true).unwrap();
+        client
+            .write_all(&control(literals::ACTIVATE, 1, 1, 2))
+            .unwrap();
+        native.poll(now).unwrap();
+        native.poll(now).unwrap();
+        assert!(matches!(native.after_reply, Some(AfterReply::Activate)));
+        if partial {
+            native.endpoint.limit_send(std::num::NonZeroUsize::new(1));
+            native.poll(now).unwrap();
+            native.endpoint.limit_send(None);
+        }
+        native.pty_bytes(now).unwrap();
+        native.poll(now).unwrap();
+        let (reply, descriptor) = response(&client, 0);
+        assert!(descriptor.is_none());
+        if partial {
+            assert_eq!(opcode(&reply), 4);
+            assert_eq!(
+                (value(&reply, 8), value(&reply, 16), value(&reply, 24)),
+                (1, 2, 1)
+            );
+        } else {
+            assert_ended(&reply, 2, 2);
+        }
+        assert!(native.session.is_none());
+        assert!(native.scene().is_none());
+        assert_eq!(
+            client.read(&mut [0]).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn legacy_revocation_finishes_its_pending_pong_before_closing() {
+    for partial in [false, true] {
+        let now = Instant::now();
+        let (mut native, mut client, _producer) = legacy_active(now);
+        let mut ping = control(literals::PING_IDLE, 1, 1, 3);
+        ping[6..8].copy_from_slice(&0u16.to_le_bytes());
+        client.write_all(&ping).unwrap();
+        native.poll(now).unwrap();
+        if partial {
+            native.endpoint.limit_send(std::num::NonZeroUsize::new(1));
+            native.poll(now).unwrap();
+            native.endpoint.limit_send(None);
+        }
+        native.pty_bytes(now).unwrap();
+        assert!(native.scene().is_none());
+        native.poll(now).unwrap();
+        let (reply, descriptor) = response(&client, 0);
+        assert!(descriptor.is_none());
+        assert_eq!(opcode(&reply), 8);
+        assert_eq!(reply[6..8], [0, 0]);
+        assert!(!native.available());
+        eof(client);
+    }
+}
+
+#[test]
 fn resize_removes_the_scene_before_new_geometry_is_offered() {
     let now = Instant::now();
     let (mut native, mut client) = owner(now);
@@ -1047,6 +1295,10 @@ fn revocation_rearms_a_paused_reader_for_stale_control_without_a_timer() {
         Err(std::sync::mpsc::TryRecvError::Empty)
     );
     assert!(native.pty_bytes(now).unwrap());
+    assert!(native.next_wakeup().is_some());
+    assert!(!native.readiness.as_ref().unwrap().observed_socket_watched());
+    native.poll(now).unwrap();
+    assert_ended(&response(&client, 0).0, 3, 2);
     assert_eq!(native.next_wakeup(), None);
     assert!(native.readiness.as_ref().unwrap().observed_socket_watched());
     client

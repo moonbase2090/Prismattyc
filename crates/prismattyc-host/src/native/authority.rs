@@ -366,26 +366,43 @@ impl DesktopNative {
             .as_ref()
             .is_some_and(|session| session.dialect == Dialect::Grid0)
             || matches!(self.after_reply, Some(AfterReply::CloseLegacy));
+        let activation = self
+            .session
+            .as_ref()
+            .and_then(|session| match session.phase {
+                Phase::AwaitFrame(activation) => Some(activation),
+                _ => None,
+            });
         self.session = None;
         self.offer = None;
         self.after_reply = None;
         self.last_end = reason;
         self.rearm_deadline = now + OPERATION;
         self.stale_drain = None;
-        let result = self.endpoint.discard_reply();
-        let next = self.epoch.get().checked_add(1).and_then(PtyEpoch::new);
-        match (result, next) {
-            (Ok(()), Some(next)) => self.epoch = next,
-            (Err(error), _) => {
-                self.close();
-                return Err(error.into());
-            }
-            (_, None) => {
-                self.close();
-                return Err(AuthorityError::Counter);
-            }
+        let Some(next) = self.epoch.get().checked_add(1).and_then(PtyEpoch::new) else {
+            self.close();
+            return Err(AuthorityError::Counter);
+        };
+        self.epoch = next;
+        let pending = self.endpoint.revoke_reply(next, reason);
+        if pending {
+            self.after_reply = Some(if legacy {
+                AfterReply::CloseLegacy
+            } else {
+                AfterReply::Ordinary
+            });
+        } else if let Some(activation) = activation.filter(|_| !legacy) {
+            self.queue(
+                Dialect::Images2,
+                activation.identity,
+                Reply::SessionEnded {
+                    current_epoch: next,
+                    reason,
+                },
+                activation.started,
+            )?;
         }
-        if legacy {
+        if legacy && !pending {
             self.close();
         }
         self.rearm_readiness()?;

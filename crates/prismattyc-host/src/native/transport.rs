@@ -4,7 +4,7 @@
 use super::{
     legacy,
     profile::Dialect,
-    wire12::{self, Record, Reply, ReplyIdentity, MAX_RECORD_BYTES},
+    wire12::{self, EndReason, Record, Reply, ReplyIdentity, MAX_RECORD_BYTES},
 };
 use prismattyc_process::fd;
 #[cfg(target_os = "macos")]
@@ -94,6 +94,7 @@ struct Outgoing {
     written: usize,
     descriptor: Option<OwnedFd>,
     deadline: Instant,
+    revocable_identity: Option<ReplyIdentity>,
 }
 
 pub struct ControlEndpoint<'a> {
@@ -105,6 +106,8 @@ pub struct ControlEndpoint<'a> {
     descriptors: Vec<OwnedFd>,
     started: Option<Instant>,
     outgoing: Option<Outgoing>,
+    #[cfg(test)]
+    send_limit: Option<std::num::NonZeroUsize>,
 }
 
 impl ControlEndpoint<'static> {
@@ -138,6 +141,8 @@ impl<'a> ControlEndpoint<'a> {
             descriptors: Vec::new(),
             started: None,
             outgoing: None,
+            #[cfg(test)]
+            send_limit: None,
         })
     }
 
@@ -278,6 +283,11 @@ impl<'a> ControlEndpoint<'a> {
             wire12::encode(identity, reply),
             descriptor,
             request_started,
+            (!matches!(
+                reply,
+                Reply::Setup { .. } | Reply::Released | Reply::SessionEnded { .. }
+            ))
+            .then_some(identity),
         )
     }
 
@@ -294,7 +304,7 @@ impl<'a> ControlEndpoint<'a> {
                 format!("legacy native reply: {error:?}"),
             )
         })?;
-        self.queue_encoded(reply, bytes, descriptor, request_started)
+        self.queue_encoded(reply, bytes, descriptor, request_started, None)
     }
 
     fn queue_encoded(
@@ -303,6 +313,7 @@ impl<'a> ControlEndpoint<'a> {
         bytes: Vec<u8>,
         descriptor: Option<OwnedFd>,
         request_started: Instant,
+        revocable_identity: Option<ReplyIdentity>,
     ) -> io::Result<()> {
         if self.socket.is_none() {
             return Err(io::Error::new(
@@ -332,24 +343,34 @@ impl<'a> ControlEndpoint<'a> {
             written: 0,
             descriptor,
             deadline: request_started + budget,
+            revocable_identity,
         });
         Ok(())
     }
 
-    /// Revocation may discard only a reply whose bytes have not entered the stream.
-    pub fn discard_reply(&mut self) -> io::Result<()> {
-        if self
-            .outgoing
-            .as_ref()
-            .is_some_and(|reply| reply.written != 0)
-        {
-            return Err(self.fail(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "native revocation during a partial reply",
-            )));
+    /// End an unwritten session operation at its original deadline. Setup and
+    /// already-ended responses, and every partially written record, must finish.
+    pub fn revoke_reply(&mut self, current_epoch: wire12::PtyEpoch, reason: EndReason) -> bool {
+        let Some(outgoing) = &mut self.outgoing else {
+            return false;
+        };
+        if outgoing.written == 0 {
+            if let Some(identity) = outgoing.revocable_identity.take() {
+                outgoing.bytes = wire12::encode(
+                    identity,
+                    Reply::SessionEnded {
+                        current_epoch,
+                        reason,
+                    },
+                );
+            }
         }
-        self.outgoing = None;
-        Ok(())
+        true
+    }
+
+    #[cfg(test)]
+    pub(super) fn limit_send(&mut self, limit: Option<std::num::NonZeroUsize>) {
+        self.send_limit = limit;
     }
 
     /// One nonblocking sendmsg. Rights accompany only the first successful bytes.
@@ -376,6 +397,10 @@ impl<'a> ControlEndpoint<'a> {
             )));
         }
         let remaining = &outgoing.bytes[outgoing.written..];
+        #[cfg(test)]
+        let remaining = &remaining[..self
+            .send_limit
+            .map_or(remaining.len(), |limit| remaining.len().min(limit.get()))];
         let mut vector = libc::iovec {
             iov_base: remaining.as_ptr().cast_mut().cast(),
             iov_len: remaining.len(),
@@ -630,7 +655,38 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn revoking_an_unwritten_reply_preserves_the_endpoint_for_the_new_epoch() {
+    fn revoking_an_unwritten_pong_answers_its_identity_at_the_original_deadline() {
+        let availability = NativeAvailability::new();
+        let (host, mut client) = pair();
+        let mut endpoint = ControlEndpoint::with_availability(host, &availability).unwrap();
+        let now = Instant::now();
+        endpoint
+            .queue_reply(
+                reply_identity(3),
+                Reply::Pong(wire12::UploadState::Idle),
+                None,
+                now,
+            )
+            .unwrap();
+        assert!(endpoint.revoke_reply(wire12::PtyEpoch::new(2).unwrap(), EndReason::Resize));
+        assert_eq!(endpoint.deadline(), Some(now + Duration::from_millis(100)));
+        assert_eq!(endpoint.flush(now).unwrap(), Flush::Complete);
+        let mut bytes = [0; 48];
+        client.read_exact(&mut bytes).unwrap();
+        assert_eq!(u16::from_le_bytes(bytes[4..6].try_into().unwrap()), 14);
+        assert_eq!(u64::from_le_bytes(bytes[16..24].try_into().unwrap()), 3);
+        assert_eq!(u64::from_le_bytes(bytes[32..40].try_into().unwrap()), 2);
+        assert_eq!(bytes[40..48], [1, 0, 0, 0, 0, 0, 0, 0]);
+        assert!(!endpoint.revoke_reply(wire12::PtyEpoch::new(3).unwrap(), EndReason::PtyOutput));
+        client.set_nonblocking(true).unwrap();
+        assert_eq!(
+            client.read(&mut [0]).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn revocation_does_not_extend_a_pending_pong_deadline() {
         let availability = NativeAvailability::new();
         let (host, client) = pair();
         let mut endpoint = ControlEndpoint::with_availability(host, &availability).unwrap();
@@ -643,58 +699,17 @@ pub(crate) mod tests {
                 now,
             )
             .unwrap();
-        endpoint.discard_reply().unwrap();
-        assert_eq!(endpoint.flush(now).unwrap(), Flush::Complete);
-        endpoint
-            .queue_reply(reply_identity(4), Reply::Released, None, now)
-            .unwrap();
-        assert_eq!(endpoint.flush(now).unwrap(), Flush::Complete);
-        let mut bytes = [0; 32];
+        assert!(endpoint.revoke_reply(wire12::PtyEpoch::new(2).unwrap(), EndReason::Resize));
         assert_eq!(
-            fd::receive(client.as_fd(), &mut bytes, 0).unwrap().bytes,
-            32
+            endpoint
+                .flush(now + Duration::from_millis(100))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::TimedOut
         );
-        assert_eq!(u16::from_le_bytes(bytes[4..6].try_into().unwrap()), 6);
-        assert_eq!(u64::from_le_bytes(bytes[16..24].try_into().unwrap()), 4);
+        assert_eof(client);
     }
 
-    #[test]
-    fn revoking_a_partially_written_record_closes_the_endpoint_instead_of_splicing_records() {
-        let availability = NativeAvailability::new();
-        let (host, mut client) = pair();
-        let mut endpoint = ControlEndpoint::with_availability(host, &availability).unwrap();
-        endpoint
-            .queue_reply(
-                reply_identity(3),
-                Reply::Pong(wire12::UploadState::Idle),
-                None,
-                Instant::now(),
-            )
-            .unwrap();
-        // Arrange a real one-byte prefix, then record its completed write. The
-        // platform need not happen to split a small sendmsg at this boundary.
-        let first = endpoint.outgoing.as_ref().unwrap().bytes[0];
-        endpoint
-            .socket
-            .as_ref()
-            .unwrap()
-            .as_ref()
-            .write_all(&[first])
-            .unwrap();
-        endpoint.outgoing.as_mut().unwrap().written = 1;
-        assert_eq!(
-            endpoint.discard_reply().unwrap_err().kind(),
-            io::ErrorKind::BrokenPipe
-        );
-        let mut bytes = [0];
-        client.read_exact(&mut bytes).unwrap();
-        assert_eq!(bytes, [48]);
-        assert_eof(client);
-        assert_eq!(
-            endpoint.poll(Instant::now()).unwrap_err().kind(),
-            io::ErrorKind::NotConnected
-        );
-    }
     fn assert_eof(mut socket: UnixStream) {
         socket.set_nonblocking(true).unwrap();
         assert_eq!(socket.read(&mut [0]).unwrap(), 0);

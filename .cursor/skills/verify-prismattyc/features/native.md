@@ -78,6 +78,23 @@ macOS adds these cases:
   crop and nearest-sampled pixels. The checker distinguishes image composition
   from cell fallback. This is workload proof, not a comparative benchmark.
 
+## Control replies during revocation
+
+Run the native socket tests with one test thread:
+
+```sh
+cargo test --locked -p prismattyc-host --bin prismattyc-host native:: -- --test-threads=1
+```
+
+The real socket-pair cases revoke a session before receiving a queued PING,
+after queuing its reply and after writing a one-byte reply prefix. An unwritten
+session reply must become SESSION_ENDED and be readable after the next poll
+without advancing the test clock. A partial reply must finish as one intact
+record. Check the old request identity, end reason, unchanged absolute response
+deadline, fresh HELLO and preserved setup descriptor. A revoked pending
+ACTIVATE must never install a scene. On Linux, minor 0 finishes any pending
+reply before closing its generation.
+
 ## Inspect the result
 
 Require suite and per-drive `result.json` to report PASS. Inspect the logs,

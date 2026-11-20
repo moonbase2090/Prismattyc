@@ -815,8 +815,8 @@ public class Hold {
 """
         script = ROOT / "scripts/release/prepare-windows-install.ps1"
         held = []
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
                 root = Path(tmp)
                 install = root / "install"
                 updates = root / "updates" / "vstub" / "bin"
@@ -864,10 +864,14 @@ public class Hold {
                 self.assertIn("Prismattyc install prepared.", result.stdout)
                 self.assertIsNotNone(held[0].poll(), "updates-dir pmuxd survived")
                 self.assertIsNone(held[1].poll(), "pmuxd outside the install and update roots was stopped")
-        finally:
-            for proc in held:
-                if proc.poll() is None:
-                    proc.kill()
+            finally:
+                # The survivor stays running, so Windows keeps its image open.
+                # Stop it before the temporary directory is removed.
+                for proc in held:
+                    if proc.stdout is not None:
+                        proc.stdout.close()
+                    if proc.poll() is None:
+                        proc.kill()
                     proc.wait()
 
     def test_refresh_replaces_a_stale_msi_hash(self):

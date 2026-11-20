@@ -421,7 +421,7 @@ impl DesktopNative {
     /// One bounded frame copy and at most one framed control request per turn.
     pub fn poll(&mut self, now: Instant) -> Result<bool, AuthorityError> {
         self.last_poll = now;
-        let result = self.poll_inner(now).and_then(|changed| {
+        let result = self.poll_turn(now).and_then(|changed| {
             self.rearm_readiness()?;
             Ok(changed)
         });
@@ -506,11 +506,23 @@ impl DesktopNative {
         }
     }
 
-    fn poll_inner(&mut self, now: Instant) -> Result<bool, AuthorityError> {
+    fn poll_turn(&mut self, now: Instant) -> Result<bool, AuthorityError> {
         let mut changed = self.expire_inner(now)?;
         if self.closed {
             return Ok(changed);
         }
+        if self.flush_reply(now)? == Flush::Pending || self.closed {
+            return Ok(changed);
+        }
+        changed |= self.poll_inner(now)?;
+        // A ready reply must reach the peer before rasterization or presentation.
+        // A blocked write retains its original absolute deadline for the next turn.
+        self.flush_reply(now)?;
+        Ok(changed)
+    }
+
+    fn poll_inner(&mut self, now: Instant) -> Result<bool, AuthorityError> {
+        let mut changed = false;
         let ready = if let Some(offer) = &mut self.offer {
             match &offer.delivery {
                 OfferDelivery::Waiting(_) => return Ok(changed),
@@ -530,27 +542,6 @@ impl DesktopNative {
         if let Some(hello) = ready {
             changed |= self.handle(hello, now)?;
             return Ok(changed);
-        }
-        if let Some(effect) = self.after_reply {
-            if self.endpoint.flush(now)? == Flush::Pending {
-                return Ok(changed);
-            }
-            self.after_reply = None;
-            if let AfterReply::CloseLegacy = effect {
-                self.close();
-                return Ok(changed);
-            }
-            if let AfterReply::Activate = effect {
-                let session = self
-                    .session
-                    .as_mut()
-                    .ok_or(AuthorityError::Protocol("missing active reply owner"))?;
-                let Phase::AwaitActiveReply { lease_until, .. } = session.phase else {
-                    return Err(AuthorityError::Protocol("active reply state"));
-                };
-                session.phase = Phase::Active { lease_until };
-                self.stale_drain = None;
-            }
         }
         if let Some(session) = &mut self.session {
             if let Phase::AwaitFrame(activation) = session.phase {
@@ -613,6 +604,31 @@ impl DesktopNative {
         };
         changed |= self.handle(request, now)?;
         Ok(changed)
+    }
+
+    fn flush_reply(&mut self, now: Instant) -> Result<Flush, AuthorityError> {
+        if let Some(effect) = self.after_reply {
+            if self.endpoint.flush(now)? == Flush::Pending {
+                return Ok(Flush::Pending);
+            }
+            self.after_reply = None;
+            if let AfterReply::CloseLegacy = effect {
+                self.close();
+                return Ok(Flush::Complete);
+            }
+            if let AfterReply::Activate = effect {
+                let session = self
+                    .session
+                    .as_mut()
+                    .ok_or(AuthorityError::Protocol("missing active reply owner"))?;
+                let Phase::AwaitActiveReply { lease_until, .. } = session.phase else {
+                    return Err(AuthorityError::Protocol("active reply state"));
+                };
+                session.phase = Phase::Active { lease_until };
+                self.stale_drain = None;
+            }
+        }
+        Ok(Flush::Complete)
     }
 
     fn queue(

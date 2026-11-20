@@ -95,6 +95,13 @@ deadline, fresh HELLO and preserved setup descriptor. A revoked pending
 ACTIVATE must never install a scene. On Linux, minor 0 finishes any pending
 reply before closing its generation.
 
+A received PING must have a readable PONG when that same poll returns, before
+the host starts painting. The socket test reads without waiting or another
+poll. Pending-reply revocation cases fill the real socket's send buffer to
+force backpressure; draining those bytes permits the original response to
+finish without changing its deadline. This check does not establish liveness
+for a request that arrives while painting is already blocked.
+
 A HELLO received before offer authorization has session zero. Revocation drops
 that obsolete offer without a reply; the client recovers to ANSI at its 200 ms
 setup bound, and the endpoint accepts a fresh offer. The socket test checks

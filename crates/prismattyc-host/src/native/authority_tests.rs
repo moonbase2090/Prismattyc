@@ -17,10 +17,41 @@ fn pair() -> (UnixStream, UnixStream) {
     (left.into(), right.into())
 }
 fn owner(now: Instant) -> (DesktopNative, UnixStream) {
+    let (native, client, _) = owner_with_write_socket(now);
+    (native, client)
+}
+fn owner_with_write_socket(now: Instant) -> (DesktopNative, UnixStream, UnixStream) {
     let (host, client) = pair();
+    let sender = host.try_clone().unwrap();
     let mut native = DesktopNative::new(host, Geometry::new(1, 1, 8, 16).unwrap(), now).unwrap();
     native.pool = ImagePool::isolated();
-    (native, client)
+    (native, client, sender)
+}
+fn block_replies(mut sender: &UnixStream) -> usize {
+    let mut count = 0;
+    for bytes in [&[0xa5; 4096][..], &[0xa5][..]] {
+        loop {
+            match sender.write(bytes) {
+                Ok(written) => {
+                    assert!(written > 0);
+                    count += written;
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("fill real reply socket: {error}"),
+            }
+        }
+    }
+    count
+}
+fn drain_backpressure(mut client: &UnixStream, mut count: usize) {
+    let mut bytes = [0; 4096];
+    while count > 0 {
+        let length = count.min(bytes.len());
+        let read = client.read(&mut bytes[..length]).unwrap();
+        assert!(read > 0);
+        assert!(bytes[..read].iter().all(|byte| *byte == 0xa5));
+        count -= read;
+    }
 }
 fn hello(offer: &PreparedOffer) -> Vec<u8> {
     let mut bytes = literals::HELLO.to_vec();
@@ -242,11 +273,6 @@ fn active_is_written_only_after_the_named_full_snapshot_is_actually_installed() 
         native.scene().unwrap().frame().cells[0].glyph,
         Glyph::Scalar('?')
     );
-    assert_eq!(
-        client.read(&mut [0]).unwrap_err().kind(),
-        io::ErrorKind::WouldBlock
-    );
-    native.poll(now).unwrap();
     let (reply, _) = response(&client, 0);
     assert_eq!(opcode(&reply), 4);
     assert_eq!(value(&reply, 32), 1);
@@ -515,19 +541,44 @@ fn stale_drain_is_bounded_to_four_records_without_advancing_current_authority() 
 }
 
 #[test]
-fn resize_answers_an_already_received_ping_instead_of_dropping_its_queued_reply() {
+fn ping_reply_is_readable_before_returning_to_paint() {
     let now = Instant::now();
     let (mut native, mut client) = owner(now);
+    let _producer = active(&mut native, &mut client, now);
+    client.set_nonblocking(true).unwrap();
+    client
+        .write_all(&control(literals::PING_IDLE, 1, 1, 3))
+        .unwrap();
+
+    native.poll(now).unwrap();
+
+    let (pong, descriptor) = response(&client, 0);
+    assert!(descriptor.is_none());
+    assert_eq!(opcode(&pong), 15);
+    assert_eq!(pong.len(), 48);
+    assert_eq!(
+        (value(&pong, 8), value(&pong, 16), value(&pong, 24)),
+        (1, 3, 1)
+    );
+    assert!(native.scene().is_some());
+}
+
+#[test]
+fn resize_answers_an_already_received_ping_instead_of_dropping_its_queued_reply() {
+    let now = Instant::now();
+    let (mut native, mut client, sender) = owner_with_write_socket(now);
     let _producer = active(&mut native, &mut client, now);
     client
         .write_all(&control(literals::PING_IDLE, 1, 1, 3))
         .unwrap();
+    let blocked = block_replies(&sender);
     native.poll(now).unwrap();
     assert!(native.after_reply.is_some());
     native
         .resize(Geometry::new(2, 1, 9, 17).unwrap(), now)
         .unwrap();
     assert!(native.scene().is_none());
+    drain_backpressure(&client, blocked);
     native.poll(now).unwrap();
     client.set_nonblocking(true).unwrap();
     let (ended, descriptor) = response(&client, 0);
@@ -570,18 +621,20 @@ fn revocation_answers_each_pending_ping_once_and_preserves_partial_records() {
         // The send cap splits a real sendmsg without depending on kernel buffer pressure.
         for stage in 0..3 {
             let now = Instant::now();
-            let (mut native, mut client) = owner(now);
+            let (mut native, mut client, sender) = owner_with_write_socket(now);
             let _producer = active(&mut native, &mut client, now);
             let scene = Arc::downgrade(native.scene().unwrap());
             client.set_nonblocking(true).unwrap();
             client
                 .write_all(&control(literals::PING_IDLE, 1, 1, 3))
                 .unwrap();
+            let blocked = if stage > 0 { block_replies(&sender) } else { 0 };
             if stage > 0 {
                 native.poll(now).unwrap();
                 assert!(native.after_reply.is_some());
             }
             if stage == 2 {
+                drain_backpressure(&client, blocked);
                 native.endpoint.limit_send(std::num::NonZeroUsize::new(1));
                 native.poll(now).unwrap();
                 native.endpoint.limit_send(None);
@@ -590,6 +643,9 @@ fn revocation_answers_each_pending_ping_once_and_preserves_partial_records() {
             assert!(scene.upgrade().is_none());
             assert!(native.scene().is_none());
             assert!(native.available());
+            if stage == 1 {
+                drain_backpressure(&client, blocked);
+            }
             native.poll(now).unwrap();
             if stage == 0 {
                 native.poll(now).unwrap();
@@ -698,7 +754,7 @@ fn revocation_finishes_a_setup_with_its_descriptor_without_reviving_the_session(
 fn revocation_never_activates_a_session_from_its_pending_active_reply() {
     for partial in [false, true] {
         let now = Instant::now();
-        let (mut native, mut client) = owner(now);
+        let (mut native, mut client, sender) = owner_with_write_socket(now);
         let producer = setup(&mut native, &mut client, now);
         publish(&producer, frame_literals::FRAME_INITIAL, 1, 1, 1);
         client.set_nonblocking(true).unwrap();
@@ -706,8 +762,10 @@ fn revocation_never_activates_a_session_from_its_pending_active_reply() {
             .write_all(&control(literals::ACTIVATE, 1, 1, 2))
             .unwrap();
         native.poll(now).unwrap();
+        let blocked = block_replies(&sender);
         native.poll(now).unwrap();
         assert!(matches!(native.after_reply, Some(AfterReply::Activate)));
+        drain_backpressure(&client, blocked);
         if partial {
             native.endpoint.limit_send(std::num::NonZeroUsize::new(1));
             native.poll(now).unwrap();
@@ -970,11 +1028,6 @@ fn release_removes_the_overlay_before_released_and_fresh_hello_allocates_another
     assert!(scene.upgrade().is_none());
     assert_eq!(native.epoch().get(), 2);
     client.set_nonblocking(true).unwrap();
-    assert_eq!(
-        client.read(&mut [0]).unwrap_err().kind(),
-        io::ErrorKind::WouldBlock
-    );
-    native.poll(now).unwrap();
     let (reply, _) = response(&client, 0);
     assert_eq!(opcode(&reply), 6);
     assert_eq!(reply.len(), 32);
@@ -1291,7 +1344,7 @@ fn a_writer_receipt_schedules_an_already_received_hello_immediately() {
     native.authorize_written_offer(offer.receipt);
     assert_eq!(native.next_wakeup(), Some(now + Duration::from_millis(10)));
     native.poll(now + Duration::from_millis(15)).unwrap();
-    assert_eq!(native.next_wakeup(), Some(now + Duration::from_millis(35)));
+    assert_eq!(native.next_wakeup(), Some(now + Duration::from_millis(210)));
     native.poll(now + Duration::from_millis(15)).unwrap();
     let (setup, descriptor) = response(&client, 1);
     assert_eq!(opcode(&setup), 9);
@@ -1328,7 +1381,7 @@ fn a_control_socket_hello_wakes_its_owner_without_any_pty_output() {
 #[test]
 fn revocation_rearms_a_paused_reader_for_stale_control_without_a_timer() {
     let now = Instant::now();
-    let (mut native, mut client) = owner(now);
+    let (mut native, mut client, sender) = owner_with_write_socket(now);
     let _producer = active(&mut native, &mut client, now);
     let (wake_tx, wake_rx) = std::sync::mpsc::channel();
     native
@@ -1340,6 +1393,7 @@ fn revocation_rearms_a_paused_reader_for_stale_control_without_a_timer() {
         .write_all(&control(literals::PING_IDLE, 1, 1, 3))
         .unwrap();
     wake_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let blocked = block_replies(&sender);
     native.poll(now).unwrap();
     assert!(!native.readiness.as_ref().unwrap().observed_socket_watched());
     assert_eq!(
@@ -1349,6 +1403,7 @@ fn revocation_rearms_a_paused_reader_for_stale_control_without_a_timer() {
     assert!(native.pty_bytes(now).unwrap());
     assert!(native.next_wakeup().is_some());
     assert!(!native.readiness.as_ref().unwrap().observed_socket_watched());
+    drain_backpressure(&client, blocked);
     native.poll(now).unwrap();
     assert_ended(&response(&client, 0).0, 3, 2);
     assert_eq!(native.next_wakeup(), None);

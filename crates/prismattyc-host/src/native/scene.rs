@@ -16,9 +16,13 @@ use std::{collections::VecDeque, io, os::fd::BorrowedFd, sync::Arc, time::Instan
 pub struct NativeScene {
     frame: FrameSnapshot,
     images: Vec<ResolvedPlacement>,
+    blinks: bool,
 }
 
 impl NativeScene {
+    pub fn blinks(&self) -> bool {
+        self.blinks
+    }
     pub fn grid(&self) -> super::grid::NativeGrid<'_> {
         super::grid::NativeGrid::new(&self.frame)
     }
@@ -91,7 +95,7 @@ impl SessionFrames {
         self.resources.pong(now)
     }
     #[cfg(test)]
-    pub(super) fn finish_upload_for_test(&mut self) -> Result<(), RegistryError> {
+    pub(crate) fn finish_upload_for_test(&mut self) -> Result<(), RegistryError> {
         self.resources.finish_for_test()
     }
     pub fn retire(
@@ -118,9 +122,20 @@ impl SessionFrames {
             )
             .map_err(SceneError::Resource)?;
         images.sort_unstable_by_key(|item| (item.placement.depth, item.placement.ordinal));
+        let blinks = copied.snapshot.cells.iter().any(|cell| {
+            let ink = match cell.glyph {
+                super::frame::Glyph::Continuation => false,
+                super::frame::Glyph::Scalar(character) => !character.is_whitespace(),
+                super::frame::Glyph::Cluster(index) => copied.snapshot.clusters[index as usize]
+                    .chars()
+                    .any(|character| !character.is_whitespace()),
+            };
+            cell.meta & 0x140 == 0x40 && (ink || cell.meta & (0x38 | 0x600) != 0)
+        });
         let scene = Arc::new(NativeScene {
             frame: copied.snapshot,
             images,
+            blinks,
         });
         let consumed = self
             .ring

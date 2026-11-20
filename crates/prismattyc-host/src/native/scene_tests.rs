@@ -232,3 +232,60 @@ fn an_exec_child_publishes_into_the_real_inherited_ring_before_installation() {
         super::super::grid::Text::Scalar('?')
     );
 }
+
+#[test]
+fn installed_scene_blink_metadata_only_counts_visible_ink() {
+    let mut frames = frames();
+    let producer = Producer::new(frames.descriptor().try_clone_to_owned().unwrap());
+    for (index, (glyph, meta, expected)) in [
+        ('?', 0x1000u32, false),
+        ('?', 0x1040, true),
+        ('?', 0x1140, false),
+        (' ', 0x1040, false),
+        (' ', 0x1048, true),
+        (' ', 0x1240, true),
+        (' ', 0x1440, true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut bytes = literals::FRAME_INITIAL.to_vec();
+        bytes[128..132].copy_from_slice(&u32::from(glyph).to_le_bytes());
+        bytes[140..144].copy_from_slice(&meta.to_le_bytes());
+        producer.publish(index as u64 + 1, &bytes);
+        assert!(frames.prepare_next().unwrap());
+        assert!(frames.install_next().unwrap().is_some());
+        assert_eq!(
+            frames.installed().unwrap().blinks(),
+            expected,
+            "glyph {glyph:?}, meta {meta:x}"
+        );
+    }
+}
+
+#[test]
+fn a_blinking_blank_cluster_does_not_arm_the_scene_timer() {
+    let mut frames = frames();
+    let producer = Producer::new(frames.descriptor().try_clone_to_owned().unwrap());
+    let mut bytes = literals::FRAME_INITIAL.to_vec();
+    bytes.resize(168, 0);
+    for (offset, value) in [
+        (0, 168u32),
+        (40, 1),
+        (44, 144),
+        (48, 1),
+        (52, 160),
+        (60, 168),
+        (128, 0x8000_0000),
+        (140, 0x1040),
+        (148, 1),
+    ] {
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    bytes[152] = 1;
+    bytes[160] = b' ';
+    producer.publish(1, &bytes);
+    assert!(frames.prepare_next().unwrap());
+    assert!(frames.install_next().unwrap().is_some());
+    assert!(!frames.installed().unwrap().blinks());
+}

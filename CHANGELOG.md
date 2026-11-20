@@ -20,7 +20,7 @@
 ### Fixed
 
 - On Windows, **Update and restart** no longer stays on the daemon restart step after the update installs: the new daemon kept a copy of the app's output pipe, so the app never saw the restart finish. The app now reads command output from private files, and `pmux` no longer hands its standard handles to the programs it starts unless they ask.
-- Restored Hermes sessions resume with `chat --continue` instead of replaying their startup query, and keep their conversation selector, profile, provider, model and permission options.
+- A restored session of a supported coding agent that was started with a query resumes its latest conversation instead of running the query again, and keeps its conversation selector, profile, provider, model and permission options.
 - This release embeds official plug-in catalog 1.3.5, which adds activity-monitor 1.3.5 and keeps the earlier packages.
 - Updated Wasmtime to 36.0.21 for the November advisories.
 

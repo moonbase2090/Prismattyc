@@ -948,6 +948,27 @@ pub(super) fn rows(host: &HostState) -> Option<(String, Vec<PaletteRow>)> {
     Some((header, rows))
 }
 
+/// The update panel's page and selected row index, for the opt-in UI change
+/// lines (see `ui_events`). Only the update panel reports, and only positions.
+pub(super) fn update_state(host: &HostState) -> Option<serde_json::Value> {
+    let panel = host
+        .space_panel
+        .as_ref()
+        .filter(|panel| panel.maintenance)?;
+    let page = match panel.page {
+        Page::Maintenance => "maintenance",
+        Page::Update(..) => "update",
+        Page::Text(_) => "result",
+        _ => "other",
+    };
+    Some(serde_json::json!({
+        "page": page,
+        "selected": host.context_menu.as_ref().map(|menu| menu.selected),
+        "rows": panel.rows.len(),
+        "loading": panel.pending.is_some(),
+    }))
+}
+
 pub(super) fn status(host: &HostState) -> Option<serde_json::Value> {
     let (header, rows) = rows(host)?;
     Some(

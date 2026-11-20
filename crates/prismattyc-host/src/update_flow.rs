@@ -33,6 +33,67 @@ pub(super) enum Event {
 pub(super) struct Resume {
     notice: String,
     backup: Option<PathBuf>,
+    /// Set when the restarted daemon already brought the saved sessions
+    /// back. An app from before this field asks before restoring instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    restored: Option<Restored>,
+}
+
+/// Which saved sessions the restarted daemon brought back, by name.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
+pub(super) struct Restored {
+    restored: Vec<String>,
+    lost: Vec<String>,
+}
+
+impl Restored {
+    /// The `sessions` entry of a `pmux restart --json` report, if any.
+    fn from_report(report: &str) -> Option<Self> {
+        let value: Value = serde_json::from_str(report).ok()?;
+        let entry = value["components"]
+            .as_array()?
+            .iter()
+            .find(|component| component["component"] == "sessions")?;
+        let names = |key: &str| -> Vec<String> {
+            entry[key]
+                .as_array()
+                .map(|names| {
+                    names
+                        .iter()
+                        .filter_map(|name| name.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        Some(Self {
+            restored: names("restored"),
+            lost: names("lost"),
+        })
+    }
+
+    fn summary(&self) -> String {
+        let mut text = match self.restored.len() {
+            0 => "No sessions were restored.".to_string(),
+            1 => format!(
+                "Restored 1 session with its layout and scrollback: {}.",
+                self.restored[0]
+            ),
+            n => format!(
+                "Restored {n} sessions with their layouts and scrollback: {}.",
+                self.restored.join(", ")
+            ),
+        };
+        if !self.restored.is_empty() {
+            text.push_str(" Their programs started again.");
+        }
+        if !self.lost.is_empty() {
+            text.push_str(&format!(
+                "\nNot restored: {}. Restore them from the saved configuration.",
+                self.lost.join(", ")
+            ));
+        }
+        text
+    }
 }
 
 #[derive(Default)]
@@ -144,18 +205,7 @@ pub(super) fn event(app: &mut App, event: Event) {
         }
         Event::Restored(Ok(text)) => {
             app.full_update = Flow::Idle;
-            for host in app.windows.values_mut() {
-                host.restore_prompt = host
-                    .attach_layout_path
-                    .as_ref()
-                    .and_then(|path| attach_tabs::load(path))
-                    .and_then(restore_prompt::RestorePrompt::new);
-                if host.restore_prompt.is_some() {
-                    restore_prompt::finish(host, true);
-                }
-                host.cache_writer = true;
-                host.local_views.fresh = false;
-            }
+            reopen_views(app);
             show(app, &format!("{text}\nSession restoration finished. Open a saved Space or select a session to view it."), &[]);
         }
         Event::Prepared(Err(error))
@@ -168,6 +218,23 @@ pub(super) fn event(app: &mut App, event: Event) {
                 &[("Check again", Action::Start)],
             );
         }
+    }
+}
+
+/// Reopen each window's saved tabs on the sessions that now exist, and let
+/// the windows write their view again.
+fn reopen_views(app: &mut App) {
+    for host in app.windows.values_mut() {
+        host.restore_prompt = host
+            .attach_layout_path
+            .as_ref()
+            .and_then(|path| attach_tabs::load(path))
+            .and_then(restore_prompt::RestorePrompt::new);
+        if host.restore_prompt.is_some() {
+            restore_prompt::finish(host, true);
+        }
+        host.cache_writer = true;
+        host.local_views.fresh = false;
     }
 }
 
@@ -228,7 +295,11 @@ fn install(plan: Plan, save: bool) -> Result<Resume> {
     let backup = save.then_some(file.clone());
     let result = complete_install(&plan, &pmux, &file, !save);
     match result {
-        Ok(notice) => Ok(Resume { notice, backup }),
+        Ok((notice, restored)) => Ok(Resume {
+            notice,
+            backup,
+            restored,
+        }),
         Err(error) => {
             if !save {
                 let _ = std::fs::remove_file(&file);
@@ -250,7 +321,7 @@ fn complete_install(
     pmux: &Path,
     consent: &Path,
     delete_consent: bool,
-) -> Result<String> {
+) -> Result<(String, Option<Restored>)> {
     if plan.update_available {
         let report: Value = serde_json::from_str(&run(pmux, &["update", "--json"])?)?;
         anyhow::ensure!(
@@ -280,8 +351,11 @@ fn complete_install(
     }
     restart.extend(["--worker".to_string(), "--json".to_string()]);
     let restart_args = restart.iter().map(String::as_str).collect::<Vec<_>>();
-    run(&installed, &restart_args)
+    let restarted = run(&installed, &restart_args)
         .context("The files are installed, but the daemon restart failed")?;
+    let restored = (!delete_consent)
+        .then(|| Restored::from_report(&restarted))
+        .flatten();
     let mcp = run(&installed, &["restart", "--mcp", "--json"])
         .context("The daemon restarted, but the MCP restart failed")?;
     let mut versions: Value = serde_json::from_str(&run(&installed, &["versions"])?)?;
@@ -304,12 +378,15 @@ fn complete_install(
         "The running daemon is {actual}; expected {}. The app has not restarted.",
         plan.available
     );
-    Ok(format!(
-        "Prismattyc {} is installed. The daemon restarted on {}.\n{}\n{}",
-        plan.available,
-        actual,
-        space_panel::maintenance_result(&mcp),
-        space_panel::maintenance_result(&versions.to_string())
+    Ok((
+        format!(
+            "Prismattyc {} is installed. The daemon restarted on {}.\n{}\n{}",
+            plan.available,
+            actual,
+            space_panel::maintenance_result(&mcp),
+            space_panel::maintenance_result(&versions.to_string())
+        ),
+        restored,
     ))
 }
 
@@ -449,6 +526,22 @@ pub(super) fn resume(app: &mut App) {
     for host in app.windows.values_mut() {
         host.restore_prompt = None;
     }
+    if let Some(restored) = &resume.restored {
+        // The restarted daemon already brought the sessions back with their
+        // IDs, so the saved tabs open on them directly. The user agreed to
+        // this when choosing Save and restart; there is nothing more to ask.
+        let mut text = format!("{}\n{}", resume.notice, restored.summary());
+        if let Some(path) = &resume.backup {
+            text.push_str(&format!(
+                "\nThe session configuration also remains saved at {}.",
+                path.display()
+            ));
+        }
+        app.full_update = Flow::Idle;
+        reopen_views(app);
+        show(app, &text, &[]);
+        return;
+    }
     if let Some(path) = &resume.backup {
         let text = format!("{}\nSession configuration saved at {}. Restore these sessions and relaunch their saved commands?", resume.notice, path.display());
         app.full_update = Flow::Restore(resume);
@@ -534,6 +627,46 @@ echo note >&2"#,
         assert!(after.is_subset(&before), "output files removed: {after:?}");
         std::fs::remove_dir_all(pmux.parent().unwrap()).unwrap();
     }
+    #[test]
+    fn a_restart_report_names_the_sessions_the_daemon_brought_back() {
+        let report = r#"{"components":[{"component":"daemon","status":"restarted"},{"component":"sessions","lost":["gone"],"restored":["work","notes"],"status":"partial"},{"component":"plugins","status":"reconciled"}],"status":"restart_results"}"#;
+        let restored = Restored::from_report(report).expect("sessions entry");
+        assert_eq!(restored.restored, ["work", "notes"]);
+        assert_eq!(restored.lost, ["gone"]);
+        let text = restored.summary();
+        assert!(text.starts_with("Restored 2 sessions"), "{text}");
+        assert!(text.contains("work, notes"), "{text}");
+        assert!(text.contains("Not restored: gone."), "{text}");
+
+        let without = r#"{"components":[{"component":"daemon","status":"restarted"}],"status":"restart_results"}"#;
+        assert_eq!(
+            Restored::from_report(without),
+            None,
+            "a CLI that did not restore"
+        );
+        assert_eq!(Restored::from_report("not json"), None);
+    }
+
+    #[test]
+    fn an_older_app_relaunch_still_asks_before_restoring() {
+        // The relaunch payload written by an app from before automatic
+        // restore has no `restored` field; the new app must then ask.
+        let older: Resume =
+            serde_json::from_str(r#"{"notice":"done","backup":"/tmp/saved.json"}"#).unwrap();
+        assert!(older.restored.is_none());
+        assert!(older.backup.is_some());
+        let newer = Resume {
+            notice: "done".into(),
+            backup: None,
+            restored: Some(Restored {
+                restored: vec!["work".into()],
+                lost: Vec::new(),
+            }),
+        };
+        let round: Resume = serde_json::from_str(&serde_json::to_string(&newer).unwrap()).unwrap();
+        assert_eq!(round.restored, newer.restored);
+    }
+
     #[test]
     fn incomplete_or_mixed_installations_cannot_report_success() {
         let absent = serde_json::json!({"installed": []});

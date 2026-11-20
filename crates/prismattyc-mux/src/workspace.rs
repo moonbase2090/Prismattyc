@@ -57,6 +57,11 @@ pub struct Workspace {
     pub(crate) next_ids: NextIds,
     pub(crate) sessions: Vec<SavedSession>,
     pub view: Option<AttachTabsFile>,
+    /// Set only by [`Workspace::for_update`]: the user agreed to relaunch the
+    /// saved commands, so the next restore runs them whatever
+    /// `space_open_runs_commands` says. Cleared by [`Workspace::checkpoint`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    resume_commands: bool,
 }
 
 pub fn path(socket: &Path) -> PathBuf {
@@ -159,6 +164,7 @@ impl Workspace {
             },
             sessions: Vec::new(),
             view: None,
+            resume_commands: false,
         };
         let mut names = HashMap::new();
         let mut latest = None;
@@ -309,7 +315,70 @@ impl Workspace {
     }
 
     pub(crate) fn capture(plane: &ControlPlane, next_ids: NextIds) -> Result<Self> {
-        let snapshot = plane.snapshot()?;
+        Self::from_snapshot(plane.snapshot()?, next_ids)
+    }
+
+    /// The workspace a consented update restores: the running daemon's
+    /// sessions, windows, splits, pane IDs, Space ownership and environment,
+    /// read from its snapshot before it stops. Each pane restarts in the
+    /// default shell in its current directory and then runs what it was
+    /// running: an interactive shell's foreground command, or the pane's own
+    /// launch command (agents resume without their startup prompt).
+    pub fn for_update(snapshot: crate::Snapshot, view: Option<AttachTabsFile>) -> Result<Self> {
+        let next_ids = NextIds {
+            session: snapshot.sessions.iter().map(|s| s.id).max().unwrap_or(0) + 1,
+            window: snapshot
+                .sessions
+                .iter()
+                .flat_map(|s| &s.windows)
+                .map(|w| w.id)
+                .max()
+                .unwrap_or(0)
+                + 1,
+            pane: snapshot
+                .sessions
+                .iter()
+                .flat_map(|s| &s.windows)
+                .flat_map(|w| &w.panes)
+                .map(|p| p.id)
+                .max()
+                .unwrap_or(0)
+                + 1,
+        };
+        let mut saved = Self::from_snapshot(snapshot, next_ids)?;
+        for pane in saved
+            .sessions
+            .iter_mut()
+            .flat_map(|s| &mut s.windows)
+            .flat_map(|w| &mut w.panes)
+        {
+            let pid = pane.observed_pid;
+            if let Some(cwd) = pid
+                .and_then(crate::procinfo::cwd_of)
+                .filter(|p| p.is_absolute())
+            {
+                pane.spawn.cwd = Some(cwd);
+            }
+            pane.resume_command = if crate::procinfo::interactive_shell(&pane.spawn) {
+                pid.and_then(crate::procinfo::live_foreground_command)
+            } else {
+                let command = crate::procinfo::replay_spawn_command(&pane.spawn, pid);
+                let mut shell = crate::platform::default_shell_command();
+                pane.spawn.program = shell.remove(0);
+                pane.spawn.argv = shell;
+                command
+            }
+            .filter(|command| !command.trim().is_empty());
+            if let Ok(path) = std::env::var("PATH") {
+                pane.spawn.env.entry("PATH".into()).or_insert(path);
+            }
+        }
+        saved.view = view;
+        saved.resume_commands = true;
+        Ok(saved)
+    }
+
+    fn from_snapshot(snapshot: crate::Snapshot, next_ids: NextIds) -> Result<Self> {
         let mut sessions = Vec::new();
         for session in snapshot.sessions {
             let mut windows = Vec::new();
@@ -352,6 +421,7 @@ impl Workspace {
             next_ids,
             sessions,
             view: None,
+            resume_commands: false,
         })
     }
 
@@ -385,7 +455,8 @@ impl Workspace {
         // unchanged across checkpoints, and the shell remains after the job
         // exits. Replacing argv with -c would permanently bake in old jobs.
         for (session, pane) in panes {
-            let resume = policy == crate::SpaceOpenRunsCommands::All
+            let resume = self.resume_commands
+                || policy == crate::SpaceOpenRunsCommands::All
                 || (policy == crate::SpaceOpenRunsCommands::Agents && session.agent_id.is_some());
             if let Some(command) = pane.resume_command.as_ref().filter(|_| resume) {
                 plane.resume_workspace_command(pane.id, command)?;
@@ -422,8 +493,25 @@ impl Workspace {
         Ok(())
     }
 
+    /// Write the restored workspace back. A consent to relaunch commands
+    /// applies to one restore only, so the written copy drops it.
     pub fn checkpoint(&self, socket: &Path) -> Result<()> {
+        if self.resume_commands {
+            let mut once = self.clone();
+            once.resume_commands = false;
+            return once.save(socket);
+        }
         self.save(socket)
+    }
+
+    /// Replace the saved workspace with this one, for the next daemon start.
+    pub fn write(&self, socket: &Path) -> Result<()> {
+        self.save(socket)
+    }
+
+    /// Session names, in order.
+    pub fn session_names(&self) -> Vec<String> {
+        self.sessions.iter().map(|s| s.name.clone()).collect()
     }
 
     fn save(&self, socket: &Path) -> Result<()> {

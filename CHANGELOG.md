@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Save and restart** in **Update and restart** now brings your sessions back by itself. The restarted daemon recreates them with their IDs, split panes, working directories, Space ownership and scrollback, and starts their programs again, so the relaunched app reopens your tabs without a second **Restore sessions** question. The result names the sessions that came back and any that did not. `pmux up --restore-workspace` starts the daemon from the saved workspace.
+
 ## [0.3.71] - 2026-11-20
 
 ### Fixed

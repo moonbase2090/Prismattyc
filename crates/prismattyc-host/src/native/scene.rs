@@ -143,6 +143,17 @@ impl SessionFrames {
         Ok(true)
     }
 
+    pub(super) fn has_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    #[cfg(test)]
+    pub(super) fn pending_sequence(&self) -> Option<FrameSequence> {
+        self.pending
+            .as_ref()
+            .map(|scene| scene.frame.context.sequence)
+    }
+
     /// Publish the same immutable scene used by every native reader, before ACTIVE.
     pub fn install_next(&mut self) -> Result<Option<FrameSequence>, SceneError> {
         let Some(scene) = self.pending.as_ref() else {

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! One event-loop owner controls offers, session leases and installed native scenes.
+//! One owner controls offers, session leases and installed native scenes.
 
 use super::{
     backing::ImageDescriptor,
@@ -164,6 +164,41 @@ enum AfterReply {
     CloseLegacy,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct Installation {
+    session: SessionId,
+    epoch: PtyEpoch,
+    metrics: MetricsEpoch,
+    frame: FrameSequence,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum FrameWork {
+    Keep,
+    Prepare,
+    InstallPending,
+    #[cfg(test)]
+    Install,
+}
+impl FrameWork {
+    fn copies(self) -> bool {
+        match self {
+            Self::Keep | Self::InstallPending => false,
+            Self::Prepare => true,
+            #[cfg(test)]
+            Self::Install => true,
+        }
+    }
+    fn installs(self) -> bool {
+        match self {
+            Self::Keep | Self::Prepare => false,
+            Self::InstallPending => true,
+            #[cfg(test)]
+            Self::Install => true,
+        }
+    }
+}
+
 struct StaleDrain {
     deadline: Instant,
     records: u8,
@@ -179,6 +214,7 @@ pub struct DesktopNative {
     offer: Option<Offer>,
     session: Option<Session>,
     after_reply: Option<AfterReply>,
+    acknowledged_installation: Option<Installation>,
     rearm_deadline: Instant,
     stale_drain: Option<StaleDrain>,
     last_end: EndReason,
@@ -204,6 +240,7 @@ impl DesktopNative {
             offer: None,
             session: None,
             after_reply: None,
+            acknowledged_installation: None,
             rearm_deadline: now + OPERATION,
             stale_drain: None,
             last_end: EndReason::Release,
@@ -376,6 +413,7 @@ impl DesktopNative {
         self.session = None;
         self.offer = None;
         self.after_reply = None;
+        self.acknowledged_installation = None;
         self.last_end = reason;
         self.rearm_deadline = now + OPERATION;
         self.stale_drain = None;
@@ -414,17 +452,38 @@ impl DesktopNative {
         self.session = None;
         self.offer = None;
         self.after_reply = None;
+        self.acknowledged_installation = None;
         self.endpoint.close();
         self.closed = true;
     }
 
-    /// One bounded frame copy and at most one framed control request per turn.
+    /// Synchronous authority fixture; production advances through NativeService.
+    #[cfg(test)]
     pub fn poll(&mut self, now: Instant) -> Result<bool, AuthorityError> {
+        self.poll_mode(now, FrameWork::Install, false)
+    }
+
+    pub(super) fn poll_for_service(
+        &mut self,
+        now: Instant,
+        work: FrameWork,
+    ) -> Result<bool, AuthorityError> {
+        self.poll_mode(now, work, true)
+    }
+
+    fn poll_mode(
+        &mut self,
+        now: Instant,
+        work: FrameWork,
+        defer_activation: bool,
+    ) -> Result<bool, AuthorityError> {
         self.last_poll = now;
-        let result = self.poll_turn(now).and_then(|changed| {
-            self.rearm_readiness()?;
-            Ok(changed)
-        });
+        let result = self
+            .poll_turn(now, work, defer_activation)
+            .and_then(|changed| {
+                self.rearm_readiness()?;
+                Ok(changed)
+            });
         match result {
             Ok(changed) => Ok(changed),
             Err(error) => {
@@ -506,22 +565,32 @@ impl DesktopNative {
         }
     }
 
-    fn poll_turn(&mut self, now: Instant) -> Result<bool, AuthorityError> {
+    fn poll_turn(
+        &mut self,
+        now: Instant,
+        work: FrameWork,
+        defer_activation: bool,
+    ) -> Result<bool, AuthorityError> {
         let mut changed = self.expire_inner(now)?;
         if self.closed {
+            return Ok(changed);
+        }
+        if self.activation_needs_ack(defer_activation) {
             return Ok(changed);
         }
         if self.flush_reply(now)? == Flush::Pending || self.closed {
             return Ok(changed);
         }
-        changed |= self.poll_inner(now)?;
+        changed |= self.poll_inner(now, work)?;
         // A ready reply must reach the peer before rasterization or presentation.
         // A blocked write retains its original absolute deadline for the next turn.
-        self.flush_reply(now)?;
+        if !self.activation_needs_ack(defer_activation) {
+            self.flush_reply(now)?;
+        }
         Ok(changed)
     }
 
-    fn poll_inner(&mut self, now: Instant) -> Result<bool, AuthorityError> {
+    fn poll_inner(&mut self, now: Instant, work: FrameWork) -> Result<bool, AuthorityError> {
         let mut changed = false;
         let ready = if let Some(offer) = &mut self.offer {
             match &offer.delivery {
@@ -545,11 +614,13 @@ impl DesktopNative {
         }
         if let Some(session) = &mut self.session {
             if let Phase::AwaitFrame(activation) = session.phase {
-                if session
-                    .frames
-                    .prepare_next()
-                    .map_err(AuthorityError::Scene)?
-                {
+                if work.copies() && !session.frames.has_pending() {
+                    session
+                        .frames
+                        .prepare_next()
+                        .map_err(AuthorityError::Scene)?;
+                }
+                if work.installs() && session.frames.has_pending() {
                     let installed = session
                         .frames
                         .install_next()
@@ -586,11 +657,13 @@ impl DesktopNative {
             }
             if matches!(session.phase, Phase::Active { .. }) {
                 session.frames.pong(now).map_err(AuthorityError::Resource)?;
-                if session
-                    .frames
-                    .prepare_next()
-                    .map_err(AuthorityError::Scene)?
-                {
+                if work.copies() {
+                    session
+                        .frames
+                        .prepare_next()
+                        .map_err(AuthorityError::Scene)?;
+                }
+                if work.installs() && session.frames.has_pending() {
                     session
                         .frames
                         .install_next()
@@ -599,11 +672,64 @@ impl DesktopNative {
                 }
             }
         }
+        if work == FrameWork::Prepare {
+            return Ok(changed);
+        }
         let Receive::Request(request) = self.endpoint.poll(now)? else {
             return Ok(changed);
         };
         changed |= self.handle(request, now)?;
         Ok(changed)
+    }
+
+    pub(super) fn installation(&self) -> Option<Installation> {
+        let session = self.session.as_ref()?;
+        let context = session.frames.installed()?.frame().context;
+        Some(Installation {
+            session: session.id,
+            epoch: context.epoch,
+            metrics: context.metrics,
+            frame: context.sequence,
+        })
+    }
+
+    fn activation_needs_ack(&self, defer: bool) -> bool {
+        defer
+            && matches!(self.after_reply, Some(AfterReply::Activate))
+            && self.acknowledged_installation != self.installation()
+    }
+
+    pub(super) fn acknowledge_installation(
+        &mut self,
+        token: Installation,
+        now: Instant,
+    ) -> Result<bool, AuthorityError> {
+        self.expire_inner(now)?;
+        if self.installation() != Some(token) || token.epoch != self.epoch {
+            return Ok(false);
+        }
+        self.acknowledged_installation = Some(token);
+        self.flush_reply(now)?;
+        self.rearm_readiness()?;
+        Ok(true)
+    }
+
+    pub(super) fn has_pending_frame(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|session| session.frames.has_pending())
+    }
+
+    #[cfg(test)]
+    pub(super) fn pending_sequence(&self) -> Option<FrameSequence> {
+        self.session.as_ref()?.frames.pending_sequence()
+    }
+
+    #[cfg(test)]
+    pub(super) fn awaiting_initial_frame(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|session| matches!(session.phase, Phase::AwaitFrame(_)))
     }
 
     fn flush_reply(&mut self, now: Instant) -> Result<Flush, AuthorityError> {

@@ -108,6 +108,16 @@ released, and the next installation must contain the newest literal glyph.
 Coalesced omission frames still leave retirement BUSY while an older painted
 scene retains its pixels.
 
+The service socket tests hold the UI's paint snapshot for more than 200 ms
+while a real producer continuously publishes frames and sends PING. Every
+PONG must arrive within the unchanged 100 ms bound, ring consumption must
+continue, and the next UI installation must show the newest literal glyph.
+They also check stale installation acknowledgements, worker-side revocation
+before ANSI parsing, invalid request identities, worker panic and a blocked
+worker command. A maximum valid 1 MiB slot exercises copying and validation
+before a queued revocation, with the same command bound. These component
+checks complement the real desktop drives and performance measurements.
+
 A HELLO received before offer authorization has session zero. Revocation drops
 that obsolete offer without a reply; the client recovers to ANSI at its 200 ms
 setup bound, and the endpoint accepts a fresh offer. The socket test checks

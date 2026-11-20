@@ -1184,6 +1184,7 @@ impl PaneRuntime {
             let frame = native.authority.scene().map(|scene| scene.frame());
             Some(serde_json::json!({
                 "available": native.authority.available(),
+                "worker_max_turn_us": native.authority.max_turn_us(),
                 "generation": native.authority.epoch().get(),
                 "child_pid": native.identity().pid(),
                 "child_birth": native.identity().birth(),
@@ -1383,7 +1384,7 @@ impl PaneRuntime {
         };
         #[cfg(native_transport)]
         if let (Some(owner), Some(wake)) = (&mut native, &wake) {
-            if owner.authority.start_watcher(wake.clone()).is_err() {
+            if owner.authority.set_wake(wake.clone()).is_err() {
                 owner.authority.close();
                 native = None;
             }

@@ -42,6 +42,20 @@ The host copies and validates a slot before it owns the scene. Text clusters,
 wide cells, cursor and image placements are part of that immutable snapshot.
 Damage rectangles are hints, not permission to omit validation.
 
+A dedicated worker owns native transport, request ordering, resources and
+leases. It answers control requests while the UI paints and consumes at most
+one ring slot per turn into a single newest pending snapshot. Coalescing a
+pending full snapshot does not install it. The UI installs that snapshot as
+the common source for painting and readers, then acknowledges its session,
+generation, metrics and frame identity before the worker sends the initial
+ACTIVE reply. Revocation invalidates outstanding acknowledgements.
+
+PTY output and geometry changes synchronously revoke ownership before the UI
+parses bytes or changes metrics. A shared generation also invalidates a cached
+scene after worker-side lease expiry. An unresponsive or failed worker closes
+its endpoint and returns that pane to ANSI. A paint retaining an older scene
+keeps its image references alive until that paint releases them.
+
 An installed native scene supplies painting, selection, copy, find, links and
 accessibility text. The ANSI emulator continues to retain its independent
 content. A release, resize, metrics change, failed control exchange or expired

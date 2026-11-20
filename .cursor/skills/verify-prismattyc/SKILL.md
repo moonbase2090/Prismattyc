@@ -63,6 +63,11 @@ and formatting commands from that feature page.
 
 ## CI and test portability
 
+Run Unix permission-failure tests as an ordinary user. Root bypasses the file
+mode restrictions those fixtures exercise. A fresh VM must also fetch enough
+history for `git merge-base HEAD origin/main` before running the workspace
+version check; fetching two unrelated shallow tips does not provide that base.
+
 Full workspace tests build real version-matched component fixtures. Install the
 Wasm standard library for the test toolchain first:
 

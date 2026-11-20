@@ -1,11 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! Deliberate native inheritance belongs to the same owner that launches the PTY.
 
-use super::{
-    authority::{DesktopNative, Geometry},
-    profile,
-    transport::AVAILABILITY,
-};
+use super::{authority::Geometry, profile, service::NativeService, transport::AVAILABILITY};
 use prismattyc_emulator::PtySession;
 use std::{collections::BTreeMap, io, path::Path, time::Instant};
 
@@ -17,7 +13,7 @@ pub struct LaunchedPty {
 }
 
 pub struct BoundNative {
-    pub authority: DesktopNative,
+    pub authority: NativeService,
     identity: ChildIdentity,
 }
 impl BoundNative {
@@ -83,7 +79,7 @@ pub fn spawn(
         .process_id()
         .and_then(|pid| child_identity(pid).ok());
     let native = identity.and_then(|identity| {
-        DesktopNative::new(host.into(), geometry, Instant::now())
+        NativeService::new(host.into(), geometry, Instant::now())
             .ok()
             .map(|authority| BoundNative {
                 authority,

@@ -15,6 +15,7 @@ pub(crate) mod registry;
 pub(crate) mod retirement;
 pub(crate) mod ring;
 pub(crate) mod scene;
+pub(crate) mod service;
 pub(crate) mod transport;
 pub(crate) mod upload;
 pub(crate) mod wire12;

@@ -41,7 +41,7 @@ impl Producer {
             _descriptor: descriptor,
         }
     }
-    fn counter(&self, offset: usize) -> &AtomicU64 {
+    pub(crate) fn counter(&self, offset: usize) -> &AtomicU64 {
         unsafe { &*self.address.as_ptr().add(offset).cast::<AtomicU64>() }
     }
     pub(crate) fn publish(&self, sequence: u64, literal: &[u8]) {

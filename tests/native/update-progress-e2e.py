@@ -180,8 +180,11 @@ class LineReader:
         wait ends on the line."""
         deadline = time.monotonic() + timeout
         while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AssertionError(f'no {label} within {timeout} s')
             try:
-                line = self.lines.get(timeout=max(0.0, deadline - time.monotonic()))
+                line = self.lines.get(timeout=remaining)
             except queue.Empty:
                 raise AssertionError(f'no {label} within {timeout} s') from None
             if test(line):

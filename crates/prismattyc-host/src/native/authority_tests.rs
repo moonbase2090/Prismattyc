@@ -37,21 +37,27 @@ fn control(literal: &[u8], session: u64, epoch: u64, sequence: u64) -> Vec<u8> {
     bytes
 }
 fn response(client: &UnixStream, count: usize) -> (Vec<u8>, Option<OwnedFd>) {
-    let mut prefix = [0; 4];
-    let received = fd::receive(client.as_fd(), &mut prefix, count).unwrap();
-    assert_eq!(received.bytes, 4);
-    assert_eq!(received.descriptors.len(), count);
-    let length = u32::from_le_bytes(prefix) as usize;
-    assert!((32..=128).contains(&length));
-    let mut bytes = vec![0; length];
-    bytes[..4].copy_from_slice(&prefix);
-    assert_eq!(
-        fd::receive(client.as_fd(), &mut bytes[4..], 0)
-            .unwrap()
-            .bytes,
-        length - 4
-    );
-    (bytes, received.descriptors.into_iter().next())
+    let mut bytes = vec![0; 4];
+    let mut descriptors = Vec::new();
+    let mut used = 0;
+    while used < bytes.len() {
+        let received = fd::receive(
+            client.as_fd(),
+            &mut bytes[used..],
+            count - descriptors.len(),
+        )
+        .unwrap();
+        assert!(received.bytes > 0);
+        used += received.bytes;
+        descriptors.extend(received.descriptors);
+        if used == 4 && bytes.len() == 4 {
+            let length = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
+            assert!((32..=128).contains(&length));
+            bytes.resize(length, 0);
+        }
+    }
+    assert_eq!(descriptors.len(), count);
+    (bytes, descriptors.into_iter().next())
 }
 fn opcode(bytes: &[u8]) -> u16 {
     u16::from_le_bytes(bytes[4..6].try_into().unwrap())
@@ -166,6 +172,52 @@ fn an_early_matching_hello_waits_for_the_writer_receipt_without_allocating_or_re
     assert_eq!(value(&reply, 8), 1);
     assert!(native.scene().is_none());
     drop(descriptor);
+}
+
+#[test]
+fn resize_drops_an_unauthorized_hello_and_accepts_the_next_fresh_offer() {
+    for authorized_after_read in [false, true] {
+        let now = Instant::now();
+        let (mut native, mut client) = owner(now);
+        client.set_nonblocking(true).unwrap();
+        let old = native
+            .prepare_offer(NonZeroU32::new(1).unwrap(), now)
+            .unwrap();
+        client.write_all(&hello(&old)).unwrap();
+        native.poll(now).unwrap();
+        if authorized_after_read {
+            native.authorize_written_offer(old.receipt.clone());
+        }
+        native
+            .resize(Geometry::new(2, 1, 8, 16).unwrap(), now)
+            .unwrap();
+        native.authorize_written_offer(old.receipt);
+        native.poll(now).unwrap();
+        assert!(native.session.is_none());
+        assert!(native.scene().is_none());
+        assert_eq!(
+            client.read(&mut [0]).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        let fresh = native
+            .prepare_offer(NonZeroU32::new(2).unwrap(), now)
+            .unwrap();
+        native.authorize_written_offer(fresh.receipt.clone());
+        client.write_all(&hello(&fresh)).unwrap();
+        native.poll(now).unwrap();
+        native.poll(now).unwrap();
+        let (setup, descriptor) = response(&client, 1);
+        assert_eq!(opcode(&setup), 9);
+        assert_eq!(
+            (value(&setup, 8), value(&setup, 16), value(&setup, 24)),
+            (1, 1, 2)
+        );
+        assert!(descriptor.is_some());
+        assert_eq!(
+            client.read(&mut [0]).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
 }
 
 #[test]

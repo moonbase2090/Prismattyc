@@ -84,6 +84,11 @@ screenshots are separate evidence for desktop composition. A complete feature
 review also needs clean-VM proof at the reviewed commit and live text-reader
 checks. Unit tests alone do not establish those results.
 
+Negotiating Native ends the pane's existing Rich attachments and capability
+grant. Release restores the retained ANSI grid and does not restore those
+attachments. Applications that use both protocols must negotiate Rich again
+after releasing Native ownership.
+
 ## Rollout
 
 The feature remains experimental and off by default. Release-candidate use,

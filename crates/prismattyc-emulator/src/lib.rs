@@ -2340,6 +2340,25 @@ impl PtySession {
         })
     }
 
+    /// Number of input bytes written to the host side of the PTY that the child
+    /// has not yet read from the slave side (`FIONREAD` / `TIOCINQ` on the
+    /// slave device), or `None` when the kernel cannot say (such as on non-Unix
+    /// platforms or after the session has been reaped). Read-only.
+    pub fn unread_input_bytes(&self) -> Option<usize> {
+        #[cfg(unix)]
+        {
+            if self.reaped {
+                return None;
+            }
+            let tty_name = self.master.tty_name()?;
+            unread_input_bytes_on_tty(&tty_name)
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    }
+
     pub fn wait(&mut self) -> Result<portable_pty::ExitStatus> {
         let status = self.child.wait()?;
         self.reaped = true;
@@ -2388,6 +2407,36 @@ impl Drop for PtySession {
         // signal a recycled PID).
         self.kill_and_reap();
     }
+}
+
+#[cfg(unix)]
+fn unread_input_bytes_on_tty(tty_name: &Path) -> Option<usize> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    let c_path = CString::new(tty_name.as_os_str().as_bytes()).ok()?;
+    // SAFETY: `c_path` is a NUL-terminated path; `O_NOCTTY` avoids acquiring a
+    // controlling terminal, `O_NONBLOCK` avoids carrier waits, and `O_CLOEXEC`
+    // avoids descriptor leaks across concurrent spawns.
+    let raw_fd = unsafe {
+        libc::open(
+            c_path.as_ptr(),
+            libc::O_RDONLY | libc::O_NOCTTY | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
+    if raw_fd < 0 {
+        return None;
+    }
+    // SAFETY: `raw_fd` is a newly opened descriptor owned exclusively here.
+    let slave_fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+    let mut queued: libc::c_int = 0;
+    // SAFETY: `slave_fd` is an open descriptor and `queued` matches `FIONREAD`'s `c_int*` arg.
+    let rc = unsafe { libc::ioctl(slave_fd.as_raw_fd(), libc::FIONREAD as _, &mut queued) };
+    if rc != 0 {
+        return None;
+    }
+    usize::try_from(queued).ok()
 }
 
 #[cfg(test)]
@@ -4784,6 +4833,133 @@ mod child_fd_tests {
                 s.foreground_process_group()
             );
             s.kill_and_reap();
+        }
+
+        fn read_until_contains(session: &mut PtySession, acc: &mut String, needle: &str) {
+            let mut buf = [0u8; 256];
+            while !acc.contains(needle) {
+                let n = session.read_output(&mut buf).expect("read PTY output");
+                assert!(
+                    n > 0,
+                    "unexpected EOF before observing {needle:?} in {acc:?}"
+                );
+                acc.push_str(&String::from_utf8_lossy(&buf[..n]));
+            }
+        }
+
+        fn drain_to_eof(session: &mut PtySession, acc: &mut String) {
+            let mut buf = [0u8; 256];
+            loop {
+                match session.read_output(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => acc.push_str(&String::from_utf8_lossy(&buf[..n])),
+                    Err(err) if err.raw_os_error() == Some(libc::EIO) => break,
+                    Err(err) => panic!("drain PTY output: {err}"),
+                }
+            }
+        }
+
+        fn advance_gate(gate_write: &OwnedFd) {
+            use std::os::fd::AsRawFd;
+            let go = b"1\n";
+            // SAFETY: `gate_write` is an open pipe write end; writing 2 bytes is valid.
+            assert_eq!(
+                unsafe { libc::write(gate_write.as_raw_fd(), go.as_ptr().cast(), go.len()) },
+                2
+            );
+        }
+
+        #[test]
+        fn unread_input_bytes_reports_queued_canonical_input_until_child_reads() {
+            let (gate_read, gate_write) = cloexec_pipe();
+            let env = BTreeMap::new();
+            let mut session = PtySession::spawn_config_with_fds(
+                "/bin/sh",
+                &[
+                    "-c".to_string(),
+                    "printf 'READY\\n'; read _ <&3; IFS= read -r line; printf 'GOT:%s\\n' \"$line\"; read _ <&3 || true"
+                        .to_string(),
+                ],
+                None,
+                &env,
+                portable_pty::PtySize::default(),
+                vec![(gate_read, 3)],
+            )
+            .expect("spawn gated shell");
+
+            let mut output = String::new();
+            read_until_contains(&mut session, &mut output, "READY");
+            assert_eq!(session.unread_input_bytes(), Some(0));
+
+            let mut writer = session.take_input_writer().expect("take writer");
+            writer.write_all(b"hello-pty\n").expect("write input");
+            writer.flush().expect("flush input");
+
+            // Waiting for the PTY echo ensures the line discipline has queued
+            // the input bytes for the slave on both macOS and Linux.
+            read_until_contains(&mut session, &mut output, "hello-pty");
+            assert_eq!(session.unread_input_bytes(), Some(10));
+
+            // Advance the child past the first gate while keeping it alive on
+            // the second gate so we assert `Some(0)` while the slave is open.
+            advance_gate(&gate_write);
+            read_until_contains(&mut session, &mut output, "GOT:hello-pty");
+            assert_eq!(session.unread_input_bytes(), Some(0));
+
+            drop(gate_write);
+            drain_to_eof(&mut session, &mut output);
+            drop(writer);
+            let status = session.wait().expect("wait child");
+            assert!(status.success(), "child failed: {status:?}");
+            assert_eq!(session.unread_input_bytes(), None);
+        }
+
+        #[test]
+        fn unread_input_bytes_reports_partial_noncanonical_input() {
+            let (gate_read, gate_write) = cloexec_pipe();
+            let env = BTreeMap::new();
+            let mut session = PtySession::spawn_config_with_fds(
+                "/bin/sh",
+                &[
+                    "-c".to_string(),
+                    "stty -icanon min 1; printf 'RAWREADY\\n'; read _ <&3; dd bs=3 count=1 2>/dev/null | { IFS= read -r part; printf 'PART:%s\\n' \"$part\"; }; read _ <&3 || true"
+                        .to_string(),
+                ],
+                None,
+                &env,
+                portable_pty::PtySize::default(),
+                vec![(gate_read, 3)],
+            )
+            .expect("spawn raw-mode shell");
+
+            let mut output = String::new();
+            read_until_contains(&mut session, &mut output, "RAWREADY");
+
+            let mut writer = session.take_input_writer().expect("take writer");
+            writer.write_all(b"abc").expect("write partial input");
+            writer.flush().expect("flush partial input");
+
+            read_until_contains(&mut session, &mut output, "abc");
+            assert_eq!(session.unread_input_bytes(), Some(3));
+
+            advance_gate(&gate_write);
+            read_until_contains(&mut session, &mut output, "PART:abc");
+            assert_eq!(session.unread_input_bytes(), Some(0));
+
+            drop(gate_write);
+            drain_to_eof(&mut session, &mut output);
+            drop(writer);
+            let status = session.wait().expect("wait child");
+            assert!(status.success(), "child failed: {status:?}");
+        }
+
+        #[test]
+        fn unread_input_bytes_returns_none_for_missing_or_non_tty_paths() {
+            assert_eq!(
+                unread_input_bytes_on_tty(Path::new("/nonexistent/prismattyc-pt212-tty")),
+                None
+            );
+            assert_eq!(unread_input_bytes_on_tty(Path::new("/dev/null")), None);
         }
     }
 }

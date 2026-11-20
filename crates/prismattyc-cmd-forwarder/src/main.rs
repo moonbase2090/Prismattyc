@@ -39,13 +39,13 @@ fn forward_error(name: &str) -> String {
 }
 
 fn spawn_forward(target: &ForwardTarget) -> i32 {
-    match Command::new(&target.path)
-        .args(std::env::args_os().skip(1))
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-    {
+    match prismattyc_process::status(
+        Command::new(&target.path)
+            .args(std::env::args_os().skip(1))
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit()),
+    ) {
         Ok(status) => status.code().unwrap_or(1),
         Err(_) => {
             eprintln!("{}", forward_error(&target.name));

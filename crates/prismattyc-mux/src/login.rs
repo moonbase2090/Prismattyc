@@ -119,7 +119,9 @@ pub fn registration_path(socket: &Path) -> Result<PathBuf> {
 }
 
 fn checked(command: &mut Command) -> Result<()> {
-    let output = command.output().context("run login service command")?;
+    let output = prismattyc_process::spawn(command)
+        .and_then(std::process::Child::wait_with_output)
+        .context("run login service command")?;
     ensure!(
         output.status.success(),
         "login service command failed: {}",
@@ -228,18 +230,20 @@ pub fn sync(socket: &Path, executable: &Path) -> Result<()> {
             crate::write_file_atomic(&path, &body)?;
         }
         let domain = format!("gui/{}", unsafe { libc::getuid() });
-        let loaded = Command::new("/bin/launchctl")
-            .args(["print", &format!("{domain}/{}", label(socket))])
-            .output()?;
+        let loaded = prismattyc_process::spawn(
+            prismattyc_process::capture_command("/bin/launchctl")
+                .args(["print", &format!("{domain}/{}", label(socket))]),
+        )
+        .and_then(std::process::Child::wait_with_output)?;
         if loaded.status.success() && changed {
             checked(
-                Command::new("/bin/launchctl")
+                prismattyc_process::capture_command("/bin/launchctl")
                     .args(["bootout", &format!("{domain}/{}", label(socket))]),
             )?;
         }
         if !loaded.status.success() || changed {
             checked(
-                Command::new("/bin/launchctl")
+                prismattyc_process::capture_command("/bin/launchctl")
                     .arg("bootstrap")
                     .arg(domain)
                     .arg(path),
@@ -251,10 +255,12 @@ pub fn sync(socket: &Path, executable: &Path) -> Result<()> {
         let body = render_systemd_unit(socket, executable)?;
         if std::fs::read_to_string(&path).ok().as_deref() != Some(&body) {
             crate::write_file_atomic(&path, &body)?;
-            checked(Command::new("systemctl").args(["--user", "daemon-reload"]))?;
+            checked(
+                prismattyc_process::capture_command("systemctl").args(["--user", "daemon-reload"]),
+            )?;
         }
         checked(
-            Command::new("systemctl")
+            prismattyc_process::capture_command("systemctl")
                 .args(["--user", "enable", "--now"])
                 .arg(path.file_name().context("unit filename")?),
         )?;
@@ -274,7 +280,7 @@ pub fn sync(socket: &Path, executable: &Path) -> Result<()> {
             quote(&launch.target.to_string_lossy()),
             quote(&launch.arguments),
         );
-        let mut command = crate::platform::hidden_command("powershell.exe");
+        let mut command = crate::platform::hidden_capture_command("powershell.exe");
         command.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
         checked(&mut command)?;
     }
@@ -348,14 +354,15 @@ pub fn remove_registration(path: &Path) -> Result<()> {
     {
         // The supervisor's daemon has its own process group and is retained.
         let target = format!("gui/{}/{}", unsafe { libc::getuid() }, label);
-        let _ = Command::new("/bin/launchctl")
-            .args(["bootout", &target])
-            .output()?;
+        let _ = prismattyc_process::spawn(
+            prismattyc_process::capture_command("/bin/launchctl").args(["bootout", &target]),
+        )
+        .and_then(std::process::Child::wait_with_output)?;
     }
     #[cfg(target_os = "linux")]
     {
         checked(
-            Command::new("systemctl")
+            prismattyc_process::capture_command("systemctl")
                 .args(["--user", "disable", "--now"])
                 .arg(path.file_name().context("unit filename")?),
         )?;
@@ -393,9 +400,10 @@ pub fn report(socket: &Path) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
         let target = format!("gui/{}/{}", unsafe { libc::getuid() }, label(socket));
-        let loaded = Command::new("/bin/launchctl")
-            .args(["print", &target])
-            .output()?;
+        let loaded = prismattyc_process::spawn(
+            prismattyc_process::capture_command("/bin/launchctl").args(["print", &target]),
+        )
+        .and_then(std::process::Child::wait_with_output)?;
         println!(
             "login job: {}",
             if loaded.status.success() {
@@ -407,10 +415,12 @@ pub fn report(socket: &Path) -> Result<()> {
     }
     #[cfg(target_os = "linux")]
     {
-        let state = Command::new("systemctl")
-            .args(["--user", "is-active"])
-            .arg(path.file_name().context("unit filename")?)
-            .output();
+        let state = prismattyc_process::spawn(
+            prismattyc_process::capture_command("systemctl")
+                .args(["--user", "is-active"])
+                .arg(path.file_name().context("unit filename")?),
+        )
+        .and_then(std::process::Child::wait_with_output);
         let state = state
             .ok()
             .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned());

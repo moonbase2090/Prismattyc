@@ -1,9 +1,6 @@
 //! Cooperative host restart. Blank/local PTYs require the old process to stay.
 use super::*;
 use prismattyc_mux::component_restart as requests;
-#[cfg(unix)]
-use prismattyc_mux::platform::Exec;
-
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct WindowState {
     path: PathBuf,
@@ -162,7 +159,7 @@ fn perform(app: &mut App, request: &requests::Request) -> Result<()> {
         .env("PMUX_HOST_RESTART", serde_json::to_string(&resume)?);
     #[cfg(unix)]
     {
-        let error = command.exec();
+        let error = prismattyc_process::exec(&mut command);
         Err(error).context("start replacement host")
     }
     #[cfg(windows)]
@@ -171,9 +168,7 @@ fn perform(app: &mut App, request: &requests::Request) -> Result<()> {
         // The replacement claims the single-instance mutex. Release it first
         // or the child focuses this window and exits.
         super::instance::release();
-        let mut child = command
-            .stdin(std::process::Stdio::piped())
-            .spawn()
+        let mut child = prismattyc_process::spawn(command.stdin(std::process::Stdio::piped()))
             .context("start replacement host")?;
         let mut input = child.stdin.take().context("replacement input pipe")?;
         if let Err(error) = input.write_all(&child.id().to_le_bytes()) {

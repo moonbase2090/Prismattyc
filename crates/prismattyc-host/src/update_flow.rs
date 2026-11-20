@@ -470,13 +470,14 @@ fn run_with_progress(
     args: &[&str],
     on_progress: &mut dyn FnMut(Progress),
 ) -> Result<String> {
-    let mut child = command(pmux)
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .context("run update command")?;
+    let mut child = prismattyc_process::spawn(
+        command(pmux)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .context("run update command")?;
     let mut stdout = child.stdout.take().context("update command output")?;
     let reader = std::thread::spawn(move || {
         let mut text = String::new();
@@ -514,13 +515,14 @@ fn read_progress(input: impl BufRead, on_progress: &mut dyn FnMut(Progress)) -> 
 /// so waiting on a pipe could block until that daemon exits.
 pub(super) fn run(pmux: &Path, args: &[&str]) -> Result<String> {
     let capture = Capture::new()?;
-    let status = command(pmux)
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .stdout(capture.create("stdout")?)
-        .stderr(capture.create("stderr")?)
-        .status()
-        .context("run update command")?;
+    let status = prismattyc_process::status(
+        command(pmux)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(capture.create("stdout")?)
+            .stderr(capture.create("stderr")?),
+    )
+    .context("run update command")?;
     let stdout = capture.read("stdout")?;
     anyhow::ensure!(status.success(), "{stdout}{}", capture.read("stderr")?);
     Ok(stdout.trim().into())
@@ -573,13 +575,12 @@ fn relaunch(resume: &Resume) -> Result<()> {
     cmd.env("PRISMATTYC_COMPLETE_UPDATE", serde_json::to_string(resume)?);
     #[cfg(unix)]
     {
-        use prismattyc_mux::platform::Exec;
-        Err(cmd.exec()).context("launch updated app")
+        Err(prismattyc_process::exec(&mut cmd)).context("launch updated app")
     }
     #[cfg(windows)]
     {
         instance::release();
-        cmd.spawn().context("launch updated app")?;
+        prismattyc_process::spawn(&mut cmd).context("launch updated app")?;
         std::process::exit(0);
     }
 }
@@ -650,7 +651,7 @@ echo note >&2"#,
         let output = run(&pmux, &[]).unwrap();
         let elapsed = started.elapsed();
         let pid = std::fs::read_to_string(pmux.parent().unwrap().join("held.pid")).unwrap();
-        let _ = std::process::Command::new("kill").arg(pid.trim()).status();
+        let _ = prismattyc_process::status(std::process::Command::new("kill").arg(pid.trim()));
         assert_eq!(output, "done");
         assert!(
             elapsed < std::time::Duration::from_secs(10),

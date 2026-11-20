@@ -3319,6 +3319,7 @@ dependencies = [
  "hyper-util",
  "prismattyc-core",
  "prismattyc-mux",
+ "prismattyc-process",
  "prismattyc-winres",
  "rmcp",
  "schemars",
@@ -3349,6 +3350,7 @@ version = "0.3.71"
 dependencies = [
  "anyhow",
  "pmux-plugin-api",
+ "prismattyc-process",
  "serde_json",
  "wit-component",
 ]
@@ -3442,6 +3444,7 @@ dependencies = [
  "libc",
  "log",
  "nix",
+ "prismattyc-process",
  "serial2",
  "shared_library",
  "shell-words",
@@ -3497,6 +3500,7 @@ dependencies = [
  "prismattyc-core",
  "prismattyc-emulator",
  "prismattyc-mux",
+ "prismattyc-process",
  "prismattyc-protocol",
  "prismattyc-render",
  "prismattyc-winres",
@@ -3506,11 +3510,15 @@ dependencies = [
 [[package]]
 name = "prismattyc-cmd-forwarder"
 version = "0.3.71"
+dependencies = [
+ "prismattyc-process",
+]
 
 [[package]]
 name = "prismattyc-core"
 version = "0.3.71"
 dependencies = [
+ "prismattyc-process",
  "serde",
  "serde_json",
  "unicode-width",
@@ -3527,6 +3535,7 @@ dependencies = [
  "png 0.17.16",
  "portable-pty",
  "prismattyc-core",
+ "prismattyc-process",
  "prismattyc-protocol",
  "serde",
  "serde_json",
@@ -3559,6 +3568,7 @@ dependencies = [
  "prismattyc-core",
  "prismattyc-emulator",
  "prismattyc-mux",
+ "prismattyc-process",
  "prismattyc-protocol",
  "prismattyc-render",
  "prismattyc-winres",
@@ -3616,6 +3626,7 @@ dependencies = [
  "postcard",
  "prismattyc-core",
  "prismattyc-emulator",
+ "prismattyc-process",
  "prismattyc-protocol",
  "prismattyc-render",
  "prismattyc-winres",
@@ -3635,6 +3646,13 @@ dependencies = [
  "url",
  "windows-sys 0.61.2",
  "wit-component",
+]
+
+[[package]]
+name = "prismattyc-process"
+version = "0.3.71"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

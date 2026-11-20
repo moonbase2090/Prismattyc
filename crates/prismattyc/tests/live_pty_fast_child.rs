@@ -176,10 +176,10 @@ fn real_binary_sigterm_exits_under_pty_flood() {
     // Let the flood fill from-PTY queue and enter the drain loop.
     std::thread::sleep(Duration::from_millis(200));
     let pid = child.process_id().expect("prism process id for SIGTERM");
-    let status = std::process::Command::new("kill")
-        .args(["-TERM", &pid.to_string()])
-        .status()
-        .expect("kill -TERM prism");
+    let status = prismattyc_process::status(
+        std::process::Command::new("kill").args(["-TERM", &pid.to_string()]),
+    )
+    .expect("kill -TERM prism");
     assert!(status.success(), "kill -TERM failed: {status}");
 
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -193,9 +193,9 @@ fn real_binary_sigterm_exits_under_pty_flood() {
     }
     if !exited {
         // Fail closed: force-kill so the suite does not hang, then assert.
-        let _ = std::process::Command::new("kill")
-            .args(["-KILL", &pid.to_string()])
-            .status();
+        let _ = prismattyc_process::status(
+            std::process::Command::new("kill").args(["-KILL", &pid.to_string()]),
+        );
         let _ = child.wait();
         let _ = drain.join();
         panic!(

@@ -53,12 +53,12 @@ fn notify_argv(title: &str, body: &str) -> (&'static str, Vec<String>) {
 /// Spawn detached with a reaper thread: the child is always `wait()`ed, so
 /// Unix zombies cannot accumulate no matter how the child exits.
 fn spawn_detached(command: &mut Command) -> bool {
-    match command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    {
+    match prismattyc_process::spawn(
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    ) {
         Ok(mut child) => {
             thread::spawn(move || {
                 let _ = child.wait();
@@ -111,14 +111,15 @@ pub(crate) const PLAYERS: &[&str] = &["afplay"];
 /// Run one player to completion; true only on a clean exit. The `wait()`
 /// both judges the exit status and reaps the child.
 fn play_to_end(program: &str, path: &Path) -> bool {
-    Command::new(program)
-        .arg(path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .and_then(|mut child| child.wait())
-        .is_ok_and(|status| status.success())
+    prismattyc_process::spawn(
+        Command::new(program)
+            .arg(path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .and_then(|mut child| child.wait())
+    .is_ok_and(|status| status.success())
 }
 
 /// First candidate the attempt function accepts wins. Separated from

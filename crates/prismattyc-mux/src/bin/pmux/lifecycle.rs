@@ -199,12 +199,13 @@ pub(super) fn restart(paths: &Paths, args: Vec<String>) -> Result<()> {
                 }
                 shutdown_idle(paths, &mut client, client_id)?;
             } else if opts.stop_sessions {
-                let stopped = Command::new(&executable)
-                    .arg("--socket")
-                    .arg(&paths.socket)
-                    .arg("stop")
-                    .stdout(Stdio::null())
-                    .status()?;
+                let stopped = prismattyc_process::status(
+                    Command::new(&executable)
+                        .arg("--socket")
+                        .arg(&paths.socket)
+                        .arg("stop")
+                        .stdout(Stdio::null()),
+                )?;
                 anyhow::ensure!(stopped.success(), "daemon stop failed");
             } else {
                 stop_idle(paths)?;
@@ -217,7 +218,10 @@ pub(super) fn restart(paths: &Paths, args: Vec<String>) -> Result<()> {
             if let Some(server) = prismattyc_mux::release_update::installed_binary("pmuxd") {
                 up.env("PMUX_SERVER", server);
             }
-            anyhow::ensure!(up.status()?.success(), "daemon up failed");
+            anyhow::ensure!(
+                prismattyc_process::status(&mut up)?.success(),
+                "daemon up failed"
+            );
             results.push(json!({"component":"daemon","status":"restarted"}));
             results.push(reconciled_plugins(paths));
         } else {

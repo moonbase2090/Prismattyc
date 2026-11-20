@@ -61,16 +61,17 @@ fn start_server(socket: &Path, data: &Path) -> ServerGuard {
     let mut command = Command::new(env!("CARGO_BIN_EXE_pmuxd"));
     clear_command_env(&mut command);
     let guard = ServerGuard {
-        child: command
-            .arg("--socket")
-            .arg(socket)
-            .args(["--", "/bin/sh", "-c", "exec sleep 999"])
-            .env("XDG_DATA_HOME", data)
-            .env("PMUX_SESSION_AGENTS", data.join("session-agents.json"))
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn pmuxd"),
+        child: prismattyc_process::spawn(
+            command
+                .arg("--socket")
+                .arg(socket)
+                .args(["--", "/bin/sh", "-c", "exec sleep 999"])
+                .env("XDG_DATA_HOME", data)
+                .env("PMUX_SESSION_AGENTS", data.join("session-agents.json"))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .expect("spawn pmuxd"),
         socket: socket.to_path_buf(),
         data: data.to_path_buf(),
     };
@@ -87,17 +88,19 @@ fn start_server(socket: &Path, data: &Path) -> ServerGuard {
 /// environment: no inherited PMUX_AGENT / PRISMATTYC_PANE_ID may leak into
 /// the resolution order under test.
 fn pmux(socket: &Path, args: &[&str]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_pmux"));
+    let mut command = prismattyc_process::capture_command(env!("CARGO_BIN_EXE_pmux"));
     clear_command_env(&mut command);
-    command
-        .arg("--socket")
-        .arg(socket)
-        .args(args)
-        .env_remove("PMUX_AGENT")
-        .env_remove("PRISMATTYC_PANE_ID")
-        .stdin(Stdio::null())
-        .output()
-        .expect("run pmux")
+    prismattyc_process::spawn(
+        command
+            .arg("--socket")
+            .arg(socket)
+            .args(args)
+            .env_remove("PMUX_AGENT")
+            .env_remove("PRISMATTYC_PANE_ID")
+            .stdin(Stdio::null()),
+    )
+    .and_then(std::process::Child::wait_with_output)
+    .expect("run pmux")
 }
 
 fn ok(output: &Output) -> String {
@@ -261,17 +264,19 @@ fn status_set_requires_pane_and_roundtrips() {
         .nth(1)
         .and_then(|rest| rest.split(')').next())
         .expect("pane id in create output");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_pmux"));
+    let mut command = prismattyc_process::capture_command(env!("CARGO_BIN_EXE_pmux"));
     clear_command_env(&mut command);
-    let set = command
-        .arg("--socket")
-        .arg(&socket)
-        .args(["status-set", "build ok"])
-        .env_remove("PMUX_AGENT")
-        .env("PRISMATTYC_PANE_ID", pane)
-        .stdin(Stdio::null())
-        .output()
-        .expect("status-set");
+    let set = prismattyc_process::spawn(
+        command
+            .arg("--socket")
+            .arg(&socket)
+            .args(["status-set", "build ok"])
+            .env_remove("PMUX_AGENT")
+            .env("PRISMATTYC_PANE_ID", pane)
+            .stdin(Stdio::null()),
+    )
+    .and_then(std::process::Child::wait_with_output)
+    .expect("status-set");
     assert!(
         set.status.success(),
         "{}{}",
@@ -400,19 +405,20 @@ fn mail_watch_reports_when_the_daemon_exits() {
     let data = data_dir();
     let mut server = start_server(&socket, &data);
 
-    let mut command = Command::new(env!("CARGO_BIN_EXE_pmux"));
+    let mut command = prismattyc_process::capture_command(env!("CARGO_BIN_EXE_pmux"));
     clear_command_env(&mut command);
-    let mut child = command
-        .arg("--socket")
-        .arg(&socket)
-        .args(["mail", "--as", "kiro-pm", "watch", "--timeout", "30"])
-        .env_remove("PMUX_AGENT")
-        .env_remove("PRISMATTYC_PANE_ID")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn mail watch");
+    let mut child = prismattyc_process::spawn(
+        command
+            .arg("--socket")
+            .arg(&socket)
+            .args(["mail", "--as", "kiro-pm", "watch", "--timeout", "30"])
+            .env_remove("PMUX_AGENT")
+            .env_remove("PRISMATTYC_PANE_ID")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .expect("spawn mail watch");
     let watcher = child.id();
     let connected = std::time::Instant::now();
     while !process_has_unix_socket(watcher) {

@@ -1758,7 +1758,7 @@ future_remote = { values = [3, 4] }
         let children: Vec<_> = ["font", "padding"]
             .into_iter()
             .map(|role| {
-                std::process::Command::new(std::env::current_exe().unwrap())
+                prismattyc_process::spawn(std::process::Command::new(std::env::current_exe().unwrap())
                     .args([
                         "--exact",
                         "config::tests::separate_process_edits_merge_against_the_latest_document",
@@ -1766,8 +1766,7 @@ future_remote = { values = [3, 4] }
                     .env(CHILD, &dir)
                     .env("PRISMATTYC_CONFIG_WRITER_ROLE", role)
                     .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .spawn()
+                    .stderr(std::process::Stdio::piped()))
                     .unwrap()
             })
             .collect();

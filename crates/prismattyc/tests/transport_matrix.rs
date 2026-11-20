@@ -20,15 +20,16 @@ fn prism_bin() -> PathBuf {
 }
 
 fn have_tmux() -> bool {
-    Command::new("tmux").arg("-V").output().is_ok()
+    prismattyc_process::spawn(prismattyc_process::capture_command("tmux").arg("-V"))
+        .and_then(std::process::Child::wait_with_output)
+        .is_ok()
 }
 
 /// `tmux -V` stdout, e.g. `"tmux 3.4"` / `"tmux 3.5a"`. Always printed by T3
 /// so CI logs self-identify the runner package.
 fn tmux_version() -> String {
-    Command::new("tmux")
-        .arg("-V")
-        .output()
+    prismattyc_process::spawn(prismattyc_process::capture_command("tmux").arg("-V"))
+        .and_then(std::process::Child::wait_with_output)
         .ok()
         .and_then(|out| String::from_utf8(out.stdout).ok())
         .map(|s| s.trim().to_string())
@@ -53,9 +54,13 @@ impl TmuxServerGuard {
 
 impl Drop for TmuxServerGuard {
     fn drop(&mut self) {
-        let stopped = Command::new("tmux")
-            .args(["-L", &self.0, "kill-server"])
-            .output();
+        let stopped =
+            prismattyc_process::spawn(prismattyc_process::capture_command("tmux").args([
+                "-L",
+                &self.0,
+                "kill-server",
+            ]))
+            .and_then(std::process::Child::wait_with_output);
         eprintln!(
             "transport: tmux kill-server: {:?}",
             stopped
@@ -67,26 +72,42 @@ impl Drop for TmuxServerGuard {
 
 /// Bring a dedicated tmux server up and wait until it answers.
 fn tmux_passthrough_on(label: &str) -> bool {
-    let _ = Command::new("tmux")
-        .args(["-L", label, "set", "-g", "allow-passthrough", "all"])
-        .output();
-    Command::new("tmux")
-        .args(["-L", label, "show", "-gv", "allow-passthrough"])
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .is_some_and(|out| {
-            let value = String::from_utf8_lossy(&out.stdout);
-            let value = value.trim();
-            value == "on" || value == "all"
-        })
+    let _ = prismattyc_process::spawn(prismattyc_process::capture_command("tmux").args([
+        "-L",
+        label,
+        "set",
+        "-g",
+        "allow-passthrough",
+        "all",
+    ]))
+    .and_then(std::process::Child::wait_with_output);
+    prismattyc_process::spawn(prismattyc_process::capture_command("tmux").args([
+        "-L",
+        label,
+        "show",
+        "-gv",
+        "allow-passthrough",
+    ]))
+    .and_then(std::process::Child::wait_with_output)
+    .ok()
+    .filter(|out| out.status.success())
+    .is_some_and(|out| {
+        let value = String::from_utf8_lossy(&out.stdout);
+        let value = value.trim();
+        value == "on" || value == "all"
+    })
 }
 
 fn wait_tmux_ready(label: &str, cfg: &std::path::Path, timeout: Duration) -> bool {
     let cfg = cfg.to_str().expect("utf8 tmux cfg");
-    let start = Command::new("tmux")
-        .args(["-L", label, "-f", cfg, "start-server"])
-        .output();
+    let start = prismattyc_process::spawn(prismattyc_process::capture_command("tmux").args([
+        "-L",
+        label,
+        "-f",
+        cfg,
+        "start-server",
+    ]))
+    .and_then(std::process::Child::wait_with_output);
     eprintln!(
         "transport: tmux start-server: {:?}",
         start
@@ -95,10 +116,13 @@ fn wait_tmux_ready(label: &str, cfg: &std::path::Path, timeout: Duration) -> boo
     );
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        if Command::new("tmux")
-            .args(["-L", label, "list-commands"])
-            .output()
-            .is_ok_and(|out| out.status.success())
+        if prismattyc_process::spawn(prismattyc_process::capture_command("tmux").args([
+            "-L",
+            label,
+            "list-commands",
+        ]))
+        .and_then(std::process::Child::wait_with_output)
+        .is_ok_and(|out| out.status.success())
         {
             return true;
         }
@@ -500,7 +524,7 @@ fn rich_prism_exits_when_host_pty_hangs_up() {
             Ok(())
         });
     }
-    let mut child = cmd.spawn().expect("spawn prism");
+    let mut child = prismattyc_process::spawn(&mut cmd).expect("spawn prism");
 
     // SAFETY: the parent's copies; the child holds its own dup'd descriptors.
     unsafe {

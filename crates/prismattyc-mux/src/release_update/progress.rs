@@ -165,11 +165,12 @@ mod tests {
     fn the_final_report_counts_earlier_files_and_the_whole_last_one() {
         let dir = temporary("final");
         let path = dir.join("pmuxd");
-        let mut child = crate::platform::hidden_command(Path::new(env!("CARGO")))
-            .arg("--version")
-            .stdout(std::fs::File::create(&path).unwrap())
-            .spawn()
-            .unwrap();
+        let mut child = prismattyc_process::spawn(
+            crate::platform::hidden_command(Path::new(env!("CARGO")))
+                .arg("--version")
+                .stdout(std::fs::File::create(&path).unwrap()),
+        )
+        .unwrap();
         let part = Part {
             item: "pmuxd",
             path: &path,

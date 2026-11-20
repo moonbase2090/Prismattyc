@@ -301,7 +301,7 @@ impl PtyFd {
                 })
         };
 
-        let mut child = cmd.spawn()?;
+        let mut child = prismattyc_process::spawn(&mut cmd)?;
 
         // Ensure that we close out the slave fds that Child retains;
         // they are not what we need (we need the master side to reference

@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: MIT
+#[cfg(target_os = "linux")]
+mod support;
 use native_client_probe::{control::Control, session::record};
 use std::{
     io::{Read, Write},
@@ -42,15 +44,17 @@ fn existing_lunatui_grid_codec_activates_real_host_minor_zero_and_releases() {
     use lunatui_core::{ClusterTable, Color, Grid, Rect, Style};
     use lunatui_prismattyc::FrameEncoder;
     use native_client_probe::ring::Producer;
-    use native_component_proof::{
-        authority::{DesktopNative, Geometry},
-        frame::Glyph,
-    };
+    use native_component_proof::{authority::Geometry, frame::Glyph, service::NativeService};
     use std::num::NonZeroU32;
     let now = Instant::now();
     let (left, right) = prismattyc_process::fd::socket_pair().unwrap();
     let mut host =
-        DesktopNative::new(left.into(), Geometry::new(3, 2, 8, 16).unwrap(), now).unwrap();
+        NativeService::new(left.into(), Geometry::new(3, 2, 8, 16).unwrap(), now).unwrap();
+    let (wake_tx, wake_rx) = std::sync::mpsc::channel();
+    host.set_wake(std::sync::Arc::new(move || {
+        let _ = wake_tx.send(());
+    }))
+    .unwrap();
     let offer = host
         .prepare_offer(NonZeroU32::new(77).unwrap(), now)
         .unwrap();
@@ -62,11 +66,8 @@ fn existing_lunatui_grid_codec_activates_real_host_minor_zero_and_releases() {
     hello[32..36].copy_from_slice(&77u32.to_le_bytes());
     hello[36..38].copy_from_slice(&1u16.to_le_bytes());
     hello[40..56].copy_from_slice(&offer.value);
-    client.begin(hello, None, now).unwrap();
-    assert!(client.step(now).unwrap().is_none());
-    host.poll(now).unwrap();
-    host.poll(now).unwrap();
-    let setup = client.step(now).unwrap().unwrap();
+    client.begin(hello, None, Instant::now()).unwrap();
+    let setup = support::finish(&mut client);
     assert_eq!(&setup.bytes[4..8], &[2, 0, 0, 0]);
     assert_eq!(
         &setup.bytes[32..48],
@@ -99,12 +100,10 @@ fn existing_lunatui_grid_codec_activates_real_host_minor_zero_and_releases() {
         .unwrap();
     let mut activate = record(3, 40, session, 1, 2);
     activate[32..40].copy_from_slice(&1u64.to_le_bytes());
-    client.begin(activate, None, now).unwrap();
-    assert!(client.step(now).unwrap().is_none());
-    host.poll(now).unwrap();
-    host.poll(now).unwrap();
-    host.poll(now).unwrap();
-    let active = client.step(now).unwrap().unwrap();
+    client.begin(activate, None, Instant::now()).unwrap();
+    assert!(client.step(Instant::now()).unwrap().is_none());
+    support::install(&mut host, &wake_rx, now);
+    let active = support::finish(&mut client);
     assert_eq!(&active.bytes[4..8], &[4, 0, 0, 0]);
     let frame = host.scene().unwrap().frame();
     assert_eq!(frame.cells[0].glyph, Glyph::Scalar('界'));
@@ -114,12 +113,13 @@ fn existing_lunatui_grid_codec_activates_real_host_minor_zero_and_releases() {
     assert_eq!(frame.clusters, ["e\u{301}"]);
     for (opcode, expected, sequence) in [(7, 8, 3), (5, 6, 4)] {
         client
-            .begin(record(opcode, 32, session, 1, sequence), None, now)
+            .begin(
+                record(opcode, 32, session, 1, sequence),
+                None,
+                Instant::now(),
+            )
             .unwrap();
-        assert!(client.step(now).unwrap().is_none());
-        host.poll(now).unwrap();
-        host.poll(now).unwrap();
-        let reply = client.step(now).unwrap().unwrap();
+        let reply = support::finish(&mut client);
         assert_eq!(reply.bytes, record(expected, 32, session, 1, sequence));
     }
     assert!(host.scene().is_none());

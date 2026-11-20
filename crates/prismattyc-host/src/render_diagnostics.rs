@@ -2,6 +2,26 @@
 use super::{App, Duration, Instant, TransientOverlayState};
 use std::fmt;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn thread_cpu_time() -> Option<Duration> {
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    if unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) } != 0 {
+        return None;
+    }
+    Some(Duration::new(
+        u64::try_from(time.tv_sec).ok()?,
+        u32::try_from(time.tv_nsec).ok()?,
+    ))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn thread_cpu_time() -> Option<Duration> {
+    None
+}
+
 fn native_transport_status() -> Option<serde_json::Value> {
     #[cfg(native_transport)]
     {
@@ -219,6 +239,11 @@ impl App {
         if !should_publish_render_status(self.last_render_status, now, toast_guard_stale) {
             return;
         }
+        let timing = self
+            .windows
+            .values()
+            .any(|host| host.render_timer.logs())
+            .then(|| (Instant::now(), thread_cpu_time()));
         self.last_render_status = Some(now);
         self.render_status_seq = self.render_status_seq.saturating_add(1);
         for host in self.windows.values_mut() {
@@ -449,6 +474,19 @@ impl App {
             .render_status(pid_path.clone(), *pid, status)
         {
             eprintln!("prismattyc-host: could not publish render status: {error}");
+        }
+        if let Some((started, cpu_started)) = timing {
+            let cpu_us = cpu_started
+                .zip(thread_cpu_time())
+                .and_then(|(start, end)| end.checked_sub(start))
+                .map_or_else(
+                    || "unavailable".to_owned(),
+                    |elapsed| elapsed.as_micros().to_string(),
+                );
+            eprintln!(
+                "prismattyc-host: render-status wall_us={} thread_cpu_us={cpu_us}",
+                started.elapsed().as_micros()
+            );
         }
     }
 }

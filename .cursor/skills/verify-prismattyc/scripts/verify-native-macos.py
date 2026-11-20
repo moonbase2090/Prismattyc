@@ -17,6 +17,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -501,65 +502,69 @@ def run_animation():
         path.write_bytes(b''.join(bytes((*(color if (x // 2 + y // 2) % 2 == 0 else (0, 0, 0)), 255)) for y in range(64) for x in range(64)))
     captures = {}
     records = []
-    start = time.monotonic()
-    sent = 0
-    deadline = start + 5.3
-    while True:
-        now = time.monotonic()
-        while sent < 150 and now >= start + sent / 30:
-            sent += 1
-            command(f'load 1 {sent} 64 64 1 1 {out / f"animation-{sent}.rgba"}')
-            records.append({'event': 'sent', 'generation': sent, 'elapsed': time.monotonic() - start})
-        while b'\n' in buffer:
-            line, _, remaining = buffer.partition(b'\n')
-            buffer[:] = remaining
-            value = json.loads(line)
-            events.append(value)
-            assert value.get('event') != 'fallback', value
-            if value.get('event') == 'admission':
-                assert value['status'] in (0, 1), value
-            if value.get('event') == 'frame' and value['placements'] == 1:
-                accepted = [item for item in value['requests'] if item['accepted'] and item['image'] == 1]
-                assert len(accepted) == 1
-                frames[value['frame']] = accepted[0]['generation']
+    with (out / 'animation-pacer.log').open('w') as log:
+        pacer = subprocess.Popen([sys.executable, str(root / '.cursor/skills/verify-prismattyc/scripts/native-animation-pacer.py'),
+                                  '--fd', str(control.fileno()), '--images', str(out), '--out', str(out / 'animation-pacer.json')],
+                                 pass_fds=(control.fileno(),), stdout=subprocess.PIPE, stderr=log)
         try:
-            before = (out / 'present.json').read_bytes()
-            meta = json.loads(before)
-            if meta['seq'] not in captures:
-                png = (out / 'present.png').read_bytes()
-                if before == (out / 'present.json').read_bytes():
-                    assert meta['host_pid'] == host.pid and meta['host_instance'] == instance
-                    elapsed = time.monotonic() - start
-                    captures[meta['seq']] = (png, elapsed, meta)
-                    records.append({'event': 'captured', 'elapsed': elapsed, 'capture_seq': meta['seq']})
-        except (FileNotFoundError, json.JSONDecodeError):
-            pass
-        if now >= deadline:
-            break
-        next_tick = start + sent / 30 if sent < 150 else deadline
-        readable, _, _ = select.select([control, kqueue.fileno()], [], [], max(0, min(next_tick, deadline) - time.monotonic()))
-        if control in readable:
-            chunk = control.recv(8192)
-            assert chunk, 'animation client disconnected'
-            buffer.extend(chunk)
-        if kqueue.fileno() in readable:
-            kqueue.control(None, 4, 0)
-        health()
-    (out / 'animation-records.json').write_text(json.dumps(records, indent=2))
-    assert set(frames.values()) >= set(colors), ('some generations never became ready', sorted(set(colors) - set(frames.values())))
-    final_frame = max(frame for frame, generation in frames.items() if generation == 150)
-    def final_present():
-        current = window_status()
-        if not current:
-            return None
-        pane = current['current_panes'][0]
-        installed = (pane.get('native') or {}).get('installed_frame')
-        return current if installed and installed['sequence'] == final_frame and installed['placements'] == 1 and current['last_raster']['present_succeeded'] else None
-    final = await_file(final_present, 'last animation generation presented as native')
-    assert final['last_raster']['present']['backend'] == args.presenter
-    (out / 'animation-final-status.json').write_text(json.dumps(final, indent=2))
-    command('release')
-    event(lambda value: value.get('event') == 'released', 'animation session releases')
+            assert select.select([pacer.stdout], [], [], 10)[0], 'animation pacer startup'
+            started = json.loads(pacer.stdout.readline())
+            assert started['event'] == 'pacing-start'
+            start_ns = started['start_ns']
+            start = start_ns / 1_000_000_000
+            deadline = start + 5.3
+            while True:
+                while b'\n' in buffer:
+                    line, _, remaining = buffer.partition(b'\n')
+                    buffer[:] = remaining
+                    value = json.loads(line)
+                    events.append(value)
+                    assert value.get('event') != 'fallback', value
+                    if value.get('event') == 'admission':
+                        assert value['status'] in (0, 1), value
+                    if value.get('event') == 'frame' and value['placements'] == 1:
+                        accepted = [item for item in value['requests'] if item['accepted'] and item['image'] == 1]
+                        assert len(accepted) == 1
+                        frames[value['frame']] = accepted[0]['generation']
+                try:
+                    before = (out / 'present.json').read_bytes()
+                    meta = json.loads(before)
+                    if meta['seq'] not in captures:
+                        png = (out / 'present.png').read_bytes()
+                        if before == (out / 'present.json').read_bytes():
+                            assert meta['host_pid'] == host.pid and meta['host_instance'] == instance
+                            elapsed = time.monotonic() - start
+                            captures[meta['seq']] = (png, elapsed, meta)
+                            records.append({'event': 'captured', 'elapsed': elapsed, 'capture_seq': meta['seq']})
+                except (FileNotFoundError, json.JSONDecodeError):
+                    pass
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                readable, _, _ = select.select([control, kqueue.fileno()], [], [], remaining)
+                if control in readable:
+                    chunk = control.recv(8192)
+                    assert chunk, 'animation client disconnected'
+                    buffer.extend(chunk)
+                if kqueue.fileno() in readable:
+                    kqueue.control(None, 4, 0)
+                health()
+            assert pacer.poll() is not None, 'pacer did not complete inside the original workload window'
+        finally:
+            if pacer.poll() is None:
+                pacer.terminate()
+            pacer.wait(timeout=2)
+            pacer.stdout.close()
+    pacing = json.loads((out / 'animation-pacer.json').read_text())
+    records.extend({'event': 'sent', 'generation': row['generation'], 'elapsed': (row['sent_ns'] - start_ns) / 1_000_000_000,
+                    'lateness_ns': row['before_send_ns'] - row['scheduled_ns']} for row in pacing['records'])
+    admissions = {value['generation']: value for value in events if value.get('event') == 'admission'
+                  and value['image'] == 1 and 1 <= value['generation'] <= 150 and value['monotonic_ns'] >= start_ns}
+    cutoff_ns = start_ns + 5_000_000_000
+    admitted_in_window = {generation for generation, value in admissions.items() if value['monotonic_ns'] < cutoff_ns}
+    ready_in_window = {request['generation'] for value in events if value.get('event') == 'frame'
+                       and start_ns <= value['monotonic_ns'] < cutoff_ns for request in value['requests']
+                       if request['image'] == 1 and request['accepted'] and request['generation'] in admissions}
     shown = {}
     for capture_seq, (png, elapsed, meta) in captures.items():
         image = png_module.PNG(png)
@@ -576,12 +581,38 @@ def run_animation():
         shown[generation] = elapsed
         (out / f'animation-presented-{generation}.png').write_bytes(png)
         records.append({'event': 'verified', 'generation': generation, 'elapsed': elapsed, 'capture_seq': capture_seq})
+    span = max(shown.values()) - min(shown.values()) if shown else None
+    counts = {'generated': pacing['generated'], 'admitted': len(admissions), 'ready': len(set(frames.values()) & set(admissions)),
+              'presented': len(shown), 'admitted_in_five_seconds': len(admitted_in_window),
+              'ready_in_five_seconds': len(ready_in_window), 'admitted_per_second': len(admitted_in_window) / 5,
+              'ready_per_second': len(ready_in_window) / 5, 'presented_span_seconds': span,
+              'missing_presentations': sorted(set(admissions) - set(shown)),
+              'unadmitted_presentations': sorted(set(shown) - set(admissions)),
+              'generator_missed_intervals': pacing.get('missed_intervals')}
+    result['animation'] = counts
     (out / 'animation-records.json').write_text(json.dumps(records, indent=2))
-    assert set(shown) == set(colors), ('animation missed native checker generations', sorted(set(colors) - set(shown)), 'raw captures', len(captures))
-    span = max(shown.values()) - min(shown.values())
-    assert span <= 5.05, ('animation rate below 30Hz workload', span)
-    result['cases'].append({'name': '150 distinct 64x64 checker generations at 30Hz', 'presented_generations': len(shown), 'span_seconds': span, 'literal_pixels_per_generation': 34496})
+    (out / 'animation-counts.json').write_text(json.dumps(counts, indent=2))
+    assert pacer.returncode == 0 and pacing['status'] == 'PASS', ('invalid workload pacing', pacing)
+    assert set(shown) == set(admissions), ('host presentation differs from uploaded generations', counts)
+    assert counts['admitted_per_second'] >= 30 and counts['ready_per_second'] >= 30, ('native animation throughput below 30Hz for five seconds', counts)
+    assert set(shown) == set(colors), ('animation missed native checker generations', counts)
+    assert span <= 5.05, ('animation rate below 30Hz workload', counts)
+    final_frame = max(frame for frame, generation in frames.items() if generation == 150)
+    def final_present():
+        current = window_status()
+        if not current:
+            return None
+        pane = current['current_panes'][0]
+        installed = (pane.get('native') or {}).get('installed_frame')
+        return current if installed and installed['sequence'] == final_frame and installed['placements'] == 1 and current['last_raster']['present_succeeded'] else None
+    final = await_file(final_present, 'last animation generation presented as native')
+    assert final['last_raster']['present']['backend'] == args.presenter
+    (out / 'animation-final-status.json').write_text(json.dumps(final, indent=2))
+    command('release')
+    event(lambda value: value.get('event') == 'released', 'animation session releases')
+    result['cases'].append({'name': '150 distinct 64x64 checker generations at 30Hz', **counts, 'literal_pixels_per_generation': 34496})
     result['status'] = 'PASS'
+
 
 def process_command(pid):
     completed = subprocess.run(['/bin/ps', '-ww', '-p', str(pid), '-o', 'command='], capture_output=True, text=True, timeout=5)

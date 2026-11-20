@@ -26,6 +26,8 @@ pub mod retirement;
 pub mod ring;
 #[path = "../../../../../../crates/prismattyc-host/src/native/scene.rs"]
 pub mod scene;
+#[path = "../../../../../../crates/prismattyc-host/src/native/service.rs"]
+pub mod service;
 #[path = "../../../../../../crates/prismattyc-host/src/native/transport.rs"]
 pub mod transport;
 #[path = "../../../../../../crates/prismattyc-host/src/native/upload.rs"]

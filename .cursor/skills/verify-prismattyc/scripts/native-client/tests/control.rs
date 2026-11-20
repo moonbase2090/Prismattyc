@@ -2,11 +2,13 @@
 use lunatui_core::{ClusterTable, Grid};
 use lunatui_prismattyc::FrameEncoder;
 use native_client_probe::{control::Control, frame, ring::Producer};
-use native_component_proof::authority::{DesktopNative, Geometry};
+use native_component_proof::{authority::Geometry, service::NativeService};
+mod support;
 use std::{
     io::{Read, Write},
     num::NonZeroU32,
     os::unix::net::UnixStream,
+    sync::{mpsc, Arc},
     time::{Duration, Instant},
 };
 
@@ -25,7 +27,12 @@ fn client_and_actual_host_activate_expire_release_and_rearm_at_a_new_epoch() {
     let mut now = Instant::now();
     let (left, right) = prismattyc_process::fd::socket_pair().unwrap();
     let mut host =
-        DesktopNative::new(left.into(), Geometry::new(3, 2, 8, 16).unwrap(), now).unwrap();
+        NativeService::new(left.into(), Geometry::new(3, 2, 8, 16).unwrap(), now).unwrap();
+    let (wake_tx, wake_rx) = mpsc::channel();
+    host.set_wake(Arc::new(move || {
+        let _ = wake_tx.send(());
+    }))
+    .unwrap();
     let mut client = Control::new(right.into()).unwrap();
     for epoch in [1u64, 2] {
         let offer = host
@@ -38,11 +45,8 @@ fn client_and_actual_host_activate_expire_release_and_rearm_at_a_new_epoch() {
         hello[36..38].copy_from_slice(&1u16.to_le_bytes());
         hello[38..40].copy_from_slice(&2u16.to_le_bytes());
         hello[40..56].copy_from_slice(&offer.value);
-        client.begin(hello, None, now).unwrap();
-        assert!(client.step(now).unwrap().is_none());
-        host.poll(now).unwrap();
-        host.poll(now).unwrap();
-        let setup = client.step(now).unwrap().unwrap();
+        client.begin(hello, None, Instant::now()).unwrap();
+        let setup = support::finish(&mut client);
         assert_eq!(&setup.bytes[4..8], &[9, 0, 0, 0]);
         let session = u64::from_le_bytes(setup.bytes[8..16].try_into().unwrap());
         let metrics = u64::from_le_bytes(setup.bytes[64..72].try_into().unwrap());
@@ -60,45 +64,37 @@ fn client_and_actual_host_activate_expire_release_and_rearm_at_a_new_epoch() {
         producer.publish(&bytes).unwrap();
         let mut activate = request(3, 40, session, epoch, 2);
         activate[32..40].copy_from_slice(&1u64.to_le_bytes());
-        client.begin(activate, None, now).unwrap();
-        assert!(client.step(now).unwrap().is_none());
-        host.poll(now).unwrap();
-        host.poll(now).unwrap();
-        host.poll(now).unwrap();
-        let active = client.step(now).unwrap().unwrap();
+        client.begin(activate, None, Instant::now()).unwrap();
+        assert!(client.step(Instant::now()).unwrap().is_none());
+        support::install(&mut host, &wake_rx, now);
+        let active = support::finish(&mut client);
         assert_eq!(&active.bytes[4..8], &[4, 0, 2, 0]);
         assert_eq!(host.scene().unwrap().frame().context.sequence.get(), 1);
         client
-            .begin(request(7, 32, session, epoch, 3), None, now)
+            .begin(request(7, 32, session, epoch, 3), None, Instant::now())
             .unwrap();
-        assert!(client.step(now).unwrap().is_none());
-        host.poll(now).unwrap();
-        host.poll(now).unwrap();
-        let pong = client.step(now).unwrap().unwrap();
+        let pong = support::finish(&mut client);
         assert_eq!(&pong.bytes[32..48], &[0; 16]);
         if epoch == 1 {
-            now += Duration::from_millis(500);
-            host.expire(now).unwrap();
+            while host.scene().is_some() {
+                wake_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                now = Instant::now();
+                host.poll(now).unwrap();
+            }
             assert!(host.scene().is_none());
             client
-                .begin(request(7, 32, session, epoch, 4), None, now)
+                .begin(request(7, 32, session, epoch, 4), None, Instant::now())
                 .unwrap();
-            assert!(client.step(now).unwrap().is_none());
-            host.poll(now).unwrap();
-            host.poll(now).unwrap();
-            let ended = client.step(now).unwrap().unwrap();
+            let ended = support::finish(&mut client);
             assert_eq!(&ended.bytes[4..8], &[14, 0, 0, 0]);
             assert_eq!(&ended.bytes[32..40], &2u64.to_le_bytes());
             assert_eq!(&ended.bytes[40..48], &[3, 0, 0, 0, 0, 0, 0, 0]);
             continue;
         }
         client
-            .begin(request(5, 32, session, epoch, 4), None, now)
+            .begin(request(5, 32, session, epoch, 4), None, Instant::now())
             .unwrap();
-        assert!(client.step(now).unwrap().is_none());
-        host.poll(now).unwrap();
-        host.poll(now).unwrap();
-        let released = client.step(now).unwrap().unwrap();
+        let released = support::finish(&mut client);
         assert_eq!(&released.bytes[4..8], &[6, 0, 0, 0]);
         assert!(host.scene().is_none());
         assert_eq!(host.epoch().get(), epoch + 1);

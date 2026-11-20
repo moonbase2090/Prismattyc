@@ -384,7 +384,27 @@ impl Drop for Preparation {
     }
 }
 
-fn report(control: &mut UnixStream, value: serde_json::Value) -> Result<()> {
+fn report(control: &mut UnixStream, mut value: serde_json::Value) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    let clock = libc::CLOCK_UPTIME_RAW;
+    #[cfg(not(target_os = "macos"))]
+    let clock = libc::CLOCK_MONOTONIC;
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    ensure!(
+        unsafe { libc::clock_gettime(clock, &mut now) } == 0,
+        "probe monotonic clock"
+    );
+    let nanos = u64::try_from(now.tv_sec)?
+        .checked_mul(1_000_000_000)
+        .and_then(|seconds| seconds.checked_add(u64::try_from(now.tv_nsec).ok()?))
+        .context("probe monotonic clock overflow")?;
+    value
+        .as_object_mut()
+        .context("coordination event object")?
+        .insert("monotonic_ns".into(), json!(nanos));
     control.write_all(serde_json::to_string(&value)?.as_bytes())?;
     control.write_all(b"\n")?;
     Ok(())

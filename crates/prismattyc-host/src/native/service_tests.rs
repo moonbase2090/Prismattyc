@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
-use super::*;
-use crate::native::{
+use super::super::{
     frame::{literals as frames, Glyph},
     scene::tests::Producer,
     wire12::literals,
 };
+use super::*;
 use prismattyc_process::fd;
 use std::{
     io::{Read, Write},

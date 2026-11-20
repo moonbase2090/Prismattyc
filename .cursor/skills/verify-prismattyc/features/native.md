@@ -74,9 +74,22 @@ macOS adds these cases:
   live limit, preserves actual widget fallback and rejects an oversized source
   before upload. It compares literal pixels with real iTerm2 PNG output.
 - `animation` supplies 150 distinct 64×64 checker images at 30 Hz for five
-  seconds in a small window. Every presented generation must match the literal
-  crop and nearest-sampled pixels. The checker distinguishes image composition
-  from cell fallback. This is workload proof, not a comparative benchmark.
+  seconds in a small window. A separate owned process paces input independently
+  of capture I/O and records send jitter. Producer monotonic timestamps report
+  generated, admitted and READY generations during the five-second window.
+  Every admitted generation must be presented with the literal crop and
+  nearest-sampled pixels; an unadmitted generation must never appear. Admission
+  and READY throughput must each reach 30 generations per second. The checker
+  distinguishes image composition from cell fallback. This is workload proof,
+  not a comparative benchmark.
+
+With `render_timer = "log"`, the host reports status-snapshot wall time and
+thread CPU time separately. Status construction and queueing happen on the UI
+thread; file writes use the file-writer thread by default. Compare the same
+guest, geometry and duration with Native and Classic sources before attributing
+a timing tail to Native. Render `parse_us` accumulates UI drain work between
+paints, including native RPC waits. It does not isolate worker decode or
+validation. Keep guest measurements separate from physical hardware results.
 
 ## Control replies during revocation
 

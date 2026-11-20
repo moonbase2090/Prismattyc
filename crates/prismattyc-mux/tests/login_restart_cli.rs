@@ -63,7 +63,7 @@ fn start_server_with_env(socket: &Path, root: &Path, env: &[(&str, &str)]) -> Se
     let stderr_path = root.join("daemon.stderr");
     let mut guard = ServerGuard {
         child: prismattyc_process::spawn(
-            &mut command
+            command
                 .arg("--socket")
                 .arg(socket)
                 .args(["--", "/bin/sh", "-c", "exec sleep 999"])
@@ -177,7 +177,7 @@ fn an_existing_socket_is_not_a_daemon_readiness_signal() {
     let socket = socket_path(&root);
     let stale = UnixListener::bind(&socket).unwrap();
     let stderr_path = root.join("daemon.stderr");
-    let mut child = prismattyc_process::spawn(&mut Command::new("/bin/sh")
+    let mut child = prismattyc_process::spawn(Command::new("/bin/sh")
         .args([
             "-c",
             "printf 'STARTUP_STDOUT_LITERAL\\n'; printf 'STARTUP_ERROR_LITERAL\\n' >&2; exit 17",
@@ -292,16 +292,16 @@ fn restart_plan_never_reports_a_locked_unresponsive_daemon_as_empty() {
     impl Drop for Resume {
         fn drop(&mut self) {
             let _ = prismattyc_process::status(
-                &mut Command::new("kill").args(["-CONT", &self.0.to_string()]),
+                Command::new("kill").args(["-CONT", &self.0.to_string()]),
             );
         }
     }
     let _resume = Resume(pid);
-    assert!(prismattyc_process::status(
-        &mut Command::new("kill").args(["-STOP", &pid.to_string()])
-    )
-    .unwrap()
-    .success());
+    assert!(
+        prismattyc_process::status(Command::new("kill").args(["-STOP", &pid.to_string()]))
+            .unwrap()
+            .success()
+    );
     let output = pmux(&socket, &root, &[], &["restart", "--plan", "--json"]);
     fail(&output, "Could not read running sessions");
     let detail = text(&output);
@@ -319,7 +319,7 @@ fn restart_plan_never_reports_a_locked_unresponsive_daemon_as_empty() {
     let mut duplicate = prismattyc_process::capture_command(env!("CARGO_BIN_EXE_pmuxd"));
     clear_command_env(&mut duplicate);
     apply_isolation(&mut duplicate, &root);
-    let refused = prismattyc_process::spawn(&mut duplicate.arg("--socket").arg(&socket))
+    let refused = prismattyc_process::spawn(duplicate.arg("--socket").arg(&socket))
         .and_then(std::process::Child::wait_with_output)
         .unwrap();
     fail(&refused, "daemon lock");
@@ -592,15 +592,15 @@ fn session_configuration_restores_names_directories_and_commands_without_replay(
     let mut create = prismattyc_process::capture_command(env!("CARGO_BIN_EXE_pmux"));
     clear_command_env(&mut create);
     apply_isolation(&mut create, &root);
-    ok(&prismattyc_process::spawn(
-        &mut create.current_dir(&cwd).arg("--socket").arg(&socket).args([
+    ok(
+        &prismattyc_process::spawn(create.current_dir(&cwd).arg("--socket").arg(&socket).args([
             "new",
             "--no-attach",
             "work",
-        ]),
-    )
-    .and_then(std::process::Child::wait_with_output)
-    .unwrap());
+        ]))
+        .and_then(std::process::Child::wait_with_output)
+        .unwrap(),
+    );
     let file = root.join("configuration.json");
     let launch = "printf restored >> launches".to_string();
     ok(&pmux(
@@ -683,15 +683,15 @@ fn restore_replays_the_saved_command_into_a_pane_that_looks_busy() {
     let mut create = prismattyc_process::capture_command(env!("CARGO_BIN_EXE_pmux"));
     clear_command_env(&mut create);
     apply_isolation(&mut create, &root);
-    ok(&prismattyc_process::spawn(
-        &mut create.current_dir(&cwd).arg("--socket").arg(&socket).args([
+    ok(
+        &prismattyc_process::spawn(create.current_dir(&cwd).arg("--socket").arg(&socket).args([
             "new",
             "--no-attach",
             "work",
-        ]),
-    )
-    .and_then(std::process::Child::wait_with_output)
-    .unwrap());
+        ]))
+        .and_then(std::process::Child::wait_with_output)
+        .unwrap(),
+    );
     let file = root.join("configuration.json");
     let launch = "printf restored >> launches".to_string();
     ok(&pmux(
@@ -1375,7 +1375,7 @@ fn restore_skips_a_saved_command_with_a_line_break_and_restores_the_rest() {
         clear_command_env(&mut create);
         apply_isolation(&mut create, &root);
         ok(&prismattyc_process::spawn(
-            &mut create.current_dir(&cwd).arg("--socket").arg(&socket).args([
+            create.current_dir(&cwd).arg("--socket").arg(&socket).args([
                 "new",
                 "--no-attach",
                 name,

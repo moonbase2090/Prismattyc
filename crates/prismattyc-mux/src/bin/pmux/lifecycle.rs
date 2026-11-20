@@ -200,7 +200,7 @@ pub(super) fn restart(paths: &Paths, args: Vec<String>) -> Result<()> {
                 shutdown_idle(paths, &mut client, client_id)?;
             } else if opts.stop_sessions {
                 let stopped = prismattyc_process::status(
-                    &mut Command::new(&executable)
+                    Command::new(&executable)
                         .arg("--socket")
                         .arg(&paths.socket)
                         .arg("stop")

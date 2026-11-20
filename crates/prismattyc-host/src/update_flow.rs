@@ -366,8 +366,7 @@ pub(super) fn run(pmux: &Path, args: &[&str]) -> Result<String> {
     }
     let capture = Capture::new()?;
     let status = prismattyc_process::status(
-        &mut cmd
-            .args(args)
+        cmd.args(args)
             .stdin(std::process::Stdio::null())
             .stdout(capture.create("stdout")?)
             .stderr(capture.create("stderr")?),
@@ -501,7 +500,7 @@ echo note >&2"#,
         let output = run(&pmux, &[]).unwrap();
         let elapsed = started.elapsed();
         let pid = std::fs::read_to_string(pmux.parent().unwrap().join("held.pid")).unwrap();
-        let _ = prismattyc_process::status(&mut std::process::Command::new("kill").arg(pid.trim()));
+        let _ = prismattyc_process::status(std::process::Command::new("kill").arg(pid.trim()));
         assert_eq!(output, "done");
         assert!(
             elapsed < std::time::Duration::from_secs(10),

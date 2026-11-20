@@ -44,15 +44,24 @@ release. `--case off` checks actual widget ANSI fallback without the native
 gate. On Linux, `--case legacy` negotiates minor 0 through the existing decoder
 and frame encoder, and `--case resize` resizes the real X11 window, checks ANSI
 recovery and activates a fresh descendant on the retained shell endpoint.
-`--case text` copies a native scene with a wide glyph, a 21-scalar combining
+On Linux, `--case text` copies a native scene with a wide glyph, a 21-scalar combining
 cluster and a URL through real keyboard shortcuts and the isolated X11
 clipboard. It then releases ownership and copies the retained Classic scene.
 With `smart_ctrl_c = true` in its private configuration, it also opens Find,
 types a native-only query and copies the matched text while Find stays open.
 The clipboard reader waits for selection events. It does not read host internals.
+The retained ANSI baseline is on the alternate screen with mouse tracking.
+Find must stay open after its first query key. A plain drag reaches the
+application as actual SGR mouse bytes without copying a host selection, and
+Shift-drag selects native text. `--case text-no-mouse` repeats the reader drive
+with tracking disabled and requires plain drag to select native text. Both
+cases copy retained Classic text with Shift-drag after release.
 
 macOS adds these cases:
 
+- `text` reads the owned application's actual Accessibility tree, including the
+  full combining cluster and URL. After release it requires Classic text and
+  the absence of the native-only text. It does not access the system clipboard.
 - `ctrl-z` sends native Ctrl-Z, observes the stopped foreground process, runs
   the shell's real `fg`, checks ANSI recovery and activates a new descendant.
 - `lease` stops only the producer after a completed heartbeat. The shell keeps
@@ -116,5 +125,6 @@ When changing native text or input, additionally drive real selection/copy,
 find and link hover against a native text scene, and inspect accessibility text
 and the full combining cluster. After release, repeat one reader against the
 retained Classic source. The Linux text fixture above proves selection, copy,
-find and Classic recovery. Link hover and accessibility still need their own
-desktop drive. Native has no scrollback; Classic scrollback remains readable.
+find, application mouse priority and Classic recovery. The macOS text case
+checks Accessibility on each presenter. Link hover still needs its own desktop
+drive. Native has no scrollback; Classic scrollback remains readable.

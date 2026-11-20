@@ -22,8 +22,10 @@ parser.add_argument('--out', type=Path, required=True)
 parser.add_argument('--bins', type=Path, required=True)
 parser.add_argument('--probe', type=Path, required=True)
 parser.add_argument('--repo', type=Path, required=True)
-parser.add_argument('--mode', choices=('images', 'legacy', 'off', 'resize', 'text'), required=True)
+parser.add_argument('--mode', choices=('images', 'legacy', 'off', 'resize', 'text', 'text-no-mouse'), required=True)
 args = parser.parse_args()
+producer_mode = {'legacy': '--legacy-direct-local', 'text': '--direct-local-alt',
+                 'text-no-mouse': '--direct-local-alt-no-mouse'}.get(args.mode, '--direct-local')
 out = args.out.resolve()
 out.mkdir(exist_ok=False)
 runtime = Path(tempfile.mkdtemp(prefix='native-linux-', dir='/tmp'))
@@ -54,7 +56,7 @@ env.update(HOME=str(out / 'home'), PATH=f'{bins}:/usr/local/bin:/usr/bin:/bin', 
            PRISMATTYC_CONFIG=str(out / 'config.toml'), PRISMATTYC_DUMP_PRESENT=str(out / 'present.png'),
            PRISMATTYC_E2E_WINDOW_CELLS='64x12', WINIT_UNIX_BACKEND='x11')
 (out / 'config.toml').write_text('splash = false\nautomatic_update_checks = false\nstart_at_login = false\nspace_startup = "fresh"\ninstall_agent_skills = false\nfont_px = 18.0\nwindow_opacity = 1.0\nwindow_padding_px = 0\npane_padding_px = 0\nfocus_border_animation = "none"\n')
-if args.mode == 'text':
+if args.mode.startswith('text'):
     with (out / 'config.toml').open('a') as configuration:
         configuration.write('smart_ctrl_c = true\n')
 (out / 'binary-sha256.json').write_text(json.dumps({str(path.name): hashlib.sha256(path.read_bytes()).hexdigest() for path in [bins / 'prismattyc-host', bins / 'pmuxd', probe]}, indent=2))
@@ -63,6 +65,7 @@ probe_pid = None
 owned_probes = set()
 events = []
 buffer = bytearray()
+terminal_input = bytearray()
 result = {'status': 'FAIL', 'mode': args.mode, 'cases': []}
 
 def health():
@@ -90,6 +93,8 @@ def event(predicate, label, allow_fallback=False):
             buffer[:] = remaining
             value = json.loads(line)
             events.append(value)
+            if value['event'] == 'input':
+                terminal_input.extend(value['bytes'])
             if value['event'] == 'probe-ready':
                 probe_pid = value['pid']
                 owned_probes.add(probe_pid)
@@ -106,7 +111,7 @@ def event(predicate, label, allow_fallback=False):
 def command(text):
     control.sendall(text.encode() + b'\n')
 
-def selected_text_frame(frame, label=None, guard=None, no_footer=False):
+def selected_text_frame(frame, label=None, guard=None, no_footer=False, after_capture=0):
     try:
         status = json.loads((runtime / 'pmux.host.render.json').read_bytes())
         assert status['host_pid'] == host.pid
@@ -125,6 +130,8 @@ def selected_text_frame(frame, label=None, guard=None, no_footer=False):
         meta = json.loads(before)
         if not window['last_raster']['present_succeeded'] or window['last_raster']['capture_seq'] != meta['seq']:
             return None
+        if meta['seq'] <= after_capture:
+            return None
         if guard and guard not in window['last_raster']['guards']:
             return None
         if no_footer and 'footer-visible' in window['last_raster']['guards']:
@@ -133,7 +140,7 @@ def selected_text_frame(frame, label=None, guard=None, no_footer=False):
         name = label or pane['display_source']
         (out / f'text-{name}.png').write_bytes(png)
         (out / f'text-{name}-status.json').write_text(json.dumps(status, indent=2))
-        return {'source': pane['display_source'], 'frame': frame, 'capture': meta['seq']}
+        return {'source': pane['display_source'], 'frame': frame, 'capture': meta['seq'], 'guards': window['last_raster']['guards']}
     except (FileNotFoundError, json.JSONDecodeError):
         return None
 
@@ -145,29 +152,84 @@ def copy_keys(keys):
     finally:
         clipboard.close()
 
+def drag(end_column, shift):
+    window = json.loads((runtime / 'pmux.host.render.json').read_bytes())['windows'][0]
+    _, (left, top, _, _) = window['visible_pane_content_rects'][0]
+    cw, ch = active['cell']
+    keys = ['xdotool', 'mousemove', '--window', window_ids[0], str(left + cw // 2), str(top + ch // 2)]
+    if shift:
+        keys += ['keydown', 'Shift_L']
+    keys += ['mousedown', '1', 'mousemove', '--window', window_ids[0],
+             str(left + end_column * cw + cw // 2), str(top + ch // 2), 'mouseup', '1']
+    if shift:
+        keys += ['keyup', 'Shift_L']
+    subprocess.run(keys, env=env, check=True, timeout=10)
+
+def copy_drag(end_column, shift):
+    clipboard = native_clipboard.Clipboard(env['DISPLAY'])
+    try:
+        drag(end_column, shift)
+        return clipboard.copied_text()
+    finally:
+        clipboard.close()
+
 def text_readers():
     command('text-scene')
     changed = event(lambda value: value['event'] == 'frame' and value['placements'] == 0, 'native text scene')
     native = await_file(lambda: selected_text_frame(changed['frame']), 'native text presented')
-    native['clipboard'] = copy_keys(['ctrl+shift+a', 'ctrl+shift+c'])
-    expected = 'NATIVE-CLUSTER 界e' + '\u0301' * 20 + '\n\nhttps://example.test/native'
-    assert native['clipboard'].rstrip('\n') == expected, repr(native['clipboard'])
-    result['cases'].append(native)
+    pane = json.loads((runtime / 'pmux.host.render.json').read_bytes())['windows'][0]['current_panes'][0]
+    tracking = args.mode == 'text'
+    assert pane['alt_active'] and (pane['mouse_tracking'] != 'Off') == tracking, pane
+    result['phase'] = 'native-find-over-retained-alt'
     subprocess.run(['xdotool', 'key', '--clearmodifiers', 'Escape', 'ctrl+shift+f'], env=env, check=True, timeout=10)
-    subprocess.run(['xdotool', 'type', '--clearmodifiers', '--delay', '0', 'NATIVE-CLUSTER'], env=env, check=True, timeout=10)
+    opened = await_file(lambda: selected_text_frame(changed['frame'], label='find-open', guard='find-active', no_footer=True), 'native Find opens over the retained alternate screen')
+    subprocess.run(['xdotool', 'type', '--clearmodifiers', '--delay', '0', 'N'], env=env, check=True, timeout=10)
+    def first_query_frame():
+        frame = selected_text_frame(changed['frame'], label='find-first-key', after_capture=opened['capture'])
+        if frame:
+            assert 'find-active' in frame['guards'], 'native Find closed on the first query key'
+        return frame
+    result['cases'].append(await_file(first_query_frame, 'native Find presents the first query key'))
+    subprocess.run(['xdotool', 'type', '--clearmodifiers', '--delay', '0', 'ATIVE-CLUSTER'], env=env, check=True, timeout=10)
     match = copy_keys(['ctrl+shift+c'])
     assert match == 'NATIVE-CLUSTER', repr(match)
     found = await_file(lambda: selected_text_frame(changed['frame'], label='find', guard='find-active', no_footer=True), 'native find selection presented without the shortcut strip')
     found.update(reader='find', clipboard=match)
     result['cases'].append(found)
     subprocess.run(['xdotool', 'key', '--clearmodifiers', 'Escape'], env=env, check=True, timeout=10)
+    native['clipboard'] = copy_keys(['ctrl+shift+a', 'ctrl+shift+c'])
+    expected = 'NATIVE-CLUSTER 界e' + '\u0301' * 20 + '\n\nhttps://example.test/native'
+    assert native['clipboard'].rstrip('\n') == expected, repr(native['clipboard'])
+    result['cases'].append(native)
+    subprocess.run(['xdotool', 'key', '--clearmodifiers', 'Escape'], env=env, check=True, timeout=10)
+    result['phase'] = 'native-mouse-over-retained-alt'
+    if tracking:
+        terminal_input.clear()
+        clipboard = native_clipboard.Clipboard(env['DISPLAY'])
+        try:
+            drag(17, False)
+            event(lambda value: b'\x1b[<0;18;1m' in terminal_input, 'plain native drag reaches the application')
+            assert b'\x1b[<0;1;1M' in terminal_input and b'\x1b[<32;18;1M' in terminal_input, bytes(terminal_input)
+            assert clipboard.owns_selection(), 'plain tracked drag unexpectedly copied a host selection'
+            result['cases'].append({'reader': 'application mouse', 'input': list(terminal_input), 'host_selection_copied': False})
+        finally:
+            clipboard.close()
+    else:
+        copied = copy_drag(17, False)
+        assert copied == expected.split('\n')[0], repr(copied)
+        result['cases'].append({'reader': 'plain native drag without tracking', 'clipboard': copied})
+    if tracking:
+        copied = copy_drag(17, True)
+        assert copied == expected.split('\n')[0], repr(copied)
+        result['cases'].append({'reader': 'Shift native drag', 'clipboard': copied})
     command('release-hold')
     event(lambda value: value['event'] == 'released', 'release exposes retained Classic source')
     classic = await_file(lambda: selected_text_frame(None), 'retained Classic text presented')
-    classic['clipboard'] = copy_keys(['ctrl+shift+a', 'ctrl+shift+c'])
+    classic['clipboard'] = copy_drag(15, True)
     assert 'CLASSIC-BASELINE' in classic['clipboard'], repr(classic['clipboard'])
     assert 'NATIVE-CLUSTER' not in classic['clipboard'] and 'example.test' not in classic['clipboard']
     result['cases'].append(classic)
+    result['phase'] = 'complete'
 
 def presentation(frame, position, placements, old=None):
     try:
@@ -278,8 +340,7 @@ try:
     with (out / 'daemon.log').open('w') as log:
         daemon = subprocess.Popen([str(bins / 'pmuxd'), '--socket', env['PMUX_SOCKET'], '--', '/bin/bash', '--noprofile', '--norc'], env=env, stdout=log, stderr=log)
     await_file(lambda: Path(env['PMUX_SOCKET']).is_socket(), 'private daemon socket')
-    mode = '--legacy-direct-local' if args.mode == 'legacy' else '--direct-local'
-    launch = [str(probe), mode, str(runtime / 'probe.sock')]
+    launch = [str(probe), producer_mode, str(runtime / 'probe.sock')]
     if args.mode == 'resize':
         os.mkfifo(runtime / 'next.fifo', 0o600)
         launcher = out / 'retained-shell.sh'
@@ -313,7 +374,7 @@ try:
             frame, placements = changed['frame'], 1
         initial = await_file(lambda: presentation(frame, (1, 1), placements), 'native initial exact pixels')
         result['cases'].append(initial)
-        if args.mode == 'text':
+        if args.mode.startswith('text'):
             text_readers()
         elif args.mode == 'resize':
             resize_and_rearm(initial)
@@ -328,7 +389,7 @@ try:
             result['cases'].append(await_file(lambda: presentation(frame, None, 0, (13, 1)), 'native omission erases image'))
             if args.mode == 'images':
                 event(lambda value: value['event'] == 'retired' and value['image'] == 1 and value['generation'] == 0, 'omitted image retirement completes')
-        if args.mode != 'text':
+        if not args.mode.startswith('text'):
             command('release')
             event(lambda value: value['event'] == 'released', 'native release')
     result['status'] = 'PASS'
@@ -381,9 +442,8 @@ finally:
         attempt('control socket', control.close)
     if listener:
         attempt('listener socket', listener.close)
-    mode = b'--legacy-direct-local' if args.mode == 'legacy' else b'--direct-local'
     for pid in owned_probes:
-        expected = [os.fsencode(probe), mode, os.fsencode(runtime / 'probe.sock')]
+        expected = [os.fsencode(probe), producer_mode.encode(), os.fsencode(runtime / 'probe.sock')]
         attempt('foreground producer', lambda pid=pid, expected=expected: reap(pid, expected))
     for pid in root_pids - owned_probes:
         expected = [b'/bin/bash', b'--noprofile', b'--norc', os.fsencode(out / 'retained-shell.sh')]

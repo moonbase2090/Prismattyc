@@ -106,6 +106,12 @@ enum Scene {
     Text,
 }
 
+enum TerminalMode {
+    Primary,
+    AlternateMouse,
+    AlternateNoMouse,
+}
+
 struct Application {
     grid: Grid,
     clusters: ClusterTable,
@@ -115,6 +121,7 @@ struct Application {
     ink: bool,
     extra_images: Vec<(u32, Image, Rect)>,
     scene: Scene,
+    terminal_mode: TerminalMode,
 }
 impl Application {
     fn new() -> Result<Self> {
@@ -152,6 +159,7 @@ impl Application {
             ink: false,
             extra_images: Vec::new(),
             scene: Scene::Images,
+            terminal_mode: TerminalMode::Primary,
         })
     }
 
@@ -272,6 +280,13 @@ impl Application {
         encoder.set_token_palette(self.theme.palette());
         let mut stdout = std::io::stdout().lock();
         stdout.write_all(lunatui_prismattyc::ansi_fallback_repaint_prefix())?;
+        match self.terminal_mode {
+            TerminalMode::Primary => {}
+            TerminalMode::AlternateMouse => {
+                stdout.write_all(b"\x1b[?1049h\x1b[?1002h\x1b[?1006h")?;
+            }
+            TerminalMode::AlternateNoMouse => stdout.write_all(b"\x1b[?1049h")?,
+        }
         stdout.write_all(encoder.encode_full(&self.grid, &self.clusters, ColorMode::TrueColor))?;
         stdout.flush()?;
         Ok(())
@@ -488,9 +503,13 @@ fn native(app: &mut Application, coordination: &mut UnixStream, raw: &Raw) -> Re
             return Err(std::io::Error::last_os_error().into());
         }
         if descriptors[2].revents != 0 {
-            let mut keys = [0; 4096];
+            let mut keys = [0u8; 4096];
             let n = unsafe { libc::read(0, keys.as_mut_ptr().cast(), keys.len()) };
             ensure!(n > 0, "terminal input");
+            report(
+                coordination,
+                json!({"event":"input","bytes":&keys[..n as usize]}),
+            )?;
             if keys[..n as usize].contains(&0x1a) {
                 raw.suspend(coordination)?;
                 session.ping()?;
@@ -757,13 +776,18 @@ fn main() -> Result<()> {
         arguments.len() == 3
             && matches!(
                 arguments[1].as_str(),
-                "--direct-local" | "--legacy-direct-local"
+                "--direct-local" | "--direct-local-alt" | "--direct-local-alt-no-mouse" | "--legacy-direct-local"
             ),
-        "usage: native-client-probe --direct-local|--legacy-direct-local COORDINATION_SOCKET"
+        "usage: native-client-probe --direct-local|--direct-local-alt|--direct-local-alt-no-mouse|--legacy-direct-local COORDINATION_SOCKET"
     );
     let mut coordination = UnixStream::connect(&arguments[2])?;
     let raw = Raw::enter()?;
     let mut app = Application::new()?;
+    app.terminal_mode = match arguments[1].as_str() {
+        "--direct-local-alt" => TerminalMode::AlternateMouse,
+        "--direct-local-alt-no-mouse" => TerminalMode::AlternateNoMouse,
+        _ => TerminalMode::Primary,
+    };
     app.ansi()?;
     let result = if arguments[1] == "--legacy-direct-local" {
         #[cfg(target_os = "linux")]

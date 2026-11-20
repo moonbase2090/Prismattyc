@@ -92,6 +92,9 @@ class Clipboard:
             if data:
                 self.x.XFree(data)
 
+    def owns_selection(self):
+        return self.x.XGetSelectionOwner(self.display, self.clipboard) == self.window
+
     def close(self):
         self.x.XDestroyWindow(self.display, self.window)
         self.x.XCloseDisplay(self.display)

@@ -16314,7 +16314,7 @@ fn finish_palette_result(host: &mut HostState, result: PaletteVerdict) -> Palett
 }
 
 fn find_key_on_alt_screen(host: &mut HostState) -> bool {
-    if !host.emulator.screen().alt_active() {
+    if host.mux.focused().content().is_native() || !host.emulator.screen().alt_active() {
         return false;
     }
     let had = host.find.active;
@@ -19587,11 +19587,13 @@ fn handle_scrollbar_drag(host: &mut HostState) -> bool {
     true
 }
 
-/// guest TUIs on alt (vim) refuse host select unless Shift.
+/// Classic guest TUIs on alt (vim) refuse host select unless Shift.
 /// Attach chrome uses 1049 + 7700 without 1000-level tracking — that is not a
 /// guest TUI, so plain drag must still select.
-fn guest_alt_blocks_host_select(emulator: &Emulator) -> bool {
-    emulator.screen().alt_active()
+/// Native content ignores the retained alt bit. Mouse tracking is routed first.
+fn guest_alt_blocks_host_select(emulator: &Emulator, content: content::Content<'_>) -> bool {
+    !content.is_native()
+        && emulator.screen().alt_active()
         && (!emulator.mouse_wheel_only() || emulator.mouse_tracking().is_on())
 }
 #[allow(clippy::too_many_arguments)] // single report encoder site
@@ -19935,7 +19937,7 @@ fn guest_alt_select_gesture(logical: &Key, modifiers: ModifiersState) -> bool {
 fn handle_selection_key(host: &mut HostState, logical: &Key) -> bool {
     // Guest alt (vim/less): refuse host selection so Ctrl+C interrupts the child.
     // Attach 1049+7700 is chrome, not a guest TUI.
-    if guest_alt_blocks_host_select(&host.emulator) {
+    if guest_alt_blocks_host_select(&host.emulator, host.mux.focused().content()) {
         // Explicit host-owned gesture for alternate-screen apps: Super plus
         // the primary-screen mark/extend keys. Each step needs Super (no
         // sticky keyboard-select mode), so ordinary Shift+arrow and Ctrl+Space
@@ -20519,12 +20521,12 @@ fn dispatch_action(
             Dispatch::Handled
         }
         ActionRoute::Copy => dispatch_copy_action(
-            guest_alt_blocks_host_select(&host.emulator),
+            guest_alt_blocks_host_select(&host.emulator, host.mux.focused().content()),
             host.modifiers,
             || copy_selection_native(host),
         ),
         ActionRoute::SelectAll => {
-            if !guest_alt_blocks_host_select(&host.emulator) {
+            if !guest_alt_blocks_host_select(&host.emulator, host.mux.focused().content()) {
                 select_all_viewport(host);
             }
             Dispatch::Handled
@@ -21437,7 +21439,8 @@ impl ApplicationHandler<UserAction> for App {
                 }
                 // Host selection actions yield inside a guest alt screen
                 // (vim/less) exactly like the fixed selection keys do.
-                let host_select = !guest_alt_blocks_host_select(&host.emulator);
+                let host_select =
+                    !guest_alt_blocks_host_select(&host.emulator, host.mux.focused().content());
                 match action_any {
                     Some(keybind::Action::ScrollLineUp) if host_select => {
                         match dispatch_action(
@@ -22079,7 +22082,10 @@ impl ApplicationHandler<UserAction> for App {
                     url_openable,
                     suppress_left_release: host.suppress_left_release,
                     tracking: host.emulator.mouse_tracking(),
-                    guest_alt_blocks: guest_alt_blocks_host_select(&host.emulator),
+                    guest_alt_blocks: guest_alt_blocks_host_select(
+                        &host.emulator,
+                        host.mux.focused().content(),
+                    ),
                     cursor_cell: host.cursor_cell,
                     left_button_down: host.left_button_down,
                 });
@@ -28816,11 +28822,23 @@ session mail (id 15)
         let mut emulator = Emulator::new(40, 10, 0);
         let _ = emulator.feed(b"\x1b[?1049h\x1b[?7700h\x1b[?1006h");
         assert!(emulator.screen().alt_active());
-        assert!(!guest_alt_blocks_host_select(&emulator));
+        assert!(!guest_alt_blocks_host_select(
+            &emulator,
+            content::Content::Classic {
+                screen: emulator.screen(),
+                scroll: 0
+            }
+        ));
 
         let _ = emulator.feed(b"\x1b[?1000h");
         assert!(
-            guest_alt_blocks_host_select(&emulator),
+            guest_alt_blocks_host_select(
+                &emulator,
+                content::Content::Classic {
+                    screen: emulator.screen(),
+                    scroll: 0
+                }
+            ),
             "real app mouse on alt still blocks plain select"
         );
     }

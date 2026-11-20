@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""Private native-host experiment; waits for filesystem/socket signals, owns cleanup."""
+"""Drive isolated native-host windows using filesystem and control-socket signals."""
 import argparse
 import hashlib
 import base64
@@ -27,9 +27,10 @@ parser.add_argument('--probe', type=Path, required=True)
 parser.add_argument('--repo', type=Path, required=True)
 parser.add_argument('--presenter', choices=('tiles', 'iosurface'), default='tiles')
 parser.add_argument('--native', choices=('on', 'off'), default='on')
-parser.add_argument('--lifecycle', choices=('images', 'ctrl-z', 'lease', 'metrics', 'metrics-live', 'budgets', 'animation'), default='images')
+parser.add_argument('--lifecycle', choices=('images', 'text', 'ctrl-z', 'lease', 'metrics', 'metrics-live', 'budgets', 'animation'), default='images')
 parser.add_argument('--window-cells')
 args = parser.parse_args()
+producer_mode = '--direct-local-alt' if args.lifecycle == 'text' else '--direct-local'
 
 def main_screen_scale():
     ctypes.CDLL('/System/Library/Frameworks/AppKit.framework/AppKit')
@@ -55,7 +56,8 @@ desktop_spec = importlib.util.spec_from_file_location('native_desktop', root / '
 desktop_module = importlib.util.module_from_spec(desktop_spec)
 desktop_spec.loader.exec_module(desktop_module)
 try:
-    desktop_module.Desktop().prerequisite()
+    desktop = desktop_module.Desktop()
+    desktop.prerequisite()
 except (RuntimeError, AssertionError) as error:
     blocked = {'status': 'BLOCKED', 'prerequisite': str(error), 'host_started': False, 'daemon_started': False}
     (out / 'result.json').write_text(json.dumps(blocked, indent=2))
@@ -237,6 +239,76 @@ def window_status():
     except (FileNotFoundError, json.JSONDecodeError):
         return None
 
+def accessibility_snapshot():
+    application = desktop.ax.AXUIElementCreateApplication(host.pid)
+    assert application, 'owned host has no Accessibility application element'
+    entries = []
+    def visit(node, depth=0):
+        assert depth < 32 and len(entries) < 4096, 'unexpected owned Accessibility tree size'
+        entry = {'depth': depth}
+        for attribute in ('AXRole', 'AXTitle', 'AXValue', 'AXDescription'):
+            value = desktop.attr(node, attribute)
+            if value:
+                try:
+                    text = desktop.text(value)
+                    if text:
+                        entry[attribute] = text
+                finally:
+                    desktop.cf.CFRelease(value)
+        entries.append(entry)
+        children = desktop.attr(node, 'AXChildren')
+        if children:
+            try:
+                for index in range(desktop.cf.CFArrayGetCount(children)):
+                    visit(desktop.cf.CFArrayGetValueAtIndex(children, index), depth + 1)
+            finally:
+                desktop.cf.CFRelease(children)
+    try:
+        visit(application)
+    finally:
+        desktop.cf.CFRelease(application)
+    return entries
+
+def accessible_frame(sequence, required, forbidden=()):
+    window = window_status()
+    frame = current_frame()
+    if not window or not frame:
+        return None
+    pane = window['current_panes'][0]
+    installed = (pane.get('native') or {}).get('installed_frame')
+    source = 'classic' if sequence is None else 'native'
+    if pane['display_source'] != source:
+        return None
+    if sequence is not None and (not installed or installed['sequence'] != sequence or installed['placements'] != 0):
+        return None
+    png, meta, _ = frame
+    assert meta['host_pid'] == host.pid
+    raster = window['last_raster']
+    if not raster['present_succeeded'] or raster['capture_seq'] != meta['seq']:
+        return None
+    assert raster['present']['backend'] == args.presenter
+    entries = accessibility_snapshot()
+    values = '\n'.join(entry.get('AXValue', '') for entry in entries)
+    if not all(text in values for text in required) or any(text in values for text in forbidden):
+        return None
+    (out / f'accessibility-{source}.json').write_text(json.dumps(entries, ensure_ascii=False, indent=2))
+    (out / f'accessibility-{source}.png').write_bytes(png)
+    return {'name': source + ' Accessibility text', 'source': source, 'frame': sequence, 'present': meta}
+
+def run_text():
+    # Reading the actual application tree activates AccessKit before the new scene.
+    accessibility_snapshot()
+    command('text-scene')
+    changed = event(lambda value: value.get('event') == 'frame' and value.get('placements') == 0, 'native text scene')
+    expected = 'NATIVE-CLUSTER 界e' + '\u0301' * 20
+    result['cases'].append(await_file(lambda: accessible_frame(changed['frame'], (expected, 'https://example.test/native')),
+                                      'native Accessibility preserves the complete wide and combining text'))
+    command('release-hold')
+    event(lambda value: value.get('event') == 'released', 'release exposes retained Classic text')
+    result['cases'].append(await_file(lambda: accessible_frame(None, ('CLASSIC-BASELINE',), ('NATIVE-CLUSTER', 'example.test')),
+                                      'Accessibility switches to retained Classic text'))
+    result['status'] = 'PASS'
+
 def native_ctrl_z():
     quartz = ctypes.CDLL('/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices')
     quartz.AXIsProcessTrusted.restype = ctypes.c_bool
@@ -246,8 +318,10 @@ def native_ctrl_z():
     quartz.CGEventSetFlags.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
     quartz.CGEventPostToPid.argtypes = [ctypes.c_int, ctypes.c_void_p]
     quartz.CFRelease.argtypes = [ctypes.c_void_p]
-    subprocess.run(['osascript', '-e', 'tell application "System Events" to set frontmost of '
-                    f'(first process whose unix id is {host.pid}) to true'], check=True, capture_output=True, timeout=20)
+    running = desktop.running(desktop.cls(b'NSRunningApplication'), desktop.sel(b'runningApplicationWithProcessIdentifier:'), host.pid)
+    assert running and desktop.activate(running, desktop.sel(b'activateWithOptions:'), 2), 'owned host activation failed'
+    await_file(lambda: (window if (window := window_status()) and window['focused'] else None), 'owned host focus event')
+    desktop.require_focused(host.pid)
     for pressed in (True, False):
         key = quartz.CGEventCreateKeyboardEvent(None, 6, pressed)
         assert key
@@ -546,7 +620,7 @@ def cleanup_owned_children():
     errors = []
     for pid in owned_probes:
         try:
-            if process_command(pid) == ' '.join([str(probe), '--direct-local', str(runtime / 'probe.sock')]):
+            if process_command(pid) == ' '.join([str(probe), producer_mode, str(runtime / 'probe.sock')]):
                 cleanup_signal(pid, signal.SIGCONT)
                 if not await_process_exit(pid):
                     cleanup_signal(pid, signal.SIGKILL)
@@ -573,7 +647,7 @@ try:
         daemon = subprocess.Popen([str(bins / 'pmuxd'), '--socket', env['PMUX_SOCKET'], '--', '/bin/bash', '--noprofile', '--norc'],
                                   env=env, stdout=log, stderr=log, start_new_session=True)
     await_file(lambda: Path(env['PMUX_SOCKET']).is_socket(), 'daemon socket')
-    launch = [str(probe), '--direct-local', str(runtime / 'probe.sock')]
+    launch = [str(probe), producer_mode, str(runtime / 'probe.sock')]
     if args.lifecycle == 'ctrl-z':
         assert args.native == 'on'
         launch_text = shlex.join(launch)
@@ -618,6 +692,8 @@ try:
         result['cases'].append({'name': 'ready', 'frame': ready['frame'], 'present': meta, 'red_pixels': counts[bytes((255, 0, 0, 255))]})
         if args.lifecycle == 'animation':
             run_animation()
+        elif args.lifecycle == 'text':
+            run_text()
         elif args.lifecycle == 'budgets':
             run_budgets(ready)
         elif args.lifecycle != 'images':

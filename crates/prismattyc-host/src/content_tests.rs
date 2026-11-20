@@ -318,6 +318,36 @@ fn native_selection_uses_declared_grid_and_selects_a_wide_word_from_its_tail() {
 }
 
 #[cfg(native_transport)]
+#[test]
+fn native_selection_ignores_retained_alternate_mode_and_keeps_mouse_reporting() {
+    let mut emulator = prismattyc_emulator::Emulator::new(4, 2, 0);
+    let _ = emulator.feed(b"\x1b[?1049h");
+    let scene = native_scene(None);
+    for (mode, tracking) in [
+        (
+            b"\x1b[?1002l".as_slice(),
+            prismattyc_emulator::MouseTracking::Off,
+        ),
+        (
+            b"\x1b[?1002h\x1b[?1006h".as_slice(),
+            prismattyc_emulator::MouseTracking::Drag,
+        ),
+    ] {
+        let _ = emulator.feed(mode);
+        assert!(emulator.screen().alt_active());
+        let native = Content::select(emulator.screen(), 0, Some(&scene));
+        assert!(!crate::guest_alt_blocks_host_select(&emulator, native));
+        assert_eq!(emulator.mouse_tracking(), tracking);
+        let classic = Content::select(emulator.screen(), 0, None);
+        assert!(crate::guest_alt_blocks_host_select(&emulator, classic));
+    }
+    assert_eq!(
+        crate::encode_app_mouse_report(&emulator, 0, 0, 0, false, false, false, false),
+        Some(b"\x1b[<0;1;1M".to_vec())
+    );
+}
+
+#[cfg(native_transport)]
 fn url_scene(url: &str) -> std::sync::Arc<crate::native::scene::NativeScene> {
     let columns = url.len() + 2;
     let used = 128 + columns * 16;

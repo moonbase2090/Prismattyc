@@ -16,7 +16,7 @@ def main():
     parser.add_argument('--bins', type=Path, required=True)
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--probe', type=Path, help='Use a previously built matching test client.')
-    parser.add_argument('--case', default='all', choices=('all', 'images', 'off', 'legacy', 'resize', 'text', 'ctrl-z', 'lease', 'budgets', 'animation', 'metrics'))
+    parser.add_argument('--case', default='all', choices=('all', 'images', 'off', 'legacy', 'resize', 'text', 'text-no-mouse', 'ctrl-z', 'lease', 'budgets', 'animation', 'metrics'))
     parser.add_argument('--presenter', choices=('tiles', 'iosurface', 'both'), default='both')
     args = parser.parse_args()
     scripts = Path(__file__).resolve().parent
@@ -26,7 +26,7 @@ def main():
         parser.error('Requires supported native Linux or Apple Silicon macOS; other platforms use ANSI.')
     if platform == 'macos' and platform_info.machine() != 'arm64':
         parser.error('The macOS native fixture requires a native Apple Silicon process.')
-    cases = ['images', 'off', 'ctrl-z', 'lease', 'budgets', 'animation', 'metrics'] if platform == 'macos' else ['images', 'legacy', 'off', 'resize', 'text']
+    cases = ['images', 'off', 'ctrl-z', 'lease', 'budgets', 'animation', 'metrics', 'text'] if platform == 'macos' else ['images', 'legacy', 'off', 'resize', 'text', 'text-no-mouse']
     if args.case != 'all':
         if args.case not in cases:
             parser.error(f'{args.case} has no {platform} fixture; see the desktop verification map.')
@@ -69,6 +69,8 @@ def main():
                     command += ['--presenter', presenter, '--native', 'off' if case == 'off' else 'on', '--lifecycle', lifecycle]
                     if case in ('animation', 'metrics'):
                         command += ['--window-cells', '12x8' if case == 'animation' else '24x12']
+                    elif case == 'text':
+                        command += ['--window-cells', '40x10']
                 else:
                     command += ['--mode', case]
                 with (out / (name + '.log')).open('w') as log:

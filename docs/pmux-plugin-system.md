@@ -29,15 +29,19 @@ normal [pmux target resolution](mux-cli.md). Run opens a view. Disable closes
 that instance's plug-in views and revokes its tool calls. Other instances and
 user sessions continue running.
 
-Default plug-ins: the official activity monitor and activity connector start
-enabled. When pmuxd starts, a background step looks at each of the two. If it
-has no saved selection (enabled or disabled) and the binary's own verified
-bundle carries it, the step installs that exact bundled version and enables it
-with `activity.read:local` only. It goes through the same manager transition,
-readiness check and journal as an explicit Install and Enable. A saved
-selection is never changed, so a disable stays in effect. A build without the
-official bundle seeds nothing. A failure is logged and never stops the daemon.
-`PRISMATTYC_DEFAULT_PLUGINS=0` skips the step, for proofs of the manual flow.
+The official Activity Monitor and activity connector start enabled. On startup,
+pmuxd installs the newest compatible version in its verified bundle when a
+plug-in has no saved selection. Both get local activity read access. The monitor
+also gets local stopped-session cleanup. An enabled selection advances to a
+newer compatible bundled version with its existing grants. An explicitly
+disabled selection stays disabled.
+
+`pmux restart` waits for this startup step when it restarts the daemon. The
+`plugins` entry in the JSON result lists selections that changed and reports
+any failures. When live sessions defer the daemon restart, the entry reports
+`pending`. End those sessions when ready and run `pmux restart --daemon` again.
+A build without the official bundle has no packages to reconcile.
+`PRISMATTYC_DEFAULT_PLUGINS=0` skips the step for tests of manual plug-in setup.
 
 The app offers the same install, permission and enable operations in Settings.
 Installing or enabling the monitor does not turn on activity collection.

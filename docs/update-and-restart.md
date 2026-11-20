@@ -71,11 +71,16 @@ The configuration file stays available after restoration.
 For a program launched directly in a pane, saving preserves its original
 command and arguments. For an interactive shell, it captures the current
 foreground command instead. Known agents omit their startup prompt when
-restored. Claude and Codex keep an explicit saved conversation selector and
-recognized model, configuration, and permission options. Without a saved
-selector, Claude uses `--continue` and Codex uses `resume --last`. Other known
-agents reopen without startup arguments. For Claude and Codex, unknown options
-and subsequent arguments are omitted because their meaning cannot be determined
+restored. Claude, Codex, and Hermes keep an explicit saved conversation
+selector and recognized model, configuration, and permission options. Hermes
+also keeps its profile and provider options. Without a saved selector, Claude
+uses `--continue` and Codex uses `resume --last`. Hermes replaces a startup query
+with `chat --continue`. Without a query or selector, Hermes reopens an ordinary
+chat, which also works for profiles with no conversation history. Hermes drops
+query files, attachments, and single-query output modes. Its non-chat
+subcommands keep their arguments. Other known agents reopen
+without startup arguments. For Claude, Codex, and Hermes, unknown options and
+subsequent arguments are omitted because their meaning cannot be determined
 safely.
 
 Restore reports sessions with unavailable working directories and continues

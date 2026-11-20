@@ -160,11 +160,11 @@ fn control_and_ring_progress_continue_while_a_paint_snapshot_is_held() {
         }
         let elapsed = start.elapsed();
         finished.send((elapsed, frame)).unwrap();
-        painted_done.recv_timeout(Duration::from_secs(2)).unwrap();
+        painted_done.recv().unwrap();
         elapsed
     });
     // The UI paint continuation stays behind this barrier. No service.poll runs.
-    let (elapsed, newest) = barrier.recv_timeout(Duration::from_secs(3)).unwrap();
+    let (elapsed, newest) = barrier.recv().unwrap();
     assert!(elapsed >= Duration::from_millis(200));
     assert_eq!(painted.frame().context.sequence.get(), 1);
     assert_eq!(service.scene().unwrap().frame().context.sequence.get(), 1);

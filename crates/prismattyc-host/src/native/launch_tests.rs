@@ -67,6 +67,7 @@ fn real_pty_launch_inherits_one_endpoint_and_binds_the_same_uid_direct_child() {
         assert_eq!(line, "finish\n");
         return;
     }
+    let _clock = crate::native::service::PausedClockScope::enter();
     let (program, args, env) = command(
         "real_pty_launch_inherits_one_endpoint_and_binds_the_same_uid_direct_child",
         "native",

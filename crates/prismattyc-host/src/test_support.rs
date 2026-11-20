@@ -43,11 +43,17 @@ struct CargoLayout {
 /// deeper under `<profile>/build`. An explicit `--target` adds a triple
 /// directory above the profile. Read the layout from the path below the
 /// target directory instead of counting levels from the executable.
-fn locate(executable: &std::path::Path) -> Option<CargoLayout> {
+fn locate(
+    executable: &std::path::Path,
+    target_hint: Option<&std::path::Path>,
+) -> Option<CargoLayout> {
     let target_dir = executable
         .ancestors()
         .skip(1)
-        .find(|candidate| candidate.join("CACHEDIR.TAG").is_file())?;
+        .find(|candidate| candidate.join("CACHEDIR.TAG").is_file())
+        .or_else(|| {
+            target_hint.filter(|target| target.is_absolute() && executable.starts_with(target))
+        })?;
     let parts: Vec<_> = executable
         .strip_prefix(target_dir)
         .ok()?
@@ -74,7 +80,9 @@ pub(crate) fn mux_bin_dir() -> &'static PathBuf {
     static BIN_DIR: OnceLock<PathBuf> = OnceLock::new();
     BIN_DIR.get_or_init(|| {
         let executable = std::env::current_exe().expect("locate host test executable");
-        let layout = locate(&executable).expect("locate the cargo target layout");
+        let target_hint = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from);
+        let layout =
+            locate(&executable, target_hint.as_deref()).expect("locate the cargo target layout");
         let directory = layout.profile_dir.clone();
         let names = ["pmux", "pmuxd", "pmux-attach"];
         if names.iter().any(|name| {
@@ -164,7 +172,7 @@ mod tests {
             }
             profile_dir.push(profile);
             assert_eq!(
-                locate(&exe),
+                locate(&exe, None),
                 Some(CargoLayout {
                     target_dir: root.clone(),
                     triple: expect_triple.map(String::from),
@@ -184,7 +192,24 @@ mod tests {
         let exe = root.join("a/b/exe");
         std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
         std::fs::write(&exe, b"").unwrap();
-        assert_eq!(locate(&exe), None);
+        assert_eq!(locate(&exe, None), None);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn an_explicit_target_directory_does_not_require_a_cache_marker() {
+        let (root, exe) = target_with("debug/deps/prismattyc_host-explicit");
+        std::fs::remove_file(root.join("CACHEDIR.TAG")).unwrap();
+        assert_eq!(
+            locate(&exe, Some(&root)),
+            Some(CargoLayout {
+                target_dir: root.clone(),
+                triple: None,
+                profile_dir: root.join("debug"),
+            })
+        );
+        assert_eq!(locate(&exe, Some(&root.join("unrelated"))), None);
+        assert_eq!(locate(&exe, None), None);
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

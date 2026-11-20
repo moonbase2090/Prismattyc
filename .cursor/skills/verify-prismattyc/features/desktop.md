@@ -70,7 +70,7 @@ and exact build executable paths, including replacement processes. SIGTERM
 and SIGHUP run the same teardown and retain the result file.
 
 - On Linux or macOS, run `python3 tests/native/full-update-restart-e2e.py --bins "$verify_bins" --out "$verify_evidence/update-cli"` for daemon replacement, restored directories and commands, retry behavior, and mailbox durability. The current-build drive also checks same-layout directory and resume-command autosave, then prunes a closed session from its saved Space. Inspect `binary_version` in `result.json` against the intended revision. This fixture rejects Windows.
-- On a logged-in macOS desktop with Accessibility permission, add `--native` with a separate output directory. The fixture sends native keys to its owned host PID, checks cancellation preserves sessions, chooses Save and restart in the Restart to update modal, waits for the replacement app's restore offer, and restores sessions. Inspect the consent, offer, and result PNGs and JSON snapshots. Match each capture to the host instance, PID, and capture sequence in its frame sidecar; sequence numbers reset on exec. The PNGs show presented app pixels, not OS composition.
+- On a logged-in macOS desktop with Accessibility permission, add `--native` with a separate output directory. The fixture sends native keys to its owned host PID, checks cancellation preserves sessions, chooses Save and restart in the Restart to update modal, and waits for the replacement app's restore result: the restarted daemon brings the session back by itself and the app must not ask again. Inspect the consent and result PNGs and JSON snapshots. Match each capture to the host instance, PID, and capture sequence in its frame sidecar; sequence numbers reset on exec. The PNGs show presented app pixels, not OS composition.
 - In a disposable clean macOS VM only, install the released 0.3.38 app and run the CLI fixture with `--upgrade-app /Applications/Prismattyc.app`. This performs a real release download, verification, and app replacement. It then restarts the private daemon from the installed app and restores the saved configuration. Retain the initial app checksum and actual updater output. This command changes that VM's app installation.
 
 Inspect `initial_daemon` and `replacement_daemon` in `result.json`. Their
@@ -121,6 +121,16 @@ to its own file.
   JSON line per key to the named pipe `DIR/requests` and waits, bounded, for a
   line on `DIR/acks`, which the VM console's controller answers after typing
   the key. A relay that is absent, stalls or closes fails the run at the bound.
+- `--save` chooses Save and restart and checks that sessions come back. It
+  opens a plain session and a split one as two tabs and prints a one-time
+  `KEEP-…` marker into each of the three panes, waiting for each through a
+  watching `pmux attach --watch --json`. After the relaunch it requires the
+  same session and pane IDs, every marker in its pane's `save-buffer
+  --history`, the same tab titles in `pmux tab list --json`, and the result
+  notice, and keeps `before.json`, `after.json`, `before.png`,
+  `after-notice.png` and `after.png`. The save and restore run from the
+  installed release, so a branch build reports the newest version (no lowered
+  version); the flow is then Restart components and `stages` is `Restart`.
 - On Linux, `--fail-download NAME` cuts the download of one component's
   release file short. Require `Failed at step 1 of 4: Download`, the
   component's download line, its download error and `Check again` in

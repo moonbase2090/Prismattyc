@@ -66,9 +66,10 @@ class Keys:
     CODES = {'y': (16, 'y', 0x59), 'Home': (115, 'Home', 0x24), 'Down': (125, 'Down', 0x28),
              'Up': (126, 'Up', 0x26), 'Return': (36, 'Return', 0x0D), 'Escape': (53, 'Escape', 0x1B)}
 
-    def __init__(self, pid, relay=None):
+    def __init__(self, pid, relay=None, relay_timeout=60):
         self.pid = pid
         self.relay = relay
+        self.relay_timeout = relay_timeout
         if relay:
             relay.mkdir(parents=True, exist_ok=True)
             for name in ('requests', 'acks'):
@@ -77,9 +78,12 @@ class Keys:
                 except FileExistsError:
                     pass
             # Open order matches the relay: requests first, then acks, so
-            # each blocking open meets its peer.
-            self.requests = (relay / 'requests').open('w')
-            self.acks = (relay / 'acks').open('r')
+            # each blocking open meets its peer. A relay that never attaches
+            # fails at the bound.
+            self.requests = bounded(lambda: (relay / 'requests').open('w'), relay_timeout,
+                                    'key relay attaching to requests')
+            self.acks = bounded(lambda: (relay / 'acks').open('r'), relay_timeout,
+                                'key relay attaching to acks')
         elif sys.platform == 'darwin':
             import ctypes
             import ctypes.util
@@ -93,9 +97,15 @@ class Keys:
     def press(self, name, ctrl=False, shift=False):
         mac, keysym, vk = self.CODES[name]
         if self.relay:
-            self.requests.write(json.dumps({'key': name, 'ctrl': ctrl, 'shift': shift}) + '\n')
-            self.requests.flush()
-            assert self.acks.readline(), f'the key relay closed before {name}'
+            def send():
+                self.requests.write(json.dumps({'key': name, 'ctrl': ctrl, 'shift': shift}) + '\n')
+                self.requests.flush()
+                return self.acks.readline()
+
+            # A relay that stops answering fails at the bound; one that closes
+            # fails at once (end of file, or a broken pipe on write).
+            assert bounded(send, self.relay_timeout, f'key relay ack for {name}'), \
+                f'the key relay closed before {name}'
         elif sys.platform == 'darwin':
             flags = (1 << 18 if ctrl else 0) | (1 << 17 if shift else 0)
             for down in (True, False):
@@ -114,9 +124,14 @@ class Keys:
             self._windows(vk, ctrl, shift)
 
     def close(self):
+        # A thread still blocked on a stalled relay holds these files; the
+        # process exit releases them.
         if self.relay:
-            self.requests.close()
-            self.acks.close()
+            for stream in (self.requests, self.acks):
+                try:
+                    stream.close()
+                except OSError:
+                    pass
 
     def _windows(self, vk, ctrl, shift):
         import ctypes
@@ -154,6 +169,27 @@ class Keys:
             slot.ki = KEYBDINPUT(key, 0, flags, 0, 0)
         sent = user32.SendInput(len(events), array, ctypes.sizeof(INPUT))
         assert sent == len(events), f'SendInput sent {sent} of {len(events)}'
+
+
+def bounded(step, timeout, label):
+    """Run a blocking step on a helper thread and wait for it at most
+    `timeout` seconds; the wait ends when the step returns or raises."""
+    done = queue.Queue()
+
+    def run():
+        try:
+            done.put((True, step()))
+        except BaseException as error:
+            done.put((False, error))
+
+    threading.Thread(target=run, daemon=True).start()
+    try:
+        ok, value = done.get(timeout=timeout)
+    except queue.Empty:
+        raise AssertionError(f'no {label} within {timeout} s') from None
+    if not ok:
+        raise value
+    return value
 
 
 class LineReader:

@@ -42,7 +42,7 @@ impl From<io::Error> for AuthorityError {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Geometry {
     columns: u32,
     rows: u32,
@@ -189,6 +189,9 @@ impl DesktopNative {
 
     pub fn epoch(&self) -> PtyEpoch {
         self.epoch
+    }
+    pub fn geometry(&self) -> Geometry {
+        self.geometry
     }
     pub fn scene(&self) -> Option<&Arc<NativeScene>> {
         if !self.available() {
@@ -388,7 +391,7 @@ impl DesktopNative {
         }
     }
 
-    fn poll_inner(&mut self, now: Instant) -> Result<bool, AuthorityError> {
+    fn expire_inner(&mut self, now: Instant) -> Result<bool, AuthorityError> {
         if !self.available() {
             return Err(AuthorityError::Protocol("native endpoint unavailable"));
         }
@@ -423,13 +426,50 @@ impl DesktopNative {
         }) {
             self.offer = None;
         }
+        if self
+            .offer
+            .as_ref()
+            .is_some_and(|offer| match &offer.delivery {
+                OfferDelivery::Waiting(hello) | OfferDelivery::Ready(hello) => {
+                    now >= self.rearm_deadline.min(hello.started + OPERATION)
+                }
+                _ => false,
+            })
+        {
+            return Err(AuthorityError::Protocol("native offer write deadline"));
+        }
+        if self
+            .endpoint
+            .deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "native control deadline").into());
+        }
+        Ok(changed)
+    }
+
+    /// Enforce deadlines without receiving requests or publishing a new scene.
+    pub fn expire(&mut self, now: Instant) -> Result<bool, AuthorityError> {
+        let result = self.expire_inner(now).and_then(|changed| {
+            self.rearm_readiness()?;
+            Ok(changed)
+        });
+        match result {
+            Ok(changed) => Ok(changed),
+            Err(error) => {
+                self.close();
+                Err(error)
+            }
+        }
+    }
+
+    fn poll_inner(&mut self, now: Instant) -> Result<bool, AuthorityError> {
+        let mut changed = self.expire_inner(now)?;
+        if self.closed {
+            return Ok(changed);
+        }
         let ready = if let Some(offer) = &mut self.offer {
             match &offer.delivery {
-                OfferDelivery::Waiting(hello)
-                    if now >= self.rearm_deadline.min(hello.started + OPERATION) =>
-                {
-                    return Err(AuthorityError::Protocol("native offer write deadline"));
-                }
                 OfferDelivery::Waiting(_) => return Ok(changed),
                 OfferDelivery::Ready(_) => {
                     let OfferDelivery::Ready(hello) =

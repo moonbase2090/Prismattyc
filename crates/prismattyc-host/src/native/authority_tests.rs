@@ -228,6 +228,36 @@ fn only_valid_current_control_renews_the_500ms_lease_even_with_a_retained_socket
 }
 
 #[test]
+fn timer_expiry_releases_a_hidden_scene_without_receiving_its_queued_ping() {
+    let now = Instant::now();
+    let (mut native, mut client) = owner(now);
+    let _producer = active(&mut native, &mut client, now);
+    let scene = Arc::downgrade(native.scene().unwrap());
+    client
+        .write_all(&control(literals::PING_IDLE, 1, 1, 3))
+        .unwrap();
+    assert!(!native.expire(now + Duration::from_millis(499)).unwrap());
+    assert!(scene.upgrade().is_some());
+    assert!(native.expire(now + Duration::from_millis(500)).unwrap());
+    assert!(scene.upgrade().is_none());
+    assert!(native.scene().is_none());
+    assert_eq!(native.epoch().get(), 2);
+    assert!(native.available());
+    client.set_nonblocking(true).unwrap();
+    assert_eq!(
+        client.read(&mut [0]).unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
+    native.poll(now + Duration::from_millis(500)).unwrap();
+    native.poll(now + Duration::from_millis(500)).unwrap();
+    let (ended, descriptors) = response(&client, 0);
+    assert!(descriptors.is_none());
+    assert_eq!(opcode(&ended), 14);
+    assert_eq!(value(&ended, 24), 1);
+    assert_eq!(value(&ended, 32), 2);
+}
+
+#[test]
 fn control_only_pty_output_revokes_before_rearm_and_old_records_cannot_authorize_the_new_session() {
     let now = Instant::now();
     let (mut native, mut client) = owner(now);

@@ -36,6 +36,27 @@ pub enum AuthorityError {
     Scene(SceneError),
     Resource(RegistryError),
 }
+impl std::fmt::Display for AuthorityError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(error) => write!(formatter, "native transport: {error}"),
+            Self::Geometry => formatter.write_str("native geometry is unavailable"),
+            Self::Counter => formatter.write_str("native sequence is exhausted"),
+            Self::Protocol(reason) => write!(formatter, "native protocol: {reason}"),
+            Self::Scene(error) => write!(formatter, "native scene: {error:?}"),
+            Self::Resource(error) => write!(formatter, "native image: {error:?}"),
+        }
+    }
+}
+impl std::error::Error for AuthorityError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
 impl From<io::Error> for AuthorityError {
     fn from(error: io::Error) -> Self {
         Self::Io(error)

@@ -15,6 +15,24 @@ pub enum LegacyError {
     Identity,
 }
 
+impl std::fmt::Display for LegacyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Codec(error) => write!(formatter, "native grid record: {error}"),
+            Self::Direction => formatter.write_str("native grid record has the wrong direction"),
+            Self::Identity => formatter.write_str("native grid record has a stale identity"),
+        }
+    }
+}
+impl std::error::Error for LegacyError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Codec(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
 pub fn decode_hello(bytes: &[u8]) -> Result<Record, LegacyError> {
     let record = frozen::decode_control(bytes).map_err(LegacyError::Codec)?;
     let ControlMessage::Hello {

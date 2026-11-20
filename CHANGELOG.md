@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Update and restart** shows the update's progress in the Restart to update dialog: bytes downloaded of the whole release, each component as it is verified, the install step, and each component as it restarts, with what happens to your sessions. If the update fails, the dialog keeps the failed step and its error and offers **Check again** or **Close**. `pmux update --progress` reports the same stages on stderr for other tools.
+
 ### Changed
 
 - **Save and restart** in **Update and restart** now brings your sessions back by itself. The restarted daemon recreates them with their IDs, split panes, working directories, Space ownership and scrollback, and starts their programs again, so the relaunched app reopens your tabs without a second **Restore sessions** question. The result names the sessions that came back and any that did not. `pmux up --restore-workspace` starts the daemon from the saved workspace.

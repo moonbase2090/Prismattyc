@@ -92,6 +92,9 @@ fn borrowed_cells_keep_declared_width_continuation_style_and_complete_cluster() 
     };
     assert!(std::ptr::eq(text.as_ptr(), frame.clusters[0].as_ptr()));
     assert!(std::ptr::eq(lead.cell, &frame.cells[0]));
+    assert!(std::ptr::eq(grid.style_source(1, 0).unwrap(), lead.cell));
+    assert!(grid.style_source(4, 0).is_none());
+    assert!(grid.style_source(0, 2).is_none());
 }
 
 #[test]

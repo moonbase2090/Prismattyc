@@ -67,6 +67,16 @@ impl<'a> NativeGrid<'a> {
         Some(CellView { text, cell })
     }
 
+    /// The lead cell governs style across a wide pair; `cell` keeps raw wire data.
+    pub fn style_source(self, column: usize, row: usize) -> Option<&'a Cell> {
+        let view = self.cell(column, row)?;
+        if view.text == Text::Continuation {
+            self.cell(column - 1, row).map(|lead| lead.cell)
+        } else {
+            Some(view.cell)
+        }
+    }
+
     pub fn row_text(self, row: usize) -> String {
         if row >= self.rows() {
             return String::new();

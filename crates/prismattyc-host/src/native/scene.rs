@@ -130,7 +130,9 @@ impl SessionFrames {
                     .chars()
                     .any(|character| !character.is_whitespace()),
             };
-            cell.meta & 0x140 == 0x40 && (ink || cell.meta & (0x38 | 0x600) != 0)
+            cell.width() != 0
+                && cell.meta & 0x140 == 0x40
+                && (ink || cell.meta & (0x38 | 0x600) != 0)
         });
         let scene = Arc::new(NativeScene {
             frame: copied.snapshot,

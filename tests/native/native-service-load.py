@@ -14,6 +14,26 @@ import subprocess
 import time
 
 
+def parse_test_results(output):
+    results = []
+    pending = None
+    for line in output.splitlines():
+        match = re.match(r"^test (\S+) \.\.\. (.*)$", line)
+        if match is not None:
+            pending = match.group(1)
+            status_text = match.group(2)
+            status = re.search(r"(ok|FAILED|ignored)$", status_text)
+            if status is not None:
+                results.append((pending, status.group(1)))
+                pending = None
+        elif pending is not None:
+            status = re.fullmatch(r"(ok|FAILED|ignored)", line.strip())
+            if status is not None:
+                results.append((pending, status.group(1)))
+                pending = None
+    return results
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, required=True)
@@ -54,19 +74,28 @@ def main():
                         os.killpg(child.pid, signal.SIGKILL)
                         child.wait()
             text = log.read_text()
-            summaries = re.findall(
-                r"test result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored;",
-                text,
+            test_results = parse_test_results(text)
+            names = [name for name, _ in test_results]
+            counts = (
+                sum(result == "ok" for _, result in test_results),
+                sum(result == "FAILED" for _, result in test_results),
+                sum(result == "ignored" for _, result in test_results),
             )
-            counts = tuple(map(int, summaries[-1])) if summaries else None
-            valid_count = counts is not None and sum(counts) == args.expected_tests
+            valid_count = (
+                len(test_results) == args.expected_tests
+                and len(set(names)) == len(names)
+            )
             passed = code == 0 and valid_count and counts[1] == 0
             # Helper threads can panic intentionally; count named test failures.
-            failed_tests = sorted(set(re.findall(r"thread '([^']+::[^']+)' panicked", text)))
+            failed_tests = sorted(
+                {name for name, result in test_results if result == "FAILED"}
+                | set(re.findall(r"thread '([^']+::[^']+)' panicked", text))
+            )
             if not passed:
                 failures_by_test.update(failed_tests or ["<runner or test-count failure>"])
             results.append({"iteration": iteration, "exit": code, "counts": counts,
-                            "pass": passed, "failed_tests": failed_tests})
+                            "pass": passed, "failed_tests": failed_tests,
+                            "test_results": test_results})
             if iteration % 25 == 0 or not passed:
                 print(f"{iteration}/{args.runs}, failed iterations: "
                       f"{sum(not result['pass'] for result in results)}", flush=True)

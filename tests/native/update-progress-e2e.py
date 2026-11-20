@@ -483,9 +483,13 @@ exec {real} "$@"
                                   for view in manifest.get('views', []) for tab in view.get('tabs', []))
                 assert titles(before) and titles(after) == titles(before), (before['tabs'], after['tabs'])
                 record('the app reopened the same tabs without asking')
+                # On Windows the relaunched app is a new process; elsewhere it
+                # replaced itself and the same key sender (and relay) still
+                # reaches it.
                 pid = json.loads(cli('render-status', '--json')).get('host_pid')
-                keys.close()
-                keys = Keys(pid, args.key_relay)
+                if pid != host.pid:
+                    keys.close()
+                    keys = Keys(pid, args.key_relay)
                 keys.press('Escape')
                 closed = change(lambda ui: ui.get('panel') is None, 'panel closed')
                 shutil.copy(frames / f"frame-{closed['seq']:06d}.png", out / 'after.png')

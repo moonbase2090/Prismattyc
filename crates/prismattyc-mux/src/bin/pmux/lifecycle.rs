@@ -205,37 +205,31 @@ pub(super) fn restart(paths: &Paths, args: Vec<String>) -> Result<()> {
                     })?;
                 }
                 shutdown_idle(paths, &mut client, client_id)?;
-                let mut up = Command::new(&executable);
-                up.arg("--socket")
+            } else if opts.stop_sessions {
+                let stopped = Command::new(&executable)
+                    .arg("--socket")
                     .arg(&paths.socket)
-                    .arg("up")
-                    .stdout(Stdio::null());
-                anyhow::ensure!(up.status()?.success(), "daemon up failed");
-                results.push(json!({"component":"daemon","status":"restarted"}));
+                    .arg("stop")
+                    .stdout(Stdio::null())
+                    .status()?;
+                anyhow::ensure!(stopped.success(), "daemon stop failed");
             } else {
-                let verbs: &[&str] = if opts.stop_sessions {
-                    &["stop", "up"]
-                } else {
-                    stop_idle(paths)?;
-                    &["up"]
-                };
-                for verb in verbs {
-                    let mut command = Command::new(&executable);
-                    command
-                        .arg("--socket")
-                        .arg(&paths.socket)
-                        .arg(verb)
-                        .stdout(Stdio::null());
-                    if let Some(server) = prismattyc_mux::release_update::installed_binary("pmuxd")
-                    {
-                        command.env("PMUX_SERVER", server);
-                    }
-                    anyhow::ensure!(command.status()?.success(), "daemon {verb} failed");
-                }
-                results.push(json!({"component":"daemon","status":"restarted"}));
+                stop_idle(paths)?;
             }
+            let mut up = Command::new(&executable);
+            up.arg("--socket")
+                .arg(&paths.socket)
+                .arg("up")
+                .stdout(Stdio::null());
+            if let Some(server) = prismattyc_mux::release_update::installed_binary("pmuxd") {
+                up.env("PMUX_SERVER", server);
+            }
+            anyhow::ensure!(up.status()?.success(), "daemon up failed");
+            results.push(json!({"component":"daemon","status":"restarted"}));
+            results.push(reconciled_plugins(paths));
         } else {
             results.push(json!({"component":"daemon","status":"deferred","detail":"sessions are running; use --stop-sessions only when ready to end them","sessions":sessions}));
+            results.push(json!({"component":"plugins","status":"pending","detail":"bundled plug-in migration waits for the daemon restart"}));
         }
     }
     restart_cooperative(paths, &opts, hosts, adapters, &mut results)?;
@@ -244,6 +238,29 @@ pub(super) fn restart(paths: &Paths, args: Vec<String>) -> Result<()> {
         json!({"status":"restart_results","components":results})
     );
     Ok(())
+}
+
+fn reconciled_plugins(paths: &Paths) -> serde_json::Value {
+    use prismattyc_mux::plugins::{Client, Reply, Request};
+
+    let report = Client::connect(&paths.socket)
+        .and_then(|mut client| client.request(Request::StartupReconciliation));
+    match report {
+        Ok(Reply::StartupReconciliation { changed, failures }) => {
+            let status = if failures.is_empty() {
+                "reconciled"
+            } else {
+                "failed"
+            };
+            json!({"component":"plugins","status":status,"changed":changed,"failures":failures})
+        }
+        Ok(_) => {
+            json!({"component":"plugins","status":"unconfirmed","detail":"unexpected plug-in reconciliation response"})
+        }
+        Err(error) => {
+            json!({"component":"plugins","status":"unconfirmed","detail":format!("{error:#}")})
+        }
+    }
 }
 
 fn restart_cooperative(

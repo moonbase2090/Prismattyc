@@ -117,7 +117,7 @@ fn perform(app: &mut App, request: &requests::Request) -> Result<()> {
                     "this window has an exact secondary-pane view; close that view before restarting the host");
             }
         }
-        views.push(save_window_view(host)?);
+        views.push(save_window_view(host)?.context("window has no mux sessions to restore")?);
     }
     #[cfg(target_os = "macos")]
     let notice = app.update_restart_notice.take();
@@ -171,43 +171,58 @@ fn perform(app: &mut App, request: &requests::Request) -> Result<()> {
 /// and attach those sessions a second time in an extra tab. The tab title
 /// stays on the saved tab record, which restore applies on its own.
 /// Write this window's tabs to its view file and record its size, position
-/// and focus, so a relaunched app can open the same window again.
-pub(super) fn save_window_view(host: &mut HostState) -> Result<WindowState> {
+/// and focus, so a relaunched app can open the same window again. A window
+/// that shows no mux sessions (only blank terminals) has nothing to reopen:
+/// `Ok(None)`. Failing to write a session window's view is an error.
+pub(super) fn save_window_view(host: &mut HostState) -> Result<Option<WindowState>> {
     sync_attach_pane_sessions(host);
+    let records = attach_records_from_live(host);
+    if !records.tabs.iter().any(|tab| !tab.sessions.is_empty()) {
+        return Ok(None);
+    }
     let path = host
         .attach_layout_path
         .clone()
         .context("window has no saved view path")?;
-    let records = attach_records_from_live(host);
-    anyhow::ensure!(
-        records.tabs.iter().any(|tab| !tab.sessions.is_empty()),
-        "window has no mux sessions to restore"
-    );
     host.file_writer.wait_for_attach_tabs(&path);
-    prismattyc_mux::attach_tabs::save(&path, &records)?;
+    prismattyc_mux::attach_tabs::save(&path, &records)
+        .with_context(|| format!("save window view {}", path.display()))?;
     let size = host.window.inner_size();
-    Ok(WindowState {
+    Ok(Some(WindowState {
         path,
         width: size.width,
         height: size.height,
         position: host.window.outer_position().ok().map(|p| (p.x, p.y)),
         focused: host.window_focused,
-    })
+    }))
 }
 
 /// Open each saved window on its saved tabs, at its saved size and place.
-/// Returns how many windows opened; a view that no longer loads is skipped.
-pub(super) fn reopen(app: &mut App, event_loop: &ActiveEventLoop, views: &[WindowState]) -> usize {
+/// Returns how many windows opened and why any could not be opened.
+pub(super) fn reopen(
+    app: &mut App,
+    event_loop: &ActiveEventLoop,
+    views: &[WindowState],
+) -> (usize, Vec<String>) {
     let mut focused = None;
     let mut opened = 0;
+    let mut failures = Vec::new();
     for view in views {
         let Some(layout) = attach_tabs::load(&view.path) else {
+            failures.push(format!(
+                "its saved view {} could not be read",
+                view.path.display()
+            ));
             continue;
         };
         app.cli.attach_sessions = restore_targets(&layout);
         app.restart_view = Some(view.path.clone());
-        let Ok(id) = app.open_window(event_loop, false) else {
-            continue;
+        let id = match app.open_window(event_loop, false) {
+            Ok(id) => id,
+            Err(error) => {
+                failures.push(format!("{error:#}"));
+                continue;
+            }
         };
         opened += 1;
         let window = &app.windows[&id].window;
@@ -223,7 +238,7 @@ pub(super) fn reopen(app: &mut App, event_loop: &ActiveEventLoop, views: &[Windo
     if let Some(id) = focused {
         app.windows[&id].window.focus_window();
     }
-    opened
+    (opened, failures)
 }
 
 fn restore_targets(layout: &attach_tabs::AttachTabsFile) -> Vec<AttachTarget> {

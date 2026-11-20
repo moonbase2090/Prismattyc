@@ -65,13 +65,21 @@ pub(super) struct Restored {
 }
 
 impl Restored {
-    /// The `sessions` entry of a `pmux restart --json` report, if any.
+    /// The `sessions` entry of a `pmux restart --json` report, when the
+    /// restarted daemon confirmed which sessions it brought back. An
+    /// unconfirmed or malformed entry is `None`, so the app asks instead.
     fn from_report(report: &str) -> Option<Self> {
         let value: Value = serde_json::from_str(report).ok()?;
         let entry = value["components"]
             .as_array()?
             .iter()
             .find(|component| component["component"] == "sessions")?;
+        if !matches!(entry["status"].as_str(), Some("restored" | "partial"))
+            || !entry["restored"].is_array()
+            || !entry["lost"].is_array()
+        {
+            return None;
+        }
         let names = |key: &str| -> Vec<String> {
             entry[key]
                 .as_array()
@@ -173,12 +181,28 @@ pub(super) fn action(app: &mut App, action: Action) {
             let plan = plan.clone();
             let save = matches!(action, Action::SaveAndContinue);
             // Record each window now, while its sessions are still running.
-            // A window without sessions (only blank terminals) is not kept.
-            let views: Vec<_> = if save {
-                app.windows
+            // A window without sessions (only blank terminals) is not kept;
+            // a session window whose view cannot be saved stops the update
+            // before anything is stopped.
+            let views = if save {
+                match app
+                    .windows
                     .values_mut()
-                    .filter_map(|host| restart::save_window_view(host).ok())
-                    .collect()
+                    .map(restart::save_window_view)
+                    .collect::<Result<Vec<_>>>()
+                {
+                    Ok(views) => views.into_iter().flatten().collect(),
+                    Err(error) => {
+                        restart_modal::close(app);
+                        app.full_update = Flow::Idle;
+                        show(
+                            app,
+                            &format!("The update did not start: a window could not be saved ({error:#}). Your sessions are still running."),
+                            &[("Check again", Action::Start)],
+                        );
+                        return;
+                    }
+                }
             } else {
                 Vec::new()
             };
@@ -690,20 +714,25 @@ fn relaunch(resume: &Resume) -> Result<()> {
 /// its saved size and place, each on its own saved view file. Returns false
 /// when there is nothing to open, so the app opens its usual first window.
 /// [`resume`] then applies each window's tabs and shows the update notice.
-pub(super) fn open_saved_windows(app: &mut App, event_loop: &ActiveEventLoop) -> bool {
+pub(super) fn open_saved_windows(
+    app: &mut App,
+    event_loop: &ActiveEventLoop,
+) -> (bool, Vec<String>) {
     let Some(raw) = std::env::var_os("PRISMATTYC_COMPLETE_UPDATE") else {
-        return false;
+        return (false, Vec::new());
     };
     let Ok(resume) = serde_json::from_str::<Resume>(&raw.to_string_lossy()) else {
-        return false;
+        return (false, Vec::new());
     };
     if resume.restored.is_none() || resume.views.is_empty() {
-        return false;
+        return (false, Vec::new());
     }
-    restart::reopen(app, event_loop, &resume.views) > 0
+    let (opened, failures) = restart::reopen(app, event_loop, &resume.views);
+    (opened > 0, failures)
 }
 
-pub(super) fn resume(app: &mut App) {
+/// `unopened` names each saved window the relaunch could not reopen, and why.
+pub(super) fn resume(app: &mut App, unopened: &[String]) {
     let Some(raw) = std::env::var_os("PRISMATTYC_COMPLETE_UPDATE") else {
         return;
     };
@@ -723,6 +752,11 @@ pub(super) fn resume(app: &mut App) {
         // IDs, so the saved tabs open on them directly. The user agreed to
         // this when choosing Save and restart; there is nothing more to ask.
         let mut text = format!("{}\n{}", resume.notice, restored.summary());
+        for reason in unopened {
+            text.push_str(&format!(
+                "\nA saved window could not be reopened: {reason}."
+            ));
+        }
         if let Some(path) = &resume.backup {
             text.push_str(&format!(
                 "\nThe session configuration also remains saved at {}.",
@@ -839,6 +873,18 @@ echo note >&2"#,
             "a CLI that did not restore"
         );
         assert_eq!(Restored::from_report("not json"), None);
+    }
+
+    #[test]
+    fn an_unconfirmed_restore_keeps_the_saved_configuration_question() {
+        // The restart could not read the new daemon's sessions: nothing is
+        // known to be back, so the app must still offer the saved file.
+        let unconfirmed = r#"{"components":[{"component":"sessions","status":"unconfirmed","saved":["work"],"detail":"connect failed"}],"status":"restart_results"}"#;
+        assert_eq!(Restored::from_report(unconfirmed), None);
+        let without_lists = r#"{"components":[{"component":"sessions","status":"restored"}],"status":"restart_results"}"#;
+        assert_eq!(Restored::from_report(without_lists), None);
+        let unknown = r#"{"components":[{"component":"sessions","status":"later","restored":[],"lost":[]}],"status":"restart_results"}"#;
+        assert_eq!(Restored::from_report(unknown), None);
     }
 
     #[test]

@@ -2,6 +2,20 @@
 use super::{App, Duration, Instant, TransientOverlayState};
 use std::fmt;
 
+fn native_transport_status() -> Option<serde_json::Value> {
+    #[cfg(native_transport)]
+    {
+        Some(serde_json::json!({
+            "available": crate::native::transport::AVAILABILITY.available(),
+            "truncations": crate::native::transport::AVAILABILITY.truncations(),
+        }))
+    }
+    #[cfg(not(native_transport))]
+    {
+        None
+    }
+}
+
 /// Distinguish an exec replacement even when the operating system keeps its PID.
 pub(super) fn instance_id() -> &'static str {
     static INSTANCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -246,7 +260,9 @@ impl App {
                         "alt_active": pane.emulator.screen().alt_active(),
                         "mouse_tracking": format!("{:?}", pane.emulator.mouse_tracking()),
                         "mouse_sgr": pane.emulator.mouse_sgr(),
-                        "view_scroll": pane.view_scroll,
+                        "view_scroll": pane.content().scroll(),
+                        "display_source": if pane.content().is_native() { "native" } else { "classic" },
+                        "native": pane.native_diagnostics(),
                         "stored_images": pane.emulator.images().len(),
                         "workspace_layout": pane.workspace_layout().is_some(),
                         "experimental_rich": pane.experimental_rich(),
@@ -381,6 +397,7 @@ impl App {
                 "selected_tab": host.mux.selected_tab_index(),
                 "focused_session": host.attach_pane_sessions.get(&host.mux.focused_id()),
                 "current_panes": panes,
+                "native_transport": native_transport_status(),
             });
             if let Some(status) = status.as_object_mut() {
                 status.insert("pump".into(), pump.clone());

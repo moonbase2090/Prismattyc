@@ -3,6 +3,10 @@
 mod local;
 pub(crate) use local::Recipe as LocalRecipe;
 
+#[cfg(all(test, native_transport))]
+#[path = "mux_native_tests.rs"]
+mod native_tests;
+
 use crate::space_rail::RailSide;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Read;
@@ -768,6 +772,100 @@ enum Backing {
     Log(attach_log::LogPane),
 }
 
+#[derive(Clone, Copy)]
+enum PtyRoute {
+    DirectLocal,
+    Forwarded,
+}
+
+#[cfg(native_transport)]
+struct NativeFlow<'a> {
+    owner: &'a mut crate::native::launch::BoundNative,
+    session: &'a PtySession,
+    columns: usize,
+    rows: &'a mut usize,
+    outer_rows: usize,
+    cell_width: usize,
+    cell_height: usize,
+    now: Instant,
+}
+
+#[cfg(native_transport)]
+impl rich::RichHost for NativeFlow<'_> {
+    fn before_bytes(&mut self, _emulator: &Emulator) -> bool {
+        self.owner.authority.pty_bytes(self.now).unwrap_or(true)
+    }
+
+    fn capability_reply(
+        &mut self,
+        query: prismattyc_protocol::CapabilityQuery,
+        emulator: &mut Emulator,
+        rich: &mut RichSession,
+        to_child: &mpsc::SyncSender<ChildWrite>,
+    ) -> bool {
+        use crate::native::{authority::Geometry, profile};
+        if query.max_version.major != 0
+            || query.max_version.minor < 4
+            || !self.owner.authority.available()
+        {
+            return false;
+        }
+        let geometry = (|| {
+            Geometry::new(
+                self.columns.try_into().ok()?,
+                self.outer_rows.try_into().ok()?,
+                self.cell_width.try_into().ok()?,
+                self.cell_height.try_into().ok()?,
+            )
+        })();
+        let Some(geometry) = geometry else {
+            self.owner.authority.close();
+            return false;
+        };
+        let now = self.now;
+        if self.owner.authority.geometry() != geometry
+            && self.owner.authority.resize(geometry, now).is_err()
+        {
+            return false;
+        }
+        *rich = RichSession::default();
+        if *self.rows != self.outer_rows {
+            if self
+                .session
+                .resize(pty_size(
+                    self.columns,
+                    self.outer_rows,
+                    self.cell_width,
+                    self.cell_height,
+                ))
+                .is_err()
+            {
+                self.owner.authority.close();
+                return false;
+            }
+            emulator.resize(self.columns, self.outer_rows);
+            *self.rows = self.outer_rows;
+        }
+        let id = std::num::NonZeroU32::new(query.request_id.get()).unwrap();
+        let offer = match self.owner.authority.prepare_offer(id, now) {
+            Ok(offer) => offer,
+            Err(_) => {
+                self.owner.authority.close();
+                return false;
+            }
+        };
+        let Some(bytes) = profile::encode_reply(&offer) else {
+            self.owner.authority.close();
+            return false;
+        };
+        let message = ChildWrite::capability(bytes, CapabilityGrant::Native(offer.receipt));
+        if to_child.try_send(message).is_err() {
+            let _ = self.owner.authority.pty_bytes(now);
+        }
+        true
+    }
+}
+
 /// Marker inherited by nested `pmux-attach` (PT-208). Attach suppresses the
 /// space/session identity overlay when this is set; the host rail and tab
 /// title already show those names.
@@ -948,6 +1046,10 @@ fn start_connect(
 pub(crate) struct PaneRuntime {
     pub(crate) emulator: Emulator,
     session: Option<PtySession>,
+    #[cfg(native_transport)]
+    native: Option<crate::native::launch::BoundNative>,
+    #[cfg(native_transport)]
+    last_native_damage: Option<crate::native::frame::FrameContext>,
     from_pty_rx: Option<mpsc::Receiver<std::io::Result<Vec<u8>>>>,
     /// Set on a log-backed attach pane. Mutually exclusive with `session`.
     log: Option<attach_log::LogPane>,
@@ -1043,6 +1145,63 @@ struct PendingLogBatch {
 }
 
 impl PaneRuntime {
+    pub(crate) fn content(&self) -> crate::content::Content<'_> {
+        crate::content::Content::select(
+            self.emulator.screen(),
+            self.view_scroll,
+            #[cfg(native_transport)]
+            self.native
+                .as_ref()
+                .and_then(|native| native.authority.scene())
+                .map(Arc::as_ref),
+        )
+    }
+
+    pub(crate) fn selectable_content(
+        &mut self,
+    ) -> (crate::content::Content<'_>, &mut Selection, &mut usize) {
+        let content = crate::content::Content::select(
+            self.emulator.screen(),
+            self.view_scroll,
+            #[cfg(native_transport)]
+            self.native
+                .as_ref()
+                .and_then(|native| native.authority.scene())
+                .map(Arc::as_ref),
+        );
+        (content, &mut self.selection, &mut self.view_scroll)
+    }
+
+    #[cfg(native_transport)]
+    pub(crate) fn invalidate_native_paint(&mut self) {
+        self.last_native_damage = None;
+    }
+
+    pub(crate) fn native_diagnostics(&self) -> Option<serde_json::Value> {
+        #[cfg(native_transport)]
+        {
+            let native = self.native.as_ref()?;
+            let frame = native.authority.scene().map(|scene| scene.frame());
+            Some(serde_json::json!({
+                "available": native.authority.available(),
+                "generation": native.authority.epoch().get(),
+                "child_pid": native.identity().pid(),
+                "child_birth": native.identity().birth(),
+                "installed_frame": frame.map(|frame| serde_json::json!({
+                    "sequence": frame.context.sequence.get(),
+                    "metrics": frame.context.metrics.get(),
+                    "columns": frame.context.columns,
+                    "rows": frame.context.rows,
+                    "placements": frame.placements.len(),
+                })),
+            }))
+        }
+        #[cfg(not(native_transport))]
+        {
+            None
+        }
+    }
+
     /// Minted for every runtime, including plain terminals. A replacement in
     /// the same pane slot must not inherit transient chrome from its predecessor.
     pub(crate) fn view_identity(&self) -> ViewerId {
@@ -1148,6 +1307,18 @@ impl PaneRuntime {
             wake,
             cell_w,
             cell_h,
+            if attach_log::attach_target(program, child_args).is_some()
+                || matches!(
+                    Path::new(program)
+                        .file_name()
+                        .and_then(|name| name.to_str()),
+                    Some("ssh" | "mosh" | "rsh")
+                )
+            {
+                PtyRoute::Forwarded
+            } else {
+                PtyRoute::DirectLocal
+            },
         )
     }
 
@@ -1166,6 +1337,7 @@ impl PaneRuntime {
         wake: Option<Wake>,
         cell_w: usize,
         cell_h: usize,
+        route: PtyRoute,
     ) -> Result<Self> {
         #[cfg(all(test, windows))]
         let test_shell = (child_args.is_empty() && matches!(program, "/bin/sh" | "sh"))
@@ -1173,6 +1345,7 @@ impl PaneRuntime {
         #[cfg(all(test, windows))]
         let program = test_shell.as_deref().unwrap_or(program);
         let pty_size = pty_size(cols, rows, cell_w, cell_h);
+        #[cfg(not(native_transport))]
         let mut session =
             PtySession::spawn_config(program, child_args, cwd, &host_pane_env(), pty_size)
                 .with_context(|| {
@@ -1182,6 +1355,39 @@ impl PaneRuntime {
                             .unwrap_or_default()
                     )
                 })?;
+        #[cfg(not(native_transport))]
+        let _ = route;
+        #[cfg(native_transport)]
+        let (mut session, mut native) = {
+            let geometry = (|| {
+                if !experimental_rich || !matches!(route, PtyRoute::DirectLocal) || wake.is_none() {
+                    return None;
+                }
+                crate::native::authority::Geometry::new(
+                    cols.try_into().ok()?,
+                    rows.try_into().ok()?,
+                    cell_w.try_into().ok()?,
+                    cell_h.try_into().ok()?,
+                )
+            })();
+            let launched = crate::native::launch::spawn(
+                program,
+                child_args,
+                cwd,
+                &host_pane_env(),
+                pty_size,
+                geometry,
+            )
+            .with_context(|| format!("spawn {program:?} for pane {pane}"))?;
+            (launched.session, launched.native)
+        };
+        #[cfg(native_transport)]
+        if let (Some(owner), Some(wake)) = (&mut native, &wake) {
+            if owner.authority.start_watcher(wake.clone()).is_err() {
+                owner.authority.close();
+                native = None;
+            }
+        }
         let mut child_writer = session.take_input_writer()?;
         let mut pty_reader = session.take_reader()?;
 
@@ -1189,11 +1395,15 @@ impl PaneRuntime {
         let (grant_tx, grant_rx) = mpsc::channel();
         let writer = crate::paste_job::PtyWriter::new(to_child_rx);
         let exit_writer = writer.clone();
+        let grant_wake = wake.clone();
         thread::Builder::new()
             .name(format!("prism-pane-{pane}-write"))
             .spawn(move || {
                 writer.run(&mut child_writer, |features| {
                     let _ = grant_tx.send(features);
+                    if let Some(wake) = &grant_wake {
+                        wake();
+                    }
                 });
             })?;
 
@@ -1246,7 +1456,7 @@ impl PaneRuntime {
                 }
             })?;
 
-        Self::assemble(
+        let runtime = Self::assemble(
             Backing::Pty {
                 session,
                 from_pty_rx,
@@ -1259,7 +1469,14 @@ impl PaneRuntime {
             alt_screen_scrollback,
             cell_w,
             cell_h,
-        )
+        )?;
+        #[cfg(native_transport)]
+        let runtime = {
+            let mut runtime = runtime;
+            runtime.native = native;
+            runtime
+        };
+        Ok(runtime)
     }
 
     /// Attach a pmuxd session by subscribing to its pane event log (PT-111).
@@ -1466,6 +1683,7 @@ impl PaneRuntime {
             wake,
             self.cell_w,
             self.cell_h,
+            PtyRoute::Forwarded,
         ) {
             Ok(mut pty) => {
                 // Keys accepted while "Connecting..." showed go to the child.
@@ -1567,6 +1785,10 @@ impl PaneRuntime {
                 wake,
             )
             .with_context(|| format!("subscribe pane for session {session_key}"))?;
+        #[cfg(native_transport)]
+        if let Some(mut native) = self.native.take() {
+            native.authority.close();
+        }
         self.emulator = new_emulator(
             self.cols,
             self.outer_rows,
@@ -1629,6 +1851,10 @@ impl PaneRuntime {
         Ok(Self {
             emulator,
             session,
+            #[cfg(native_transport)]
+            native: None,
+            #[cfg(native_transport)]
+            last_native_damage: None,
             from_pty_rx,
             log,
             pending_log_batch: None,
@@ -1755,6 +1981,8 @@ impl PaneRuntime {
         {
             return Ok(());
         }
+        #[cfg(native_transport)]
+        self.resize_native(cols, rows, cell_w, cell_h);
         self.cell_w = cell_w;
         self.cell_h = cell_h;
         self.cols = cols;
@@ -1777,6 +2005,8 @@ impl PaneRuntime {
             return Ok(());
         }
         let size = pty_size(cols, rows, self.cell_w, self.cell_h);
+        #[cfg(native_transport)]
+        self.resize_native(cols, rows, self.cell_w, self.cell_h);
         let cells_changed = self.emulator.screen().columns() != cols || self.rows != rows;
         if let Some(session) = self.session.as_ref() {
             session.resize(size)?;
@@ -1794,6 +2024,31 @@ impl PaneRuntime {
         self.cols = cols;
         self.rows = rows;
         Ok(())
+    }
+
+    #[cfg(native_transport)]
+    fn resize_native(&mut self, cols: usize, rows: usize, cell_w: usize, cell_h: usize) {
+        let Some(native) = &mut self.native else {
+            return;
+        };
+        let geometry = (|| {
+            crate::native::authority::Geometry::new(
+                cols.try_into().ok()?,
+                rows.try_into().ok()?,
+                cell_w.try_into().ok()?,
+                cell_h.try_into().ok()?,
+            )
+        })();
+        match geometry {
+            Some(geometry) if geometry != native.authority.geometry() => {
+                let _ = native.authority.resize(geometry, Instant::now());
+            }
+            None => native.authority.close(),
+            _ => {}
+        }
+        if !native.authority.available() {
+            self.native = None;
+        }
     }
 
     fn reconcile_workspace_geometry(&mut self) -> Result<()> {
@@ -1870,17 +2125,75 @@ impl PaneRuntime {
         self.drain_until(None)
     }
 
+    fn drain_grants(&mut self) {
+        while let Ok(grant) = self.grant_rx.try_recv() {
+            match grant {
+                CapabilityGrant::Rich(grant) => self.rich.apply_grant(grant),
+                #[cfg(native_transport)]
+                CapabilityGrant::Native(receipt) => {
+                    if let Some(native) = &mut self.native {
+                        native.authority.authorize_written_offer(receipt);
+                        self.rich = RichSession::default();
+                    }
+                }
+            }
+        }
+    }
+
     fn drain_until(&mut self, deadline: Option<Instant>) -> (bool, bool, bool) {
+        self.drain_grants();
         // Observe the backing first (EOF, child exit) so a finished connect
         // is judged against what the pane is doing now. A swap asks for
         // another pass to read the new replica's first frames.
         let (dirty, content_changed, more) = self.drain_backing(deadline);
+        #[cfg(native_transport)]
+        let native_changed = !more && self.poll_native_at(Instant::now());
+        #[cfg(not(native_transport))]
+        let native_changed = false;
         let swapped = self.poll_connect();
         (
-            dirty || swapped,
-            content_changed || swapped,
+            dirty || swapped || native_changed,
+            content_changed || swapped || native_changed,
             more || swapped,
         )
+    }
+
+    #[cfg(native_transport)]
+    fn poll_native_at(&mut self, now: Instant) -> bool {
+        let Some(native) = &mut self.native else {
+            return false;
+        };
+        let before = native.authority.scene().cloned();
+        let changed = match native.authority.poll(now) {
+            Ok(changed) => changed,
+            Err(error) => {
+                eprintln!("prismattyc-host: {error}");
+                self.native = None;
+                true
+            }
+        };
+        if changed {
+            let after = self.native_scene();
+            let grid_changed = match (before.as_ref(), after) {
+                (Some(before), Some(after)) => {
+                    before.frame().cells != after.frame().cells
+                        || before.frame().clusters != after.frame().clusters
+                }
+                _ => true,
+            };
+            if grid_changed {
+                self.selection.clear();
+                self.keyboard_select_mode = false;
+            }
+            self.view_scroll = 0;
+            self.last_output_at = Some(now);
+        }
+        changed
+    }
+
+    #[cfg(native_transport)]
+    pub(crate) fn native_scene(&self) -> Option<&Arc<crate::native::scene::NativeScene>> {
+        self.native.as_ref()?.authority.scene()
     }
 
     fn drain_backing(&mut self, deadline: Option<Instant>) -> (bool, bool, bool) {
@@ -1897,6 +2210,10 @@ impl PaneRuntime {
     }
 
     fn mark_child_exited(&mut self) {
+        #[cfg(native_transport)]
+        if let Some(mut native) = self.native.take() {
+            native.authority.close();
+        }
         self.child_alive = false;
         self.emulator.reset_input_reporting();
         if self.exit_status.is_none() {
@@ -1927,16 +2244,48 @@ impl PaneRuntime {
                 }
                 Ok(Ok(bytes)) => {
                     let before = self.snapshot_chunk();
-                    while let Ok(grant) = self.grant_rx.try_recv() {
-                        self.rich.apply_grant(grant);
-                    }
                     if self.experimental_rich {
-                        rich::process_rich_chunk(
+                        #[cfg(native_transport)]
+                        let revoked = match self.native.as_mut().zip(self.session.as_ref()) {
+                            Some((owner, session)) => rich::process_rich_chunk(
+                                &mut self.emulator,
+                                &mut self.rich,
+                                &self.to_child_tx,
+                                &bytes,
+                                &mut NativeFlow {
+                                    owner,
+                                    session,
+                                    columns: self.cols,
+                                    rows: &mut self.rows,
+                                    outer_rows: self.outer_rows,
+                                    cell_width: self.cell_w,
+                                    cell_height: self.cell_h,
+                                    now: Instant::now(),
+                                },
+                            ),
+                            None => rich::process_rich_chunk(
+                                &mut self.emulator,
+                                &mut self.rich,
+                                &self.to_child_tx,
+                                &bytes,
+                                &mut (),
+                            ),
+                        };
+                        #[cfg(not(native_transport))]
+                        let revoked = rich::process_rich_chunk(
                             &mut self.emulator,
                             &mut self.rich,
                             &self.to_child_tx,
                             &bytes,
+                            &mut (),
                         );
+                        if revoked {
+                            dirty = true;
+                            content_changed = true;
+                            self.selection.clear();
+                            self.keyboard_select_mode = false;
+                            self.view_scroll = 0;
+                        }
                         if self.reconcile_workspace_geometry().is_err() {
                             self.rich.drop_workspace();
                             let _ = self.resize_guest(self.cols, self.outer_rows.max(1));
@@ -3941,7 +4290,32 @@ impl MuxRuntime {
     pub(crate) fn take_pane_damage(&mut self) -> HashMap<PaneId, prismattyc_core::GridDamage> {
         self.panes
             .iter_mut()
-            .map(|(id, pane)| (*id, pane.emulator.take_damage()))
+            .map(|(id, pane)| {
+                let damage = pane.emulator.take_damage();
+                #[cfg(native_transport)]
+                {
+                    let current = pane.native_scene().map(|scene| scene.frame().context);
+                    let changed = current != pane.last_native_damage;
+                    pane.last_native_damage = current;
+                    if changed {
+                        let content = pane.content();
+                        return (
+                            *id,
+                            prismattyc_core::GridDamage::full(content.rows(), content.columns()),
+                        );
+                    }
+                    if let Some(current) = current {
+                        return (
+                            *id,
+                            prismattyc_core::GridDamage::empty(
+                                current.rows as usize,
+                                current.columns as usize,
+                            ),
+                        );
+                    }
+                }
+                (*id, damage)
+            })
             .collect()
     }
 
@@ -4179,12 +4553,48 @@ impl MuxRuntime {
         self.drain_all_with_deadline(Some(deadline))
     }
 
+    pub(crate) fn native_deadline(&self) -> Option<Instant> {
+        #[cfg(native_transport)]
+        return self
+            .panes
+            .values()
+            .filter_map(|pane| pane.native.as_ref()?.authority.next_wakeup())
+            .min();
+        #[cfg(not(native_transport))]
+        None
+    }
+
     fn drain_all_with_deadline(&mut self, deadline: Option<Instant>) -> (bool, bool) {
+        #[cfg(native_transport)]
+        let native_dirty = {
+            let now = Instant::now();
+            let mut dirty = false;
+            for pane in self.panes.values_mut() {
+                let Some(native) = &mut pane.native else {
+                    continue;
+                };
+                let expired = native.authority.expire(now).unwrap_or(true);
+                let unavailable = !native.authority.available();
+                if unavailable {
+                    pane.native = None;
+                }
+                if expired || unavailable {
+                    pane.selection.clear();
+                    pane.keyboard_select_mode = false;
+                    pane.view_scroll = 0;
+                    dirty = true;
+                }
+            }
+            dirty
+        };
+        #[cfg(not(native_transport))]
+        let native_dirty = false;
         let Some(deadline) = deadline else {
-            return self.drain_all_pass(None);
+            let (dirty, more) = self.drain_all_pass(None);
+            return (dirty || native_dirty, more);
         };
 
-        let mut dirty = false;
+        let mut dirty = native_dirty;
         loop {
             if Instant::now() >= deadline {
                 return (dirty, true);
@@ -9437,7 +9847,7 @@ mod tests {
         let first = runtime.focused_id();
         {
             let pane = runtime.focused_mut();
-            pane.rich.apply_grant(CapabilityGrant {
+            pane.rich.apply_grant(rich::RichGrant {
                 features: prismattyc_protocol::Feature::V1.into_iter().collect(),
                 region_limit: 8,
             });
@@ -9457,6 +9867,7 @@ mod tests {
                 &mut pane.rich,
                 &pane.to_child_tx,
                 &attach,
+                &mut (),
             );
             assert_eq!(pane.rich.attachments_len_for_test(), 1);
         }

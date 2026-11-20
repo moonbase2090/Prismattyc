@@ -16,16 +16,25 @@ use fontdue::{Font, FontSettings};
 use crate::mux::Wake;
 use crate::system_fonts::CoveringFace;
 
+/// One face's shaping bytes and indexed rasterizer always share collection index.
+pub(crate) struct Face {
+    pub font: Font,
+    #[cfg(native_transport)]
+    pub bytes: crate::font_file::Bytes,
+    #[cfg(native_transport)]
+    pub index: u32,
+}
+
 /// The fallback face for one character, or `None` when no system face covers it.
 pub(crate) struct Resolved {
     pub ch: char,
-    pub font: Option<Arc<Font>>,
+    pub font: Option<Arc<Face>>,
 }
 
 /// Faces read from disk, by path and collection index. A fontdue `Font` does
 /// not depend on the pixel size, so zoom reuses it. `None` records a face that
 /// failed to load, so it is not read again.
-type LoadedFaces = Mutex<HashMap<(PathBuf, u32), Arc<OnceLock<Option<Arc<Font>>>>>>;
+type LoadedFaces = Mutex<HashMap<(PathBuf, u32), Arc<OnceLock<Option<Arc<Face>>>>>>;
 
 fn loaded_faces() -> &'static LoadedFaces {
     static FACES: OnceLock<LoadedFaces> = OnceLock::new();
@@ -35,8 +44,8 @@ fn loaded_faces() -> &'static LoadedFaces {
 fn cached_face(
     cache: &LoadedFaces,
     key: (PathBuf, u32),
-    load: impl FnOnce() -> Option<Arc<Font>>,
-) -> Option<Arc<Font>> {
+    load: impl FnOnce() -> Option<Arc<Face>>,
+) -> Option<Arc<Face>> {
     let cell = {
         let mut cache = cache.lock().ok()?;
         Arc::clone(
@@ -51,7 +60,7 @@ fn cached_face(
 }
 
 /// Load `face`, or reuse the copy another window or font size loaded.
-fn load_face(face: &CoveringFace) -> Option<Arc<Font>> {
+fn load_face(face: &CoveringFace) -> Option<Arc<Face>> {
     let key = (face.path.clone(), face.index);
     cached_face(loaded_faces(), key, || {
         // Read outside the map lock so a slow read does not hold up unrelated
@@ -61,7 +70,15 @@ fn load_face(face: &CoveringFace) -> Option<Arc<Font>> {
                 collection_index: face.index,
                 ..FontSettings::default()
             };
-            Font::from_bytes(data.as_ref(), settings).ok().map(Arc::new)
+            Font::from_bytes(data.as_ref(), settings).ok().map(|font| {
+                Arc::new(Face {
+                    font,
+                    #[cfg(native_transport)]
+                    bytes: crate::font_file::Bytes::Mapped(Arc::new(data)),
+                    #[cfg(native_transport)]
+                    index: face.index,
+                })
+            })
         });
         if font.is_some() {
             eprintln!(
@@ -75,7 +92,7 @@ fn load_face(face: &CoveringFace) -> Option<Arc<Font>> {
 }
 
 /// Find and load the system face for `ch`. May read font files.
-pub(crate) fn resolve(ch: char) -> Option<Arc<Font>> {
+pub(crate) fn resolve(ch: char) -> Option<Arc<Face>> {
     load_face(&crate::system_fonts::covering_face(ch)?)
 }
 
@@ -146,7 +163,7 @@ mod tests {
             Arc::ptr_eq(&first, &second),
             "a second load must reuse the face"
         );
-        assert_ne!(first.lookup_glyph_index('A'), 0);
+        assert_ne!(first.font.lookup_glyph_index('A'), 0);
     }
 
     #[test]
@@ -171,7 +188,15 @@ mod tests {
                         let bytes = crate::font_file::map(&path).ok()?;
                         Font::from_bytes(bytes.as_ref(), FontSettings::default())
                             .ok()
-                            .map(Arc::new)
+                            .map(|font| {
+                                Arc::new(Face {
+                                    font,
+                                    #[cfg(native_transport)]
+                                    bytes: crate::font_file::Bytes::Mapped(Arc::new(bytes)),
+                                    #[cfg(native_transport)]
+                                    index: 0,
+                                })
+                            })
                     })
                     .expect("fixture font loads")
                 })

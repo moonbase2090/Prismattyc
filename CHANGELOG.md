@@ -2,10 +2,12 @@
 
 ## [Unreleased]
 
+## [0.3.71] - 2026-11-20
+
 ### Fixed
 
-- On Windows, **Update and restart** no longer stays on the daemon restart step after the update installs: the new daemon kept a copy of the app's output pipe, so the app never saw the restart finish. The app now reads command output from private files, and `pmux` no longer hands its standard handles to the programs it starts unless they ask.
 - **Update and restart** no longer refuses to finish when macOS reports a warning about an unrelated mount, such as a Time Machine snapshot, while checking which processes still run the previous app. A real failure to inspect the app, or a warning about the volume the app lives on, still keeps the previous app.
+- When the daemon starts after an update, an enabled official Activity Monitor or activity connector moves to the newer version bundled with the release and keeps its permissions. An explicitly disabled plug-in stays disabled. `pmux restart` waits for this step and lists what changed in the `plugins` entry of its JSON result. When live sessions defer the daemon restart, the entry reports `pending`; end those sessions and run `pmux restart --daemon` again.
 
 ## [0.3.70] - 2026-11-19
 
@@ -17,6 +19,8 @@
 
 ### Fixed
 
+- On Windows, **Update and restart** no longer stays on the daemon restart step after the update installs: the new daemon kept a copy of the app's output pipe, so the app never saw the restart finish. The app now reads command output from private files, and `pmux` no longer hands its standard handles to the programs it starts unless they ask.
+- A restored session of a supported coding agent that was started with a query resumes its latest conversation instead of running the query again, and keeps its conversation selector, profile, provider, model and permission options.
 - This release embeds official plug-in catalog 1.3.5, which adds activity-monitor 1.3.5 and keeps the earlier packages.
 - Updated Wasmtime to 36.0.21 for the November advisories.
 

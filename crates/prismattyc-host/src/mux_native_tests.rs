@@ -19,22 +19,53 @@ fn query() -> Vec<u8> {
     .unwrap()
 }
 
-fn signal(receiver: &mpsc::Receiver<std::io::Result<Vec<u8>>>, marker: &[u8]) {
-    let mut observed = Vec::new();
+fn signal(
+    receiver: &mpsc::Receiver<std::io::Result<Vec<u8>>>,
+    observed: &mut Vec<u8>,
+    marker: &[u8],
+) {
     while !observed.windows(marker.len()).any(|bytes| bytes == marker) {
         let bytes = receiver
             .recv_timeout(Duration::from_secs(2))
-            .unwrap()
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{error:?} waiting for {:?}, observed {:?}",
+                    String::from_utf8_lossy(marker),
+                    String::from_utf8_lossy(observed)
+                )
+            })
             .unwrap();
         assert!(
             !bytes.is_empty(),
             "child exited before {:?}: {}",
             String::from_utf8_lossy(marker),
-            String::from_utf8_lossy(&observed)
+            String::from_utf8_lossy(observed)
         );
         observed.extend(bytes);
         assert!(observed.len() <= 4096, "fixture output exceeded its bound");
     }
+    let end = observed
+        .windows(marker.len())
+        .position(|bytes| bytes == marker)
+        .unwrap()
+        + marker.len();
+    observed.drain(..end);
+}
+
+#[test]
+fn fixture_markers_preserve_following_markers_and_split_suffixes() {
+    let (sender, receiver) = mpsc::channel();
+    sender
+        .send(Ok(b"prefix\nHELLO\nFRAME\nPAR".to_vec()))
+        .unwrap();
+    sender.send(Ok(b"TIAL\n".to_vec())).unwrap();
+    let mut pending = Vec::new();
+    signal(&receiver, &mut pending, b"HELLO\n");
+    assert_eq!(pending, b"FRAME\nPAR");
+    signal(&receiver, &mut pending, b"FRAME\n");
+    assert_eq!(pending, b"PAR");
+    signal(&receiver, &mut pending, b"PARTIAL\n");
+    assert!(pending.is_empty());
 }
 
 fn field<'a>(body: &'a str, name: &str) -> &'a str {
@@ -321,7 +352,8 @@ fn a_completed_native_reply_cannot_authorize_an_offer_revoked_by_trailing_pty_by
         let pane = runtime.focused_mut();
         assert!(pane.native.is_some());
         let receiver = pane.from_pty_rx.take().unwrap();
-        signal(&receiver, b"NATIVE_FLOW_READY\n");
+        let mut signals = Vec::new();
+        signal(&receiver, &mut signals, b"NATIVE_FLOW_READY\n");
         if !trailing {
             pane.rich.apply_grant(rich::RichGrant {
                 features: prismattyc_protocol::Feature::V1.into_iter().collect(),
@@ -405,7 +437,7 @@ fn a_completed_native_reply_cannot_authorize_an_offer_revoked_by_trailing_pty_by
                 written: &written_rx,
             },
         );
-        signal(&receiver, b"NATIVE_HELLO_SENT\n");
+        signal(&receiver, &mut signals, b"NATIVE_HELLO_SENT\n");
         pane.drain_grants();
         let _ = pane.emulator.take_damage();
         pane.poll_native_at(now);
@@ -425,7 +457,7 @@ fn a_completed_native_reply_cannot_authorize_an_offer_revoked_by_trailing_pty_by
         } else {
             assert!(pane.native.as_ref().unwrap().authority.available());
             pane.poll_native_at(now);
-            signal(&receiver, b"NATIVE_FRAME_SENT\n");
+            signal(&receiver, &mut signals, b"NATIVE_FRAME_SENT\n");
             loop {
                 pane.poll_native_at(Instant::now());
                 if pane.content().is_native() {
@@ -437,7 +469,7 @@ fn a_completed_native_reply_cannot_authorize_an_offer_revoked_by_trailing_pty_by
                 );
                 native_rx.recv_timeout(Duration::from_secs(2)).unwrap();
             }
-            signal(&receiver, b"NATIVE_ACTIVE_SEEN\n");
+            signal(&receiver, &mut signals, b"NATIVE_ACTIVE_SEEN\n");
             assert!(pane.content().is_native());
             native_hid_classic_overlays =
                 rich::visible_overlays(&pane.emulator, &pane.rich).is_empty();
@@ -465,10 +497,10 @@ fn a_completed_native_reply_cannot_authorize_an_offer_revoked_by_trailing_pty_by
             pane.to_child_tx
                 .send(ChildWrite::bytes(b"release\n".to_vec()))
                 .unwrap();
-            signal(&receiver, b"NATIVE_RELEASE_SENT\n");
+            signal(&receiver, &mut signals, b"NATIVE_RELEASE_SENT\n");
             pane.poll_native_at(now);
             pane.poll_native_at(now);
-            signal(&receiver, b"NATIVE_RELEASE_SEEN\n");
+            signal(&receiver, &mut signals, b"NATIVE_RELEASE_SEEN\n");
             assert!(pane.native.as_ref().unwrap().authority.available());
             assert!(pane.native_scene().is_none());
             assert!(!pane.content().is_native());

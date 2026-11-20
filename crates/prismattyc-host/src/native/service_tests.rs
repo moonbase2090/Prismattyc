@@ -432,14 +432,15 @@ fn a_full_ring_drains_to_the_newest_pending_scene_between_control_requests() {
     }
     client.write_all(&control(literals::PING_IDLE, 3)).unwrap();
     release.send(()).unwrap();
-    let (pong, _) = receive(&client, 0, Duration::from_millis(100));
-    assert_eq!(&pong[4..6], &15u16.to_le_bytes());
     let deadline = Instant::now() + Duration::from_secs(2);
     while consumed
         .recv_timeout(deadline.saturating_duration_since(Instant::now()))
         .unwrap()
         != 5
     {}
+    // The worker handles and flushes the queued PING between these ring turns.
+    let (pong, _) = receive(&client, 0, Duration::from_millis(100));
+    assert_eq!(&pong[4..6], &15u16.to_le_bytes());
     assert_eq!(producer.counter(128).load(Ordering::Acquire), 5);
     assert_eq!(service.scene().unwrap().frame().context.sequence.get(), 1);
     service.poll(Instant::now()).unwrap();

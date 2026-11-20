@@ -81,9 +81,9 @@ class Keys:
             # Open order matches the relay: requests first, then acks, so
             # each blocking open meets its peer. A relay that never attaches
             # fails at the bound.
-            self.requests = bounded(lambda: (relay / 'requests').open('w'), relay_timeout,
+            self.requests = bounded(lambda: (relay / 'requests').open('w'), timeout,
                                     'key relay attaching to requests')
-            self.acks = bounded(lambda: (relay / 'acks').open('r'), relay_timeout,
+            self.acks = bounded(lambda: (relay / 'acks').open('r'), timeout,
                                 'key relay attaching to acks')
         elif sys.platform == 'darwin':
             import ctypes

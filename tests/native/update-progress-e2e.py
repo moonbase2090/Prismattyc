@@ -257,7 +257,11 @@ def main():
     env = {k: v for k, v in os.environ.items() if not k.startswith(('PMUX', 'PRISMATTYC_', 'XDG_'))}
     # Windows requires a socket directory that pmux secures itself, so there the
     # private LOCALAPPDATA below holds the default socket.
-    socket_path = None if os.name == 'nt' else runtime / 'pmux.sock'
+    # Unix: the instance directory under XDG_RUNTIME_DIR, where installs put
+    # it; the daemon keeps pane scrollback only for sockets there.
+    socket_path = None if os.name == 'nt' else runtime / 'prismattyc' / 'pmux.sock'
+    if socket_path:
+        socket_path.parent.mkdir(mode=0o700)
     env.update(PMUX=str(bins / ('pmux' + EXE)), PRISMATTYC_CONFIG=str(config), PRISMATTYC_NO_AGENT_SKILLS='1',
                PRISMATTYC_UI_EVENTS='1', PRISMATTYC_DUMP_PRESENT=str(frames / 'frame-{seq}.png'))
     if socket_path:
@@ -400,10 +404,13 @@ exec {real} "$@"
                     # The typed line differs from the printed one, so only
                     # the output (and later the scrollback) holds the marker.
                     nonce = f'{pane}x{os.getpid()}'
-                    markers[pane] = (session, f'KEEP-{nonce}')
-                    typed = f'echo KEEP-^{nonce}' if os.name == 'nt' else f"printf 'KEEP-%s\\n' {nonce}"
+                    if os.name == 'nt':
+                        typed, marker = f'echo KEEP-^{nonce}', f'KEEP-{nonce}'
+                    else:
+                        typed, marker = f'echo KEEP-$((7)){nonce}', f'KEEP-7{nonce}'
+                    markers[pane] = (session, marker)
                     cli('send', pane, typed, '--enter')
-                    await_marker(session, pane, f'KEEP-{nonce}')
+                    await_marker(session, pane, marker)
             assert len(markers) == 3, markers
         host = subprocess.Popen([str(bins / ('prismattyc-host' + EXE)), '--no-splash', *attach],
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,

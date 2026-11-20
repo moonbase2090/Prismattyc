@@ -686,9 +686,10 @@ fn relaunch(resume: &Resume) -> Result<()> {
     }
 }
 
-/// After an update that kept the sessions, open every saved app window on
-/// them. Returns false when there is nothing to open, so the app opens its
-/// usual first window. The update notice is shown by [`resume`].
+/// After an update that kept the sessions, open every saved app window at
+/// its saved size and place, each on its own saved view file. Returns false
+/// when there is nothing to open, so the app opens its usual first window.
+/// [`resume`] then applies each window's tabs and shows the update notice.
 pub(super) fn open_saved_windows(app: &mut App, event_loop: &ActiveEventLoop) -> bool {
     let Some(raw) = std::env::var_os("PRISMATTYC_COMPLETE_UPDATE") else {
         return false;
@@ -702,7 +703,7 @@ pub(super) fn open_saved_windows(app: &mut App, event_loop: &ActiveEventLoop) ->
     restart::reopen(app, event_loop, &resume.views) > 0
 }
 
-pub(super) fn resume(app: &mut App, windows_reopened: bool) {
+pub(super) fn resume(app: &mut App) {
     let Some(raw) = std::env::var_os("PRISMATTYC_COMPLETE_UPDATE") else {
         return;
     };
@@ -729,9 +730,9 @@ pub(super) fn resume(app: &mut App, windows_reopened: bool) {
             ));
         }
         app.full_update = Flow::Idle;
-        if !windows_reopened {
-            reopen_views(app);
-        }
+        // Every window, reopened from its saved view or the usual first
+        // one, applies its saved tabs to the sessions that came back.
+        reopen_views(app);
         show(app, &text, &[]);
         return;
     }

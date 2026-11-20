@@ -20980,7 +20980,7 @@ impl ApplicationHandler<UserAction> for App {
                 event_loop.exit();
             }
         }
-        update_flow::resume(self, reopened);
+        update_flow::resume(self);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {

@@ -62,6 +62,7 @@ impl ImageBacking {
         self.mapping.logical
     }
 
+    #[cfg(test)]
     pub fn physical_bytes(&self) -> u64 {
         self.mapping.physical
     }
@@ -411,11 +412,17 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn source() -> (OwnedFd, u64) {
-        let descriptor = create_fixed(4).unwrap();
+        source_pixels(&[255, 0, 0, 128])
+    }
+
+    pub(crate) fn source_pixels(pixels: &[u8]) -> (OwnedFd, u64) {
+        let logical = pixels.len() as u64;
+        let descriptor = create_fixed(logical).unwrap();
         let physical =
-            validate_extent(descriptor.as_fd(), platform_kind(), 4, None, false).unwrap();
-        let mapping = Mapping::map(descriptor.try_clone().unwrap(), 4, physical, true).unwrap();
-        for (offset, value) in [255, 0, 0, 128].into_iter().enumerate() {
+            validate_extent(descriptor.as_fd(), platform_kind(), logical, None, false).unwrap();
+        let mapping =
+            Mapping::map(descriptor.try_clone().unwrap(), logical, physical, true).unwrap();
+        for (offset, &value) in pixels.iter().enumerate() {
             unsafe { mapping.address.as_ptr().add(offset).write_volatile(value) };
         }
         drop(mapping);

@@ -80,6 +80,7 @@ mod terminal_switcher;
 #[cfg(test)]
 mod test_support;
 mod transparency;
+mod ui_events;
 mod update_check;
 mod update_flow;
 mod update_meter;
@@ -1250,6 +1251,10 @@ struct HostState {
     splash: Option<splash::Splash>,
     restore_prompt: Option<restore_prompt::RestorePrompt>,
     restart_modal: Option<restart_modal::RestartModal>,
+    /// The last opt-in UI change line's state (see `ui_events`).
+    ui_events_last: Option<serde_json::Value>,
+    /// Change lines waiting for `ui_events::flush`.
+    ui_events_pending: Vec<String>,
     session_prompt: Option<session_prompt::Prompt>,
     /// Job-only: `(start, deadline_ms)` for one Enter through `dispatch_splash_key`.
     e2e_dismiss_at: Option<(Instant, u64)>,
@@ -2017,6 +2022,17 @@ fn use_wayland_shm(want_alpha: bool, wayland: bool) -> bool {
     want_alpha && wayland
 }
 
+/// The dump path for frame `seq`: `{seq}` in the path becomes the frame's
+/// zero-padded sequence, so every presented frame keeps its own file.
+fn numbered_dump_path(path: &Path, seq: u64) -> PathBuf {
+    let text = path.to_string_lossy();
+    if text.contains("{seq}") {
+        PathBuf::from(text.replace("{seq}", &format!("{seq:06}")))
+    } else {
+        path.to_path_buf()
+    }
+}
+
 /// Path for `PRISMATTYC_DUMP_PRESENT`. Empty or unset means no dump.
 fn dump_present_path() -> Option<PathBuf> {
     let value = std::env::var_os("PRISMATTYC_DUMP_PRESENT")?;
@@ -2147,6 +2163,8 @@ fn maybe_dump_present(
         return;
     };
     *seq = seq.saturating_add(1);
+    let numbered = numbered_dump_path(path, *seq);
+    let path = numbered.as_path();
     if let Err(error) = write_present_png(path, pixels, width, height) {
         eprintln!("prismattyc-host: dump present png failed: {error}");
     }
@@ -4652,6 +4670,8 @@ impl App {
                 splash,
                 restore_prompt,
                 restart_modal: None,
+                ui_events_last: None,
+                ui_events_pending: Vec::new(),
                 session_prompt: None,
                 e2e_dismiss_at: e2e_dismiss_splash_ms().map(|ms| (Instant::now(), ms)),
                 dump_present: dump_present_path(),
@@ -4854,6 +4874,7 @@ impl App {
 
     fn finish_paint(host: &mut HostState) {
         host.render_frame.present_succeeded = true;
+        ui_events::observe(host);
         let parse_us = host.render_frame.timing.finish_frame_parse();
         if let Some(summary) = host.render_window.record(host.render_frame, Instant::now()) {
             host.render_osd = summary;
@@ -20972,6 +20993,7 @@ impl ApplicationHandler<UserAction> for App {
                     publish_a11y(host);
                 }
             }
+            ui_events::flush(self);
             return;
         }
 
@@ -24624,6 +24646,19 @@ mod tests {
         assert!(!use_wayland_shm(false, true));
         assert!(!use_wayland_shm(true, false));
         assert!(use_wayland_shm(true, true));
+    }
+
+    #[test]
+    fn a_seq_placeholder_gives_every_frame_its_own_dump_file() {
+        assert_eq!(
+            numbered_dump_path(Path::new("/tmp/out/frame-{seq}.png"), 42),
+            PathBuf::from("/tmp/out/frame-000042.png")
+        );
+        assert_eq!(
+            numbered_dump_path(Path::new("/tmp/out/present.png"), 42),
+            PathBuf::from("/tmp/out/present.png"),
+            "without the placeholder every frame overwrites one file, as before"
+        );
     }
 
     #[test]

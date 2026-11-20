@@ -92,9 +92,21 @@ Windows replacement-host path; the CLI fixture above does not provide one.
 
 `tests/native/update-progress-e2e.py` drives Update and restart in a real
 window, chooses Restart without saving in the Restart to update dialog, and
-keeps every change of the meter lines the dialog shows (`meter.json`), every
-presented frame (`frames/` with `frames.jsonl`), and `result.json`. It runs a
-real update to the newest public release, so use a disposable machine only.
+keeps every presented frame (`frames/frame-NNNNNN.png`), the change lines it
+waited on (`events.jsonl`), a capture per dialog step (`running-stepN.png`,
+`failed-stepN.png`) and `result.json`. It runs a real update to the newest
+public release, so use a disposable machine only.
+
+The drive never sleeps or polls. It sets `PRISMATTYC_UI_EVENTS=1`, under which
+the app prints `prismattyc-host: ui: {json}` after a presented frame whenever
+the update panel or the dialog changes state. The line holds positions and
+states only (page, selected row index, dialog state, step number) and the
+frame's dump sequence. Before printing it, the app publishes render status and
+waits for that write, so render status read after the line is current. The
+drive waits for a line after every key, reads the rows it checks from render
+status, and treats a second `font` line as the relaunch. Timeouts only bound a
+hung run. `PRISMATTYC_DUMP_PRESENT` with `{seq}` in the path writes each frame
+to its own file.
 
 - On Linux and Windows the fixture copies `--bins` into `OUT/install/bin` (the
   updater refuses a build tree). Those binaries must report a version older
@@ -105,7 +117,9 @@ real update to the newest public release, so use a disposable machine only.
   version) inside the installed app's `Contents/MacOS` and pass that folder as
   `--bins`, so the app updates itself as a user's would; run from elsewhere,
   the version check after install finds the wrong `pmux`. A guest without
-  Accessibility takes keys through `--key-relay DIR` from the VM console.
+  Accessibility takes keys through `--key-relay DIR`: the drive writes one
+  JSON line per key to the named pipe `DIR/requests` and blocks on a line from
+  `DIR/acks`, which the VM console's controller answers after typing the key.
 - On Linux, `--fail-download NAME` cuts the download of one component's
   release file short. Require `Failed at step 1 of 4: Download`, the
   component's download line, its download error and `Check again` in
@@ -113,11 +127,10 @@ real update to the newest public release, so use a disposable machine only.
 
 Require `status` PASS and `stages` in order (`Download`, `Verify`, `Install`,
 `Restart` for an update; `Download` for the failure drive). `stages` comes from
-`step_log`, the app's own `update progress:` lines in `host.log`, because
-verify and install can finish between two render-status polls. Require at
-least two sampled download lines in `meter.json`. Inspect frames from each
-stage: the bar is drawn, not text, and the install bar moves without a
-percentage.
+`step_log`, the app's own `update progress:` lines, which record every step
+however briefly it shows. Require at least two download lines in `step_log`.
+Inspect the step captures: the bar is drawn, not text, and the install bar
+moves without a percentage.
 
 ## Restart to update modal
 

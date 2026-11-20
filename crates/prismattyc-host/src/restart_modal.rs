@@ -221,6 +221,28 @@ impl RestartModal {
         rows
     }
 
+    /// The dialog's state for the opt-in UI change lines (see `ui_events`):
+    /// positions and states only, never row text or session names.
+    pub(super) fn state(&self) -> serde_json::Value {
+        let (state, step) = match &self.running {
+            None => ("consent", None),
+            Some(running) => (
+                if running.failure.is_some() {
+                    "failed"
+                } else {
+                    "running"
+                },
+                Some(running.meter.position()),
+            ),
+        };
+        serde_json::json!({
+            "state": state,
+            "selected": self.selected,
+            "expanded": self.expanded,
+            "step": step,
+        })
+    }
+
     pub(super) fn status(&self) -> serde_json::Value {
         serde_json::json!({
             "title": self.title(),

@@ -108,6 +108,11 @@ impl Meter {
         }
     }
 
+    /// The current step's number from 1 and the number of steps.
+    pub(super) fn position(&self) -> (usize, usize) {
+        (self.step + 1, self.steps.len())
+    }
+
     pub(super) fn current(&self) -> Step {
         self.steps[self.step]
     }

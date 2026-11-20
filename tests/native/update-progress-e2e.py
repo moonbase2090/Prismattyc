@@ -7,52 +7,78 @@ newest public release, exactly as a user's update would.
 
 Linux and Windows: the binaries in --bins are first copied into OUT/install,
 because the updater refuses to replace a build tree, and the host runs from
-there. Their version must be older than the newest release. macOS: the updater
-replaces the installed Prismattyc.app, which must be older than the newest
-release; the host runs from --bins.
+there. Their version must be older than the newest release. macOS: pass the
+installed app's Contents/MacOS as --bins, with the branch binaries (built as an
+older version) placed there, so the app updates itself as a user's would.
 
 --fail-download NAME (Linux) puts a curl wrapper first on PATH that cuts the
-download of the release file for component NAME short. The meter must then
-hold step 1 with the error instead of moving on.
+download of the release file for component NAME short. The dialog must then
+hold step 1 with the error and offer Check again or Close.
+
+The drive waits on signals, never on fixed time or polling:
+- pmuxd prints its socket path when it listens;
+- with PRISMATTYC_UI_EVENTS=1 the app prints a line after a presented frame in
+  which the update panel or the dialog changed state (positions and states
+  only); every key the drive sends is followed by waiting for that line;
+- the app prints its update steps ("update progress: ...") and its font line
+  at every start, so a second font line is the relaunch.
+Timeouts only bound a hung run. Rows and stage order are checked from the
+rendered rows (render status, read after the matching line) and from the step
+lines, not from the change lines. Every presented frame is kept as a numbered
+file (PRISMATTYC_DUMP_PRESENT with {seq}); the frame named by each step's change
+line is copied as that step's capture.
 
 Keys go to the host only: Quartz events to its PID on macOS, XTEST through
-xdotool on its focused window on Linux, SendInput to its foreground window on
-Windows. Where the guest does not permit event injection, --key-relay DIR
-writes each key as DIR/NNNNN.req (JSON) and waits for DIR/NNNNN.ack from an
-outside input source such as the VM's console. The script records every change of the panel's meter lines from
-render-status and copies each presented frame (PRISMATTYC_DUMP_PRESENT).
+xdotool on Linux, SendInput on Windows. --key-relay DIR (a guest whose privacy
+settings forbid event injection) sends each key as a JSON line into the named
+pipe DIR/requests and blocks on a line from DIR/acks, answered by an outside
+input source such as the VM's console.
 
   update-progress-e2e.py --bins target/release --out DIR [--fail-download pmux-attach]
 """
 import argparse
 import json
 import os
+import queue
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
 import threading
-import time
 from pathlib import Path
 
-STEP = 'Step '
 FAILED = 'Failed at step '
 BINARIES = ('pmux', 'pmuxd', 'pmux-attach', 'pmux-mcp', 'prismattyc', 'prismattyc-host')
 EXE = '.exe' if os.name == 'nt' else ''
 # No Option/Alt: on macOS, Option+letter can be a dead key.
 BINDING = 'ctrl+shift+y'
+UI = 'prismattyc-host: ui: '
+STEP = 'prismattyc-host: update progress: '
+FONT = 'prismattyc-host: font '
 
 
 class Keys:
     """Native key input for one host process."""
 
+    # Each name maps to (macOS key code, X keysym, Windows virtual key).
+    CODES = {'y': (16, 'y', 0x59), 'Home': (115, 'Home', 0x24), 'Down': (125, 'Down', 0x28),
+             'Up': (126, 'Up', 0x26), 'Return': (36, 'Return', 0x0D), 'Escape': (53, 'Escape', 0x1B)}
+
     def __init__(self, pid, relay=None):
         self.pid = pid
         self.relay = relay
-        self.sent = 0
         if relay:
             relay.mkdir(parents=True, exist_ok=True)
+            for name in ('requests', 'acks'):
+                try:
+                    os.mkfifo(relay / name)
+                except FileExistsError:
+                    pass
+            # Open order matches the relay: requests first, then acks, so
+            # each blocking open meets its peer.
+            self.requests = (relay / 'requests').open('w')
+            self.acks = (relay / 'acks').open('r')
         elif sys.platform == 'darwin':
             import ctypes
             import ctypes.util
@@ -63,20 +89,12 @@ class Keys:
             self.quartz.CGEventPostToPid.argtypes = [ctypes.c_int, ctypes.c_void_p]
             self.quartz.CFRelease.argtypes = [ctypes.c_void_p]
 
-    # Each name maps to (macOS key code, X keysym, Windows virtual key).
-    CODES = {'y': (16, 'y', 0x59), 'Home': (115, 'Home', 0x24), 'Down': (125, 'Down', 0x28),
-             'Up': (126, 'Up', 0x26), 'Return': (36, 'Return', 0x0D), 'Escape': (53, 'Escape', 0x1B)}
-
     def press(self, name, ctrl=False, shift=False):
         mac, keysym, vk = self.CODES[name]
         if self.relay:
-            stem = self.relay / f'{self.sent:05d}'
-            self.sent += 1
-            stem.with_suffix('.req').write_text(json.dumps({'key': name, 'ctrl': ctrl, 'shift': shift}))
-            deadline = time.monotonic() + 60
-            while not stem.with_suffix('.ack').exists():
-                assert time.monotonic() < deadline, f'no relay ack for {name}'
-                time.sleep(.05)
+            self.requests.write(json.dumps({'key': name, 'ctrl': ctrl, 'shift': shift}) + '\n')
+            self.requests.flush()
+            assert self.acks.readline(), f'the key relay closed before {name}'
         elif sys.platform == 'darwin':
             flags = (1 << 18 if ctrl else 0) | (1 << 17 if shift else 0)
             for down in (True, False):
@@ -93,7 +111,11 @@ class Keys:
             subprocess.check_call(['xdotool', 'key', '--clearmodifiers', chord])
         else:
             self._windows(vk, ctrl, shift)
-        time.sleep(.15)
+
+    def close(self):
+        if self.relay:
+            self.requests.close()
+            self.acks.close()
 
     def _windows(self, vk, ctrl, shift):
         import ctypes
@@ -133,6 +155,36 @@ class Keys:
         assert sent == len(events), f'SendInput sent {sent} of {len(events)}'
 
 
+class LineReader:
+    """A process's output read on a thread into a log file and a queue."""
+
+    def __init__(self, process, log_path, keep):
+        self.lines = queue.Queue()
+        self.kept = []
+        self.thread = threading.Thread(target=self._read, args=(process, log_path, keep), daemon=True)
+        self.thread.start()
+
+    def _read(self, process, log_path, keep):
+        with log_path.open('w') as log:
+            for line in process.stdout:
+                log.write(line)
+                log.flush()
+                if keep(line):
+                    self.kept.append(line)
+                    self.lines.put(line)
+
+    def await_line(self, test, label, timeout):
+        """The next kept line passing `test`. `timeout` only bounds a hung
+        process; the wait ends on the line."""
+        while True:
+            try:
+                line = self.lines.get(timeout=timeout)
+            except queue.Empty:
+                raise AssertionError(f'no {label} within {timeout} s') from None
+            if test(line):
+                return line
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--bins', type=Path, required=True)
@@ -164,9 +216,8 @@ def main():
     # Windows requires a socket directory that pmux secures itself, so there the
     # private LOCALAPPDATA below holds the default socket.
     socket_path = None if os.name == 'nt' else runtime / 'pmux.sock'
-    env.update(PMUX=str(bins / ('pmux' + EXE)),
-               PRISMATTYC_CONFIG=str(config), PRISMATTYC_NO_AGENT_SKILLS='1',
-               PRISMATTYC_DUMP_PRESENT=str(out / 'present.png'))
+    env.update(PMUX=str(bins / ('pmux' + EXE)), PRISMATTYC_CONFIG=str(config), PRISMATTYC_NO_AGENT_SKILLS='1',
+               PRISMATTYC_UI_EVENTS='1', PRISMATTYC_DUMP_PRESENT=str(frames / 'frame-{seq}.png'))
     if socket_path:
         env['PMUX_SOCKET'] = str(socket_path)
     if os.name == 'nt':
@@ -180,8 +231,8 @@ def main():
         shim = out / 'curl-shim'
         shim.mkdir()
         real = shutil.which('curl')
-        # The named release file arrives slowly and is cut off after three
-        # seconds, so the meter shows part of it before the failure.
+        # The named release file arrives slowly and curl gives up on it after
+        # three seconds, so the meter shows part of it before the failure.
         (shim / 'curl').write_text(f'''#!/bin/sh
 for arg in "$@"; do
   case "$arg" in
@@ -195,171 +246,108 @@ exec {real} "$@"
 
     result = {'status': 'FAIL', 'mode': 'fail-download' if args.fail_download else 'update',
               'platform': sys.platform, 'checks': []}
-    meter_log = []
-    stop = threading.Event()
-    host = daemon = None
-    owned = []
+    keys = app = None
+    owned, readers, events = [], [], []
 
     def cli(*words, timeout=60):
         socket = ['--socket', str(socket_path)] if socket_path else []
-        p = subprocess.run([str(bins / ('pmux' + EXE)), *socket, *words], env=env,
-                           cwd=out / 'project', capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run([str(bins / ('pmux' + EXE)), *socket, *words], env=env, cwd=out / 'project',
+                           capture_output=True, text=True, timeout=timeout)
         if p.returncode:
             raise AssertionError(f'pmux {" ".join(words)} exited {p.returncode}: {p.stdout}{p.stderr}')
         return p.stdout
 
-    def wait(probe, label, timeout=60):
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            try:
-                value = probe()
-                if value:
-                    return value
-            except (OSError, KeyError, IndexError, ValueError, AssertionError):
-                pass
-            time.sleep(.1)
-        raise AssertionError('timeout: ' + label)
-
-    def render_status():
-        return json.loads(cli('render-status', '--json'))
-
-    def rows():
-        """The meter's lines: the Restart to update dialog shows them once a
-        restart is chosen; the update panel holds any text after it closes."""
-        window = render_status()['windows'][0]
-        dialog = window.get('restart_modal') or {}
-        if dialog.get('running'):
-            return dialog['rows']
-        panel = window.get('space_details') or {}
-        return [row.removesuffix(': ') for row in panel.get('rows', [])]
-
-    def panel():
-        return render_status()['windows'][0].get('space_details') or {}
-
-    def choose(keys, label):
-        """Follow the panel's reported selection to `label`, then Enter. The
-        row index depends on how details wrap at this window width."""
-        def selected_row():
-            details = wait(lambda: (lambda d: d if any(x.startswith(label + ':') for x in d.get('rows', [])) else None)(
-                panel()), 'row ' + label)
-            return details.get('selected'), details
-
-        keys.press('Home')
-        time.sleep(.3)
-        for step in ('Down', 'Up'):
-            for _ in range(40):
-                selected, details = selected_row()
-                if selected is not None and details['rows'][selected].startswith(label + ':'):
-                    keys.press('Return')
-                    return
-                keys.press(step)
-                try:
-                    wait(lambda: selected_row()[0] != selected, 'selection moves', timeout=3)
-                except AssertionError:
-                    break
-        raise AssertionError(f'could not select {label}')
-
-    def choose_option(keys, label):
-        """Pick a choice in the Restart to update dialog by its label."""
-        dialog = wait(lambda: render_status()['windows'][0].get('restart_modal'), 'restart dialog', timeout=120)
-        index = next(i for i, x in enumerate(dialog['rows']) if x.startswith(label + ':'))
-        keys.press('Home')
-        for _ in range(index):
-            keys.press('Down')
-        keys.press('Return')
+    def window():
+        return json.loads(cli('render-status', '--json'))['windows'][0]
 
     def record(check):
         result['checks'].append(check)
         print('PASS ' + check, flush=True)
 
-    def copy_frames(started):
-        sidecar, image = out / 'present.json', out / 'present.png'
-        last = None
-        with (out / 'frames.jsonl').open('w') as log:
-            while not stop.is_set():
-                try:
-                    before = sidecar.read_bytes()
-                    meta = json.loads(before)
-                    key = (meta['host_instance'], meta['seq'])
-                    if key != last:
-                        pixels = image.read_bytes()
-                        if sidecar.read_bytes() == before:
-                            last = key
-                            name = f'{len(list(frames.iterdir())):05d}.png'
-                            (frames / name).write_bytes(pixels)
-                            log.write(json.dumps({'t': round(time.monotonic() - started, 3), 'file': name,
-                                                  **meta}) + '\n')
-                            log.flush()
-                except (OSError, ValueError, KeyError):
-                    pass
-                time.sleep(.03)
+    def change(test, label, timeout=60):
+        """The next change line whose state passes `test`."""
+        line = app.await_line(lambda line: line.startswith(UI) and test(json.loads(line[len(UI):])['ui']),
+                              label, timeout)
+        event = json.loads(line[len(UI):])
+        events.append(event)
+        return event
 
-    def watch_meter(started):
-        previous = None
-        while not stop.is_set():
-            try:
-                lines = rows()
-            except (OSError, ValueError, KeyError, IndexError, AssertionError):
-                lines = None
-            if lines is not None:
-                head = lines[:3] if lines and lines[0].startswith((STEP, FAILED)) else []
-                tail = [x for x in lines[3:] if x] if head else lines
-                state = (tuple(head), tuple(tail[:3]))
-                if state != previous:
-                    previous = state
-                    meter_log.append({'t': round(time.monotonic() - started, 3), 'meter': head, 'text': tail[:6]})
-            time.sleep(.1)
+    def select(rows, selected, label, position):
+        """Move the selection to the row starting with `label`, one key at a
+        time, waiting for each move to be shown; then Enter."""
+        matches = [i for i, row in enumerate(rows) if row.startswith(label + ':') or row == label]
+        assert matches, f'no {label!r} row in {rows}'
+        target = matches[0]
+        while selected != target:
+            key = 'Down' if target > selected else 'Up'
+            before = selected
+            keys.press(key)
+            moved = change(lambda ui: position(ui) not in (None, before), f'{key} toward {label}')
+            selected = position(moved['ui'])
+        keys.press('Return')
+
+    def panel_selected(ui):
+        return (ui.get('panel') or {}).get('selected')
+
+    def dialog_state(ui):
+        return (ui.get('dialog') or {}).get('state')
+
+    def dialog_selected(ui):
+        return (ui.get('dialog') or {}).get('selected')
 
     try:
         result['update_check'] = json.loads(subprocess.run(
             [str(bins / ('pmux' + EXE)), 'update', '--check', '--json'], env=env, capture_output=True,
             text=True, timeout=120).stdout or '{}')
         assert result['update_check'].get('update_available'), result['update_check']
-        with (out / 'daemon.log').open('w') as log:
-            socket = ['--socket', str(socket_path)] if socket_path else []
-            daemon = subprocess.Popen([str(bins / ('pmuxd' + EXE)), *socket], env=env,
-                                      cwd=out / 'project', stdout=log, stderr=log)
+        socket = ['--socket', str(socket_path)] if socket_path else []
+        daemon = subprocess.Popen([str(bins / ('pmuxd' + EXE)), *socket], env=env, cwd=out / 'project',
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')
         owned.append(daemon)
-        wait(lambda: json.loads(cli('versions'))['daemon'].get('pid'), 'private daemon')
+        daemon_out = LineReader(daemon, out / 'daemon.log', lambda line: True)
+        readers.append(daemon_out)
+        daemon_out.await_line(lambda line: line.strip().endswith('pmux.sock'), 'daemon socket line', 60)
         cli('new', '--no-attach', 'work')
-        started = time.monotonic()
-        threading.Thread(target=copy_frames, args=(started,), daemon=True).start()
         host = subprocess.Popen([str(bins / ('prismattyc-host' + EXE)), '--no-splash', '--attach-session', 'work'],
-                                env=env, stdout=(out / 'host.log').open('w'), stderr=subprocess.STDOUT)
+                                env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                errors='replace')
         owned.append(host)
-        wait(lambda: render_status()['windows'][0]['last_raster']['present_succeeded'], 'first frame')
-        first_instance = render_status()['host_instance']
+        app = LineReader(host, out / 'host.log', lambda line: line.startswith((UI, STEP, FONT)))
+        readers.append(app)
+        change(lambda ui: True, 'first presented frame')
         keys = Keys(host.pid, args.key_relay)
         keys.press('y', ctrl=True, shift=True)
-        choose(keys, 'Update and restart all components')
-        threading.Thread(target=watch_meter, args=(started,), daemon=True).start()
-        choose_option(keys, 'Restart without saving')
+        opened = change(lambda ui: (ui.get('panel') or {}).get('page') == 'maintenance'
+                        and panel_selected(ui) is not None, 'update panel')
+        rows = [row.removesuffix(': ') for row in (window().get('space_details') or {}).get('rows', [])]
+        select(rows, panel_selected(opened['ui']), 'Update and restart all components', panel_selected)
+        consent = change(lambda ui: dialog_state(ui) == 'consent', 'restart dialog', 120)
+        select(window()['restart_modal']['rows'], dialog_selected(consent['ui']), 'Restart without saving',
+               dialog_selected)
+        change(lambda ui: dialog_state(ui) == 'running', 'progress view')
         if args.fail_download:
-            final = wait(lambda: (lambda r: r if r and r[0].startswith(FAILED) else None)(rows()),
-                         'meter holds the failed step', timeout=args.timeout)
+            failed = change(lambda ui: dialog_state(ui) == 'failed', 'held failure', args.timeout)
+            final = window()['restart_modal']['rows']
             result['final_rows'] = final
+            result['failure_frame'] = failed['seq']
             assert final[0] == 'Failed at step 1 of 4: Download', final
-            assert final[1].startswith(f'Downloading {args.fail_download}: '), final
+            assert final[1].startswith(f'Downloading {args.fail_download}'), final
             assert f'download failed for {args.fail_download}' in ' '.join(final), final
-            assert any(x.startswith('Check again') for x in final), final
-            record('meter held step 1 of 4 with the download error and offered Check again')
+            assert final[-2].startswith('Check again') and final[-1].startswith('Close'), final
+            record('the dialog held step 1 of 4 with the download error and offered Check again or Close')
         else:
-            wait(lambda: render_status()['host_instance'] != first_instance, 'relaunched app', timeout=args.timeout)
+            result['relaunch_line'] = app.await_line(lambda line: line.startswith(FONT), 'relaunched app',
+                                                     args.timeout).strip()
             result['after'] = json.loads(cli('versions'))
-            record('update finished and the app relaunched')
-        time.sleep(1)
+            record('update finished and the app relaunched on daemon '
+                   + str(result['after'].get('daemon', {}).get('version')))
     except BaseException as error:
         result['error'] = f'{type(error).__name__}: {error}'
         raise
     finally:
-        stop.set()
-        time.sleep(.3)
-        (out / 'meter.json').write_text(json.dumps(meter_log, indent=2))
-        # The app logs each step change (never byte counts); render-status
-        # polling alone can miss a step that takes a fraction of a second.
-        marker = 'prismattyc-host: update progress: '
-        log_text = (out / 'host.log').read_text(errors='replace') if (out / 'host.log').exists() else ''
-        steps = [line.split(marker, 1)[1] for line in log_text.splitlines() if marker in line]
+        if keys:
+            keys.close()
+        steps = [line[len(STEP):].strip() for line in (app.kept if app else []) if line.startswith(STEP)]
         result['step_log'] = steps
         stages = []
         for line in steps:
@@ -367,32 +355,52 @@ exec {real} "$@"
             if not stages or stages[-1] != stage:
                 stages.append(stage)
         result['stages'] = stages
-        downloads = [e['meter'][1] for e in meter_log if e['meter'] and e['meter'][0].endswith(': Download')]
-        result['download_lines'] = len(downloads)
-        result['download_first_last'] = downloads[:1] + downloads[-1:]
+        (out / 'events.jsonl').write_text(''.join(json.dumps(event) + '\n' for event in events))
+        # Each step's capture is the frame its change line was printed after.
+        captures = {}
+        for line in (app.kept if app else []):
+            if not line.startswith(UI):
+                continue
+            event = json.loads(line[len(UI):])
+            dialog = event['ui'].get('dialog') or {}
+            if dialog.get('step'):
+                captures.setdefault(f"{dialog['state']}-step{dialog['step'][0]}", event['seq'])
+        for name, seq in captures.items():
+            frame = frames / f'frame-{seq:06d}.png'
+            if frame.exists():
+                shutil.copy(frame, out / f'{name}.png')
+        result['captures'] = captures
         if 'error' not in result:
             expected = ['Download'] if args.fail_download else ['Download', 'Verify', 'Install', 'Restart']
-            failed = [x for x in steps if x.startswith(FAILED)]
+            downloads = [line for line in steps if line.startswith('Step 1 of 4: Download')]
+            failed = [line for line in steps if line.startswith(FAILED)]
             if stages == expected and len(downloads) >= 2 and bool(failed) == bool(args.fail_download):
                 result['status'] = 'PASS'
                 record('stages in order: ' + ' > '.join(stages))
-        for process in owned:
-            if process and process.poll() is None:
-                process.terminate()
-        try:
-            for pid in {render_status()['host_pid'], json.loads(cli('versions'))['daemon']['pid']}:
+        # A relaunched app and a restarted daemon are new processes; look each
+        # up on its own so one failed lookup cannot skip the other.
+        for lookup in (lambda: json.loads(cli('render-status', '--json')).get('host_pid'),
+                       lambda: json.loads(cli('versions'))['daemon'].get('pid')):
+            try:
+                pid = lookup()
                 if pid:
                     os.kill(pid, signal.SIGTERM)
-        except Exception:
-            pass
+            except Exception as detail:
+                result.setdefault('cleanup_errors', []).append(str(detail))
+        for process in owned:
+            if process.poll() is None:
+                process.terminate()
         for process in owned:
             try:
                 process.wait(10)
-            except Exception:
+            except subprocess.TimeoutExpired:
                 process.kill()
+                process.wait()
+        for reader in readers:
+            reader.thread.join(10)
         (out / 'result.json').write_text(json.dumps(result, indent=2))
         shutil.rmtree(runtime, ignore_errors=True)
-    print(json.dumps({k: result[k] for k in ('status', 'stages', 'download_first_last')}))
+    print(json.dumps({k: result[k] for k in ('status', 'stages')}))
     return 0 if result['status'] == 'PASS' else 1
 
 

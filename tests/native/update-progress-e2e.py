@@ -398,7 +398,8 @@ exec {real} "$@"
                                            'first': leaf, 'second': dict(leaf)}
             layout.write_text(json.dumps(saved))
             cli('layout', 'apply', 'split-view')
-            attach += ['--attach-session', 'split-view']
+            # The split tab first, so the before and after captures show it.
+            attach = ['--attach-session', 'split-view', *attach]
             for session, found in pane_ids().items():
                 for pane in found['panes'] if session in ('work', 'split-view') else []:
                     # The typed line differs from the printed one, so only
@@ -421,9 +422,6 @@ exec {real} "$@"
         change(lambda ui: True, 'first presented frame')
         keys = Keys(host.pid, args.key_relay)
         if args.save:
-            before = host_state()
-            result['before'] = before
-            (out / 'before.json').write_text(json.dumps(before, indent=2))
             latest = max(frames.glob('frame-*.png'), default=None)
             if latest:
                 shutil.copy(latest, out / 'before.png')
@@ -433,6 +431,13 @@ exec {real} "$@"
         rows = [row.removesuffix(': ') for row in (window().get('space_details') or {}).get('rows', [])]
         select(rows, panel_selected(opened['ui']), 'Update and restart all components', panel_selected)
         consent = change(lambda ui: dialog_state(ui) == 'consent', 'restart dialog', 120)
+        if args.save:
+            # Read here, after the app has drawn several frames, so its tab
+            # list is published; right after the first frame it may not be.
+            before = host_state()
+            result['before'] = before
+            (out / 'before.json').write_text(json.dumps(before, indent=2))
+            assert any(view.get('tabs') for manifest in before['tabs'] for view in manifest.get('views', [])), before
         select(window()['restart_modal']['rows'], dialog_selected(consent['ui']),
                'Save and restart' if args.save else 'Restart without saving', dialog_selected)
         change(lambda ui: dialog_state(ui) == 'running', 'progress view')

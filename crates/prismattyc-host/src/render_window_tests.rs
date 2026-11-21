@@ -577,8 +577,7 @@ fn verify_startup_restore(app: &mut App, event_loop: &ActiveEventLoop) {
     let bin_dir = path.parent().unwrap().join("fixture-bin");
     std::fs::create_dir_all(&bin_dir).unwrap();
     let pmux = bin_dir.join(prismattyc_mux::platform::executable_name("pmux"));
-    std::fs::write(&pmux, "#!/bin/sh\nexit 1\n").unwrap();
-    std::fs::set_permissions(&pmux, std::fs::Permissions::from_mode(0o700)).unwrap();
+    crate::test_support::write_script(&pmux, "#!/bin/sh\nexit 1\n", "700");
     std::env::set_var("PMUX", pmux);
     let saved = attach_tabs::AttachTabsFile {
         tabs: vec![
@@ -2483,12 +2482,11 @@ fn update_notice_appears_once_in_a_private_window() {
     }
     let runtime = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap());
     let fake = runtime.join("fake-pmux");
-    std::fs::write(
+    crate::test_support::write_script(
         &fake,
         "#!/bin/sh\nprintf '{\"installed\":\"0.3.67\",\"available\":\"9.9.9\",\"update_available\":true}'\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        "755",
+    );
     std::env::set_var("PMUX", &fake);
 
     struct NoticeProof {

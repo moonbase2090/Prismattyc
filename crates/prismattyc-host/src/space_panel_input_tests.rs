@@ -6,7 +6,6 @@
 
 use super::*;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -1210,8 +1209,5 @@ fn switch_to_command_logger() {
 }
 
 fn write_exe(path: &Path, body: &str) {
-    std::fs::write(path, body).unwrap();
-    let mut permissions = std::fs::metadata(path).unwrap().permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(path, permissions).unwrap();
+    crate::test_support::write_script(path, body, "755");
 }

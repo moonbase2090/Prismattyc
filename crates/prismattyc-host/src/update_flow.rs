@@ -988,22 +988,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("pmux");
-        // A script written and executed from one process can fail with
-        // "Text file busy": while this process holds the file open for
-        // writing, another test thread's fork can copy the descriptor into a
-        // child that has not yet exec'd. Install the script through a child
-        // that has exited, so this process never holds the executed file open.
-        let source = dir.join("pmux.source");
-        std::fs::write(&source, format!("#!/bin/sh\n{body}\n")).unwrap();
-        let installed = prismattyc_process::status(
-            std::process::Command::new("install")
-                .args(["-m", "755"])
-                .arg(&source)
-                .arg(&path),
-        )
-        .unwrap();
-        assert!(installed.success(), "install the fake pmux script");
-        std::fs::remove_file(&source).unwrap();
+        crate::test_support::write_script(&path, &format!("#!/bin/sh\n{body}\n"), "755");
         path
     }
 

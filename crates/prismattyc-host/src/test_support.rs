@@ -6,6 +6,48 @@ use std::sync::OnceLock;
 #[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
+/// Write a script and make it executable without ever leaving it busy to exec.
+///
+/// A script written and executed from one process can fail with "Text file
+/// busy": while this process holds the file open for writing, another test
+/// thread's fork can copy the descriptor into a child that has not yet
+/// exec'd. The finished file is copied into place by a child that has exited
+/// and renamed over the original, so this process holds no write descriptor on
+/// the inode that gets executed.
+#[cfg(unix)]
+pub(crate) fn write_script(path: &std::path::Path, body: &str, mode: &str) {
+    let mut staged = path.as_os_str().to_owned();
+    staged.push(".staged");
+    let staged = std::path::PathBuf::from(staged);
+    std::fs::write(&staged, body).unwrap();
+    install_over(&staged, path, mode);
+    std::fs::remove_file(&staged).unwrap();
+}
+
+/// As `write_script`, for a script that is already written and closed.
+#[cfg(unix)]
+pub(crate) fn make_executable(path: &std::path::Path, mode: &str) {
+    install_over(path, path, mode);
+}
+
+/// Copy `source` through an exited `install` child to a sibling of `path`,
+/// then rename that finished file over `path`.
+#[cfg(unix)]
+fn install_over(source: &std::path::Path, path: &std::path::Path, mode: &str) {
+    let mut installed = path.as_os_str().to_owned();
+    installed.push(".installed");
+    let installed = std::path::PathBuf::from(installed);
+    let status = prismattyc_process::status(
+        Command::new("install")
+            .args(["-m", mode])
+            .arg(source)
+            .arg(&installed),
+    )
+    .unwrap();
+    assert!(status.success(), "install the test script");
+    std::fs::rename(&installed, path).unwrap();
+}
+
 #[cfg(target_os = "linux")]
 pub(crate) fn wait_for_attach_write(host: &crate::HostState) {
     let Some(path) = host.attach_layout_path.as_deref() else {

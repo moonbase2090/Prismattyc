@@ -66,7 +66,7 @@ fn start_server_shell(socket: &Path, script: &str) -> ServerGuard {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let guard = ServerGuard {
-        child: command.spawn().expect("spawn pmuxd"),
+        child: prismattyc_process::spawn(&mut command).expect("spawn pmuxd"),
         socket: socket.to_path_buf(),
     };
     let start = Instant::now();
@@ -81,12 +81,10 @@ fn start_server_shell(socket: &Path, script: &str) -> ServerGuard {
 }
 
 fn attach_json(socket: &Path) -> String {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_pmux-attach"));
+    let mut command = prismattyc_process::capture_command(env!("CARGO_BIN_EXE_pmux-attach"));
     clear_command_env(&mut command);
-    let output = command
-        .arg("--socket")
-        .arg(socket)
-        .output()
+    let output = prismattyc_process::spawn(command.arg("--socket").arg(socket))
+        .and_then(std::process::Child::wait_with_output)
         .expect("run pmux-attach");
     assert!(
         output.status.success(),
@@ -569,14 +567,16 @@ fn send_force_over_live_attach_keeps_attach_alive_and_reacquires() {
     let _ = writer.flush();
     wait_transcript(&transcript, "PT140_", Duration::from_secs(5));
 
-    let mut command = Command::new(env!("CARGO_BIN_EXE_pmux"));
+    let mut command = prismattyc_process::capture_command(env!("CARGO_BIN_EXE_pmux"));
     clear_command_env(&mut command);
-    let forced = command
-        .arg("--socket")
-        .arg(&socket)
-        .args(["send", &pane_id.to_string(), "--force", "OK"])
-        .output()
-        .expect("run pmux send");
+    let forced = prismattyc_process::spawn(command.arg("--socket").arg(&socket).args([
+        "send",
+        &pane_id.to_string(),
+        "--force",
+        "OK",
+    ]))
+    .and_then(std::process::Child::wait_with_output)
+    .expect("run pmux send");
     assert!(
         forced.status.success(),
         "send --force over a live attach: {}",

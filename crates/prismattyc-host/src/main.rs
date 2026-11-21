@@ -80,8 +80,10 @@ mod terminal_switcher;
 #[cfg(test)]
 mod test_support;
 mod transparency;
+mod ui_events;
 mod update_check;
 mod update_flow;
+mod update_meter;
 #[cfg(any(target_os = "macos", test))]
 mod update_notes;
 // cargo-mutants 27.1 does not recognize nested cfg(all(test, ...)).
@@ -1249,6 +1251,10 @@ struct HostState {
     splash: Option<splash::Splash>,
     restore_prompt: Option<restore_prompt::RestorePrompt>,
     restart_modal: Option<restart_modal::RestartModal>,
+    /// The last opt-in UI change line's state (see `ui_events`).
+    ui_events_last: Option<serde_json::Value>,
+    /// Change lines waiting for `ui_events::flush`.
+    ui_events_pending: Vec<String>,
     session_prompt: Option<session_prompt::Prompt>,
     /// Job-only: `(start, deadline_ms)` for one Enter through `dispatch_splash_key`.
     e2e_dismiss_at: Option<(Instant, u64)>,
@@ -2016,6 +2022,17 @@ fn use_wayland_shm(want_alpha: bool, wayland: bool) -> bool {
     want_alpha && wayland
 }
 
+/// The dump path for frame `seq`: `{seq}` in the path becomes the frame's
+/// zero-padded sequence, so every presented frame keeps its own file.
+fn numbered_dump_path(path: &Path, seq: u64) -> PathBuf {
+    let text = path.to_string_lossy();
+    if text.contains("{seq}") {
+        PathBuf::from(text.replace("{seq}", &format!("{seq:06}")))
+    } else {
+        path.to_path_buf()
+    }
+}
+
 /// Path for `PRISMATTYC_DUMP_PRESENT`. Empty or unset means no dump.
 fn dump_present_path() -> Option<PathBuf> {
     let value = std::env::var_os("PRISMATTYC_DUMP_PRESENT")?;
@@ -2146,6 +2163,8 @@ fn maybe_dump_present(
         return;
     };
     *seq = seq.saturating_add(1);
+    let numbered = numbered_dump_path(path, *seq);
+    let path = numbered.as_path();
     if let Err(error) = write_present_png(path, pixels, width, height) {
         eprintln!("prismattyc-host: dump present png failed: {error}");
     }
@@ -4651,6 +4670,8 @@ impl App {
                 splash,
                 restore_prompt,
                 restart_modal: None,
+                ui_events_last: None,
+                ui_events_pending: Vec::new(),
                 session_prompt: None,
                 e2e_dismiss_at: e2e_dismiss_splash_ms().map(|ms| (Instant::now(), ms)),
                 dump_present: dump_present_path(),
@@ -4853,6 +4874,7 @@ impl App {
 
     fn finish_paint(host: &mut HostState) {
         host.render_frame.present_succeeded = true;
+        ui_events::observe(host);
         let parse_us = host.render_frame.timing.finish_frame_parse();
         if let Some(summary) = host.render_window.record(host.render_frame, Instant::now()) {
             host.render_osd = summary;
@@ -6642,7 +6664,12 @@ fn rasterize_frame(
     let overlay_state = TransientOverlayState {
         footer_visible,
         splash: host.splash.is_some(),
-        restore_prompt: host.restore_prompt.is_some() || host.session_prompt.is_some(),
+        // Modal prompts the host draws over the panes. The Restart to update
+        // dialog also changes without input while an update runs, with no
+        // pane damage, so it must force full frames like the others.
+        restore_prompt: host.restore_prompt.is_some()
+            || host.session_prompt.is_some()
+            || host.restart_modal.is_some(),
         palette: host.palette.is_some(),
         theme_picker: host.theme_picker.is_some(),
         space_picker: host.space_picker.is_some(),
@@ -9882,6 +9909,10 @@ fn pmux_command() -> std::process::Command {
     prismattyc_mux::platform::hidden_command(pmux_bin())
 }
 
+fn pmux_capture_command() -> std::process::Command {
+    prismattyc_mux::platform::hidden_capture_command(pmux_bin())
+}
+
 /// The mux socket this host belongs to: `PMUX_SOCKET` when set and
 /// non-empty, else the default instance — the same instance a bare `pmux`
 /// picks. A bare launch (Dock, Finder, a recorder, `prismattyc-host` from a
@@ -9994,23 +10025,23 @@ fn advance_space_opens(host: &mut HostState) {
     };
     let before = host.attach_layout_path.as_deref().and_then(cache_stamp);
     host.space_open_observation = Some(space_outcome::Observation::capture(&request.name));
-    match pmux_command()
-        .args({
-            let mut args = targeted_space_args(
-                &request.name,
-                request.mode,
-                host.attach_layout_path.as_deref(),
-            );
-            if let Some(name) = &request.session_name {
-                args.extend([std::ffi::OsString::from("--session-name"), name.into()]);
-            }
-            args
-        })
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-    {
+    match prismattyc_process::spawn(
+        pmux_command()
+            .args({
+                let mut args = targeted_space_args(
+                    &request.name,
+                    request.mode,
+                    host.attach_layout_path.as_deref(),
+                );
+                if let Some(name) = &request.session_name {
+                    args.extend([std::ffi::OsString::from("--session-name"), name.into()]);
+                }
+                args
+            })
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped()),
+    ) {
         Ok(child) => host.space_opens.started(request, child, before),
         Err(error) => report_space_open(
             host,
@@ -10787,23 +10818,24 @@ fn save_space_from_host_with(host: &mut HostState, name: &str, toast: bool) -> b
     }
     persist_attach_layout_from_live(host);
     match pump_timing::measure_subprocess_wait(|| {
-        pmux_command()
-            .args(["space", "save", name])
-            .args(
-                host.attach_layout_path
-                    .as_ref()
-                    .into_iter()
-                    .flat_map(|path| {
-                        [
-                            std::ffi::OsString::from("--view-path"),
-                            path.as_os_str().to_owned(),
-                        ]
-                    }),
-            )
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::inherit())
-            .status()
+        prismattyc_process::status(
+            pmux_command()
+                .args(["space", "save", name])
+                .args(
+                    host.attach_layout_path
+                        .as_ref()
+                        .into_iter()
+                        .flat_map(|path| {
+                            [
+                                std::ffi::OsString::from("--view-path"),
+                                path.as_os_str().to_owned(),
+                            ]
+                        }),
+                )
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::inherit()),
+        )
     }) {
         Ok(status) if status.success() => {
             refresh_rail(host);
@@ -15751,13 +15783,13 @@ fn space_picker_rows(kind: SpacePickerKind, current: Option<&str>) -> Vec<SpaceP
 /// Whether the focused pane can move into `target`.
 fn run_pmux_space(args: &[String]) -> Result<(), String> {
     let args_ref = args.iter().map(String::as_str).collect::<Vec<_>>();
-    match pmux_command()
-        .args(&args_ref)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::inherit())
-        .status()
-    {
+    match prismattyc_process::status(
+        pmux_command()
+            .args(&args_ref)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit()),
+    ) {
         Ok(status) if status.success() => Ok(()),
         Ok(status) => Err(format!("pmux {} exited {status}", args.join(" "))),
         Err(error) => Err(format!("could not run pmux: {error}")),
@@ -17675,11 +17707,13 @@ fn spawn_owned_space_pane(
         .as_deref()
         .context("no current Space")?;
     let owner = space.id.clone().context("Space ownership is unresolved")?;
-    let output = pmux_command()
-        .args(["space", "add", name])
-        .args(requested.into_iter().flat_map(|name| ["--name", name]))
-        .stdin(std::process::Stdio::null())
-        .output()?;
+    let output = prismattyc_process::spawn(
+        pmux_capture_command()
+            .args(["space", "add", name])
+            .args(requested.into_iter().flat_map(|name| ["--name", name]))
+            .stdin(std::process::Stdio::null()),
+    )
+    .and_then(std::process::Child::wait_with_output)?;
     if !output.status.success() {
         bail!(
             "create session: {}",
@@ -19772,11 +19806,13 @@ fn live_sessions() -> Vec<(String, String)> {
         return Vec::new();
     };
     let output = pump_timing::measure_subprocess_wait(|| {
-        pmux_command()
-            .arg("--socket")
-            .arg(&socket)
-            .arg("ls")
-            .output()
+        prismattyc_process::spawn(
+            pmux_capture_command()
+                .arg("--socket")
+                .arg(&socket)
+                .arg("ls"),
+        )
+        .and_then(std::process::Child::wait_with_output)
     });
     let Ok(output) = output else {
         return Vec::new();
@@ -19849,12 +19885,13 @@ fn recreate_session(host: &HostState, name: &str) -> Result<()> {
         Some(space) => session_reopen_args(name, space, true),
         None => session_reopen_args(name, &loaded_space_name(host), false),
     };
-    let mut command = pmux_command();
+    let mut command = pmux_capture_command();
     command.args(&args);
     if let Some(socket) = host_mux_socket() {
         command.env("PMUX_SOCKET", socket);
     }
-    let output = command.stdin(std::process::Stdio::null()).output()?;
+    let output = prismattyc_process::spawn(command.stdin(std::process::Stdio::null()))
+        .and_then(std::process::Child::wait_with_output)?;
     if !output.status.success() {
         bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
     }
@@ -20935,12 +20972,15 @@ impl ApplicationHandler<UserAction> for App {
         if restart::resume(self, event_loop) {
             return;
         }
-        if let Err(e) = self.open_window(event_loop, false) {
-            eprintln!("prismattyc-host: failed to start: {e:#}");
-            self.exit_code = 1;
-            event_loop.exit();
+        let (reopened, unopened) = update_flow::open_saved_windows(self, event_loop);
+        if !reopened {
+            if let Err(e) = self.open_window(event_loop, false) {
+                eprintln!("prismattyc-host: failed to start: {e:#}");
+                self.exit_code = 1;
+                event_loop.exit();
+            }
         }
-        update_flow::resume(self);
+        update_flow::resume(self, &unopened);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
@@ -20966,6 +21006,7 @@ impl ApplicationHandler<UserAction> for App {
                     publish_a11y(host);
                 }
             }
+            ui_events::flush(self);
             return;
         }
 
@@ -22303,10 +22344,9 @@ impl ApplicationHandler<UserAction> for App {
                 Ok(command) if command.detached => {
                     // A GUI editor opens its own window. A host window
                     // around it would only show an empty pane.
-                    if let Err(e) = std::process::Command::new(&command.program)
-                        .args(&command.args)
-                        .spawn()
-                    {
+                    if let Err(e) = prismattyc_process::spawn(
+                        std::process::Command::new(&command.program).args(&command.args),
+                    ) {
                         eprintln!(
                             "prismattyc-host: config editor {} failed: {e}",
                             command.program
@@ -24618,6 +24658,19 @@ mod tests {
         assert!(!use_wayland_shm(false, true));
         assert!(!use_wayland_shm(true, false));
         assert!(use_wayland_shm(true, true));
+    }
+
+    #[test]
+    fn a_seq_placeholder_gives_every_frame_its_own_dump_file() {
+        assert_eq!(
+            numbered_dump_path(Path::new("/tmp/out/frame-{seq}.png"), 42),
+            PathBuf::from("/tmp/out/frame-000042.png")
+        );
+        assert_eq!(
+            numbered_dump_path(Path::new("/tmp/out/present.png"), 42),
+            PathBuf::from("/tmp/out/present.png"),
+            "without the placeholder every frame overwrites one file, as before"
+        );
     }
 
     #[test]

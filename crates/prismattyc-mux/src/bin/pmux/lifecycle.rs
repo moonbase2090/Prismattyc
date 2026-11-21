@@ -184,48 +184,69 @@ pub(super) fn restart(paths: &Paths, args: Vec<String>) -> Result<()> {
             // Run lifecycle verbs as children so their progress cannot corrupt JSON.
             let executable = prismattyc_mux::release_update::installed_binary("pmux")
                 .unwrap_or(std::env::current_exe()?);
+            // A kept consent file means the user chose to save the sessions:
+            // the new daemon restores them with their layouts and scrollback.
+            let mut kept = None;
             if let Some(file) = &opts.consent_config {
                 let (mut client, client_id, session_ids) =
                     session_config::check_for_restart(paths, file)
                         .context("session consent check failed; no sessions were stopped")?;
                 let snapshot = take_snapshot(&mut client)?;
-                session_config::hold_spaces(
-                    snapshot
-                        .sessions
-                        .iter()
-                        .filter(|session| session_ids.contains(&session.id))
-                        .filter_map(|session| session.space_id.as_deref()),
-                )?;
                 if opts.delete_consent_config {
+                    session_config::hold_spaces(
+                        snapshot
+                            .sessions
+                            .iter()
+                            .filter(|session| session_ids.contains(&session.id))
+                            .filter_map(|session| session.space_id.as_deref()),
+                    )?;
                     std::fs::remove_file(file)?;
+                    for session_id in session_ids {
+                        super::destroy_session(&mut client, session_id).with_context(|| {
+                            format!("consented session {session_id} could not be stopped")
+                        })?;
+                    }
+                    shutdown_idle(paths, &mut client, client_id)?;
+                } else {
+                    let view = prismattyc_mux::attach_tabs::load(
+                        &prismattyc_mux::attach_tabs::layout_path_from_socket(&paths.socket),
+                    );
+                    let workspace =
+                        prismattyc_mux::workspace::Workspace::for_update(snapshot, view).context(
+                            "could not record the sessions to restore; no sessions were stopped",
+                        )?;
+                    drop(client);
+                    // An orderly stop writes every pane's scrollback for the
+                    // next daemon. Write the workspace after the old daemon
+                    // exits so its last checkpoint cannot replace it.
+                    stop_daemon(&executable, paths)?;
+                    workspace.write(&paths.socket).context(
+                        "the daemon stopped, but the sessions to restore could not be written",
+                    )?;
+                    kept = Some(workspace.session_names());
                 }
-                for session_id in session_ids {
-                    super::destroy_session(&mut client, session_id).with_context(|| {
-                        format!("consented session {session_id} could not be stopped")
-                    })?;
-                }
-                shutdown_idle(paths, &mut client, client_id)?;
             } else if opts.stop_sessions {
-                let stopped = Command::new(&executable)
-                    .arg("--socket")
-                    .arg(&paths.socket)
-                    .arg("stop")
-                    .stdout(Stdio::null())
-                    .status()?;
-                anyhow::ensure!(stopped.success(), "daemon stop failed");
+                stop_daemon(&executable, paths)?;
             } else {
                 stop_idle(paths)?;
             }
             let mut up = Command::new(&executable);
-            up.arg("--socket")
-                .arg(&paths.socket)
-                .arg("up")
-                .stdout(Stdio::null());
+            up.arg("--socket").arg(&paths.socket).arg("up");
+            if kept.is_some() {
+                up.arg("--restore-workspace");
+            }
+            up.stdout(Stdio::null());
             if let Some(server) = prismattyc_mux::release_update::installed_binary("pmuxd") {
                 up.env("PMUX_SERVER", server);
             }
-            anyhow::ensure!(up.status()?.success(), "daemon up failed");
+            anyhow::ensure!(
+                prismattyc_process::status(&mut up)?.success(),
+                "daemon up failed"
+            );
             results.push(json!({"component":"daemon","status":"restarted"}));
+            if let Some(names) = kept {
+                results.push(restored_sessions(paths, names));
+            }
             results.push(reconciled_plugins(paths));
         } else {
             results.push(json!({"component":"daemon","status":"deferred","detail":"sessions are running; use --stop-sessions only when ready to end them","sessions":sessions}));
@@ -238,6 +259,42 @@ pub(super) fn restart(paths: &Paths, args: Vec<String>) -> Result<()> {
         json!({"status":"restart_results","components":results})
     );
     Ok(())
+}
+
+/// Stop the daemon in order (its sessions end; their scrollback is written).
+fn stop_daemon(executable: &Path, paths: &Paths) -> Result<()> {
+    let stopped = prismattyc_process::status(
+        Command::new(executable)
+            .arg("--socket")
+            .arg(&paths.socket)
+            .arg("stop")
+            .stdout(Stdio::null()),
+    )?;
+    anyhow::ensure!(stopped.success(), "daemon stop failed");
+    Ok(())
+}
+
+/// Which saved sessions the restarted daemon brought back.
+fn restored_sessions(paths: &Paths, saved: Vec<String>) -> serde_json::Value {
+    let running = Client::connect(&paths.socket).and_then(|mut client| take_snapshot(&mut client));
+    match running {
+        Ok(snapshot) => {
+            let live: std::collections::HashSet<_> =
+                snapshot.sessions.iter().map(|s| s.name.as_str()).collect();
+            let (restored, lost): (Vec<_>, Vec<_>) = saved
+                .into_iter()
+                .partition(|name| live.contains(name.as_str()));
+            let status = if lost.is_empty() {
+                "restored"
+            } else {
+                "partial"
+            };
+            json!({"component":"sessions","status":status,"restored":restored,"lost":lost})
+        }
+        Err(error) => {
+            json!({"component":"sessions","status":"unconfirmed","saved":saved,"detail":format!("{error:#}")})
+        }
+    }
 }
 
 fn reconciled_plugins(paths: &Paths) -> serde_json::Value {

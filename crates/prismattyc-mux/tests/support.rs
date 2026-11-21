@@ -27,7 +27,7 @@ mod tests {
 
     #[test]
     fn clear_command_env_removes_mux_settings() {
-        let mut command = Command::new("/usr/bin/env");
+        let mut command = prismattyc_process::capture_command("/usr/bin/env");
         command
             .env("PMUX_SOCKET", "/tmp/pt186-sentinel.sock")
             .env("PMUX_PANE_LOG", "/tmp/pt186-sentinel.log")
@@ -35,7 +35,9 @@ mod tests {
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
         clear_command_env(&mut command);
-        let output = command.output().expect("run env");
+        let output = prismattyc_process::spawn(&mut command)
+            .and_then(std::process::Child::wait_with_output)
+            .expect("run env");
         assert!(output.status.success());
         let env = String::from_utf8_lossy(&output.stdout);
         assert!(!env.contains("PMUX_SOCKET="), "{env}");

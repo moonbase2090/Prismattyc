@@ -1,10 +1,7 @@
 //! Cooperative host restart. Blank/local PTYs require the old process to stay.
 use super::*;
 use prismattyc_mux::component_restart as requests;
-#[cfg(unix)]
-use prismattyc_mux::platform::Exec;
-
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub(super) struct WindowState {
     path: PathBuf,
     width: u32,
@@ -120,26 +117,7 @@ fn perform(app: &mut App, request: &requests::Request) -> Result<()> {
                     "this window has an exact secondary-pane view; close that view before restarting the host");
             }
         }
-        sync_attach_pane_sessions(host);
-        let path = host
-            .attach_layout_path
-            .clone()
-            .context("window has no saved view path")?;
-        let records = attach_records_from_live(host);
-        anyhow::ensure!(
-            records.tabs.iter().any(|tab| !tab.sessions.is_empty()),
-            "window has no mux sessions to restore"
-        );
-        host.file_writer.wait_for_attach_tabs(&path);
-        prismattyc_mux::attach_tabs::save(&path, &records)?;
-        let size = host.window.inner_size();
-        views.push(WindowState {
-            path,
-            width: size.width,
-            height: size.height,
-            position: host.window.outer_position().ok().map(|p| (p.x, p.y)),
-            focused: host.window_focused,
-        });
+        views.push(save_window_view(host)?.context("window has no mux sessions to restore")?);
     }
     #[cfg(target_os = "macos")]
     let notice = app.update_restart_notice.take();
@@ -162,7 +140,7 @@ fn perform(app: &mut App, request: &requests::Request) -> Result<()> {
         .env("PMUX_HOST_RESTART", serde_json::to_string(&resume)?);
     #[cfg(unix)]
     {
-        let error = command.exec();
+        let error = prismattyc_process::exec(&mut command);
         Err(error).context("start replacement host")
     }
     #[cfg(windows)]
@@ -171,9 +149,7 @@ fn perform(app: &mut App, request: &requests::Request) -> Result<()> {
         // The replacement claims the single-instance mutex. Release it first
         // or the child focuses this window and exits.
         super::instance::release();
-        let mut child = command
-            .stdin(std::process::Stdio::piped())
-            .spawn()
+        let mut child = prismattyc_process::spawn(command.stdin(std::process::Stdio::piped()))
             .context("start replacement host")?;
         let mut input = child.stdin.take().context("replacement input pipe")?;
         if let Err(error) = input.write_all(&child.id().to_le_bytes()) {
@@ -194,6 +170,77 @@ fn perform(app: &mut App, request: &requests::Request) -> Result<()> {
 /// a split tab the same name, so regroup would see the real names as detached
 /// and attach those sessions a second time in an extra tab. The tab title
 /// stays on the saved tab record, which restore applies on its own.
+/// Write this window's tabs to its view file and record its size, position
+/// and focus, so a relaunched app can open the same window again. A window
+/// that shows no mux sessions (only blank terminals) has nothing to reopen:
+/// `Ok(None)`. Failing to write a session window's view is an error.
+pub(super) fn save_window_view(host: &mut HostState) -> Result<Option<WindowState>> {
+    sync_attach_pane_sessions(host);
+    let records = attach_records_from_live(host);
+    if !records.tabs.iter().any(|tab| !tab.sessions.is_empty()) {
+        return Ok(None);
+    }
+    let path = host
+        .attach_layout_path
+        .clone()
+        .context("window has no saved view path")?;
+    host.file_writer.wait_for_attach_tabs(&path);
+    prismattyc_mux::attach_tabs::save(&path, &records)
+        .with_context(|| format!("save window view {}", path.display()))?;
+    let size = host.window.inner_size();
+    Ok(Some(WindowState {
+        path,
+        width: size.width,
+        height: size.height,
+        position: host.window.outer_position().ok().map(|p| (p.x, p.y)),
+        focused: host.window_focused,
+    }))
+}
+
+/// Open each saved window on its saved tabs, at its saved size and place.
+/// Returns how many windows opened and why any could not be opened.
+pub(super) fn reopen(
+    app: &mut App,
+    event_loop: &ActiveEventLoop,
+    views: &[WindowState],
+) -> (usize, Vec<String>) {
+    let mut focused = None;
+    let mut opened = 0;
+    let mut failures = Vec::new();
+    for view in views {
+        let Some(layout) = attach_tabs::load(&view.path) else {
+            failures.push(format!(
+                "its saved view {} could not be read",
+                view.path.display()
+            ));
+            continue;
+        };
+        app.cli.attach_sessions = restore_targets(&layout);
+        app.restart_view = Some(view.path.clone());
+        let id = match app.open_window(event_loop, false) {
+            Ok(id) => id,
+            Err(error) => {
+                failures.push(format!("{error:#}"));
+                continue;
+            }
+        };
+        opened += 1;
+        let window = &app.windows[&id].window;
+        let _ = window.request_inner_size(PhysicalSize::new(view.width, view.height));
+        if let Some((x, y)) = view.position {
+            window.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
+        }
+        if view.focused {
+            focused = Some(id);
+        }
+    }
+    app.restart_view = None;
+    if let Some(id) = focused {
+        app.windows[&id].window.focus_window();
+    }
+    (opened, failures)
+}
+
 fn restore_targets(layout: &attach_tabs::AttachTabsFile) -> Vec<AttachTarget> {
     layout
         .tabs

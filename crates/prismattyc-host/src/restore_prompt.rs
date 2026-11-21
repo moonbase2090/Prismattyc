@@ -44,19 +44,21 @@ impl RestorePrompt {
         let (sender, receiver) = std::sync::mpsc::channel();
         self.startup = Some(receiver);
         std::thread::spawn(move || {
-            let result = prismattyc_mux::platform::hidden_command(pmux)
-                .arg("--socket")
-                .arg(socket)
-                .arg("up")
-                .output()
-                .map_err(|error| error.to_string())
-                .and_then(|output| {
-                    if output.status.success() {
-                        Ok(())
-                    } else {
-                        Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
-                    }
-                });
+            let result = prismattyc_process::spawn(
+                prismattyc_mux::platform::hidden_capture_command(pmux)
+                    .arg("--socket")
+                    .arg(socket)
+                    .arg("up"),
+            )
+            .and_then(std::process::Child::wait_with_output)
+            .map_err(|error| error.to_string())
+            .and_then(|output| {
+                if output.status.success() {
+                    Ok(())
+                } else {
+                    Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
+                }
+            });
             let _ = sender.send(result);
             wake();
         });
@@ -276,11 +278,13 @@ pub(super) fn sync_login_registration() {
     };
     let pmux = find_mux_bin();
     std::thread::spawn(move || {
-        match prismattyc_mux::platform::hidden_command(pmux)
-            .arg("--socket")
-            .arg(socket)
-            .args(["login", "sync"])
-            .output()
+        match prismattyc_process::spawn(
+            prismattyc_mux::platform::hidden_capture_command(pmux)
+                .arg("--socket")
+                .arg(socket)
+                .args(["login", "sync"]),
+        )
+        .and_then(std::process::Child::wait_with_output)
         {
             Ok(output) if output.status.success() => {}
             Ok(output) => eprintln!(

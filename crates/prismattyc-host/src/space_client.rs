@@ -342,12 +342,13 @@ fn run_save(job: SaveJob) -> Report {
     if let Some(path) = &private {
         command.arg("--view-path").arg(path);
     }
-    let ok = command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::inherit())
-        .status()
-        .is_ok_and(|status| status.success());
+    let ok = prismattyc_process::status(
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit()),
+    )
+    .is_ok_and(|status| status.success());
     if let Some(path) = private {
         let _ = std::fs::remove_file(&path);
         // Only the directory this save created. A file that sits directly in
@@ -494,13 +495,13 @@ fn run_command(job: CommandJob) -> Report {
     let args = job.operation.args();
     let mut command = Command::new(&job.pmux);
     prismattyc_mux::platform::hide_console(&mut command);
-    let result = match command
-        .args(&args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::inherit())
-        .status()
-    {
+    let result = match prismattyc_process::status(
+        command
+            .args(&args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit()),
+    ) {
         Ok(status) if status.success() => Ok(()),
         Ok(status) => Err(format!("pmux {} exited {status}", args.join(" "))),
         Err(error) => Err(format!("could not run pmux: {error}")),

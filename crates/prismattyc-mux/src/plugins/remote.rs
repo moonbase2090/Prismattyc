@@ -215,12 +215,13 @@ impl Remote {
             .spawn(move || {
                 let _reservation = reservation;
                 let result = (|| -> Result<()> {
-                    let process = Command::new(executable)
-                        .arg(INTERNAL_ENDPOINT_ARG)
-                        .stdin(Stdio::piped())
-                        .stdout(Stdio::piped())
-                        .stderr(Stdio::null())
-                        .spawn()?;
+                    let process = prismattyc_process::spawn(
+                        Command::new(executable)
+                            .arg(INTERNAL_ENDPOINT_ARG)
+                            .stdin(Stdio::piped())
+                            .stdout(Stdio::piped())
+                            .stderr(Stdio::null()),
+                    )?;
                     let mut owned = OwnedProcess::new(process);
                     let mut parent = owned
                         .child
@@ -421,7 +422,7 @@ impl OwnedProcess {
         #[cfg(not(windows))]
         {
             Ok(Self {
-                child: command.spawn()?,
+                child: prismattyc_process::spawn(command)?,
                 graceful: false,
                 group: true,
             })

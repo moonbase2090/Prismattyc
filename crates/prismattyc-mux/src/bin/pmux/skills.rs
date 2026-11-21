@@ -5,7 +5,6 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
-    process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -256,13 +255,15 @@ fn inspect_file(skill_dir: &Path) -> Result<Existing> {
 }
 
 fn muse_skill_path(home: &Path) -> Result<Option<String>> {
-    let output = Command::new("muse")
-        .args(["skills", "list", "--source", "user", "--json"])
-        .env("HOME", home)
-        .output()
-        .context(
-            "run `muse skills list --source user --json` (install Muse or select another agent)",
-        )?;
+    let output = prismattyc_process::spawn(
+        prismattyc_process::capture_command("muse")
+            .args(["skills", "list", "--source", "user", "--json"])
+            .env("HOME", home),
+    )
+    .and_then(std::process::Child::wait_with_output)
+    .context(
+        "run `muse skills list --source user --json` (install Muse or select another agent)",
+    )?;
     if !output.status.success() {
         let detail = String::from_utf8_lossy(&output.stderr);
         let detail = detail.trim();
@@ -551,7 +552,7 @@ fn install_muse(home: &Path, force: bool) -> Result<()> {
     let result = (|| {
         fs::write(source.join("SKILL.md"), SKILL)
             .with_context(|| format!("write skill source in {}", source.display()))?;
-        let mut command = Command::new("muse");
+        let mut command = prismattyc_process::capture_command("muse");
         command
             .args(["skills", "install"])
             .arg(&source)
@@ -561,7 +562,9 @@ fn install_muse(home: &Path, force: bool) -> Result<()> {
         }
         command.arg("--json");
         command.env("HOME", home);
-        let output = command.output().context("run `muse skills install`")?;
+        let output = prismattyc_process::spawn(&mut command)
+            .and_then(std::process::Child::wait_with_output)
+            .context("run `muse skills install`")?;
         if !output.status.success() {
             let detail = String::from_utf8_lossy(&output.stderr);
             let detail = detail.trim();

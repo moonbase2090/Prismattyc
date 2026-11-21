@@ -1545,7 +1545,7 @@ dependencies = [
 
 [[package]]
 name = "pmux-plugin-api"
-version = "0.3.70"
+version = "0.3.72"
 dependencies = [
  "schemars",
  "serde",
@@ -1557,7 +1557,7 @@ dependencies = [
 
 [[package]]
 name = "pmux-plugin-runtime"
-version = "0.3.70"
+version = "0.3.72"
 dependencies = [
  "anyhow",
  "pmux-plugin-api",
@@ -1605,6 +1605,7 @@ dependencies = [
  "libc",
  "log",
  "nix 0.28.0",
+ "prismattyc-process",
  "serial2",
  "shared_library",
  "shell-words",
@@ -1635,15 +1636,16 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-core"
-version = "0.3.70"
+version = "0.3.72"
 dependencies = [
+ "prismattyc-process",
  "serde",
  "unicode-width",
 ]
 
 [[package]]
 name = "prismattyc-emulator"
-version = "0.3.70"
+version = "0.3.72"
 dependencies = [
  "anyhow",
  "flate2",
@@ -1659,7 +1661,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-mux"
-version = "0.3.70"
+version = "0.3.72"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1680,6 +1682,7 @@ dependencies = [
  "postcard",
  "prismattyc-core",
  "prismattyc-emulator",
+ "prismattyc-process",
  "prismattyc-protocol",
  "prismattyc-render",
  "prismattyc-winres",
@@ -1701,12 +1704,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "prismattyc-process"
+version = "0.3.72"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "prismattyc-protocol"
-version = "0.3.70"
+version = "0.3.72"
 
 [[package]]
 name = "prismattyc-render"
-version = "0.3.70"
+version = "0.3.72"
 dependencies = [
  "prismattyc-core",
  "prismattyc-protocol",
@@ -1714,7 +1724,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-winres"
-version = "0.3.70"
+version = "0.3.72"
 dependencies = [
  "winresource",
 ]

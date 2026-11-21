@@ -1,8 +1,16 @@
 // SPDX-License-Identifier: MIT
 //! One owner for the consent, installation, restart, and restoration flow.
 use super::*;
+use prismattyc_mux::release_update::progress::{self, Progress};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::io::{BufRead, BufReader, Read};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use update_meter::Meter;
+
+/// How often a step without a fraction moves its bar.
+const TICK: std::time::Duration = std::time::Duration::from_millis(150);
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Action {
@@ -25,6 +33,12 @@ pub(super) struct Plan {
 #[derive(Debug)]
 pub(super) enum Event {
     Prepared(Result<Plan, String>),
+    /// A stage reported by `pmux update --progress`.
+    Progress(Progress),
+    /// The app is restarting component `index` of `count`.
+    Restart(usize, usize, &'static str),
+    /// Move the bar of a step that has no fraction.
+    Tick,
     Installed(Result<Resume, String>),
     Restored(Result<String, String>),
 }
@@ -33,6 +47,79 @@ pub(super) enum Event {
 pub(super) struct Resume {
     notice: String,
     backup: Option<PathBuf>,
+    /// Set when the restarted daemon already brought the saved sessions
+    /// back. An app from before this field asks before restoring instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    restored: Option<Restored>,
+    /// Every app window's tabs, size and place when the user chose Save and
+    /// restart. Used only when the sessions came back with their IDs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    views: Vec<restart::WindowState>,
+}
+
+/// Which saved sessions the restarted daemon brought back, by name.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
+pub(super) struct Restored {
+    restored: Vec<String>,
+    lost: Vec<String>,
+}
+
+impl Restored {
+    /// The `sessions` entry of a `pmux restart --json` report, when the
+    /// restarted daemon confirmed which sessions it brought back. An
+    /// unconfirmed or malformed entry is `None`, so the app asks instead.
+    fn from_report(report: &str) -> Option<Self> {
+        let value: Value = serde_json::from_str(report).ok()?;
+        let entry = value["components"]
+            .as_array()?
+            .iter()
+            .find(|component| component["component"] == "sessions")?;
+        if !matches!(entry["status"].as_str(), Some("restored" | "partial"))
+            || !entry["restored"].is_array()
+            || !entry["lost"].is_array()
+        {
+            return None;
+        }
+        let names = |key: &str| -> Vec<String> {
+            entry[key]
+                .as_array()
+                .map(|names| {
+                    names
+                        .iter()
+                        .filter_map(|name| name.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        Some(Self {
+            restored: names("restored"),
+            lost: names("lost"),
+        })
+    }
+
+    fn summary(&self) -> String {
+        let mut text = match self.restored.len() {
+            0 => "No sessions were restored.".to_string(),
+            1 => format!(
+                "Restored 1 session with its layout and scrollback: {}.",
+                self.restored[0]
+            ),
+            n => format!(
+                "Restored {n} sessions with their layouts and scrollback: {}.",
+                self.restored.join(", ")
+            ),
+        };
+        if !self.restored.is_empty() {
+            text.push_str(" Their programs started again.");
+        }
+        if !self.lost.is_empty() {
+            text.push_str(&format!(
+                "\nNot restored: {}. Restore them from the saved configuration.",
+                self.lost.join(", ")
+            ));
+        }
+        text
+    }
 }
 
 #[derive(Default)]
@@ -41,6 +128,8 @@ pub(super) enum Flow {
     Idle,
     Busy,
     Confirm(Plan),
+    /// Installing and restarting; the flag stops the meter's ticker.
+    Installing(Meter, Arc<AtomicBool>),
     Restore(Resume),
 }
 
@@ -50,9 +139,29 @@ fn show(app: &mut App, text: &str, actions: &[(&str, Action)]) {
     }
 }
 
+/// Redraw the meter after it changed, while the install is still running.
+fn refresh_meter(app: &mut App, change: impl FnOnce(&mut Meter) -> bool) {
+    let Flow::Installing(meter, _) = &mut app.full_update else {
+        return;
+    };
+    let before = meter.step_line();
+    if !change(meter) {
+        return;
+    }
+    let meter = meter.clone();
+    let after = meter.step_line();
+    if after != before {
+        // Steps only, never byte counts, so the log stays short.
+        eprintln!("prismattyc-host: update progress: {after}");
+    }
+    restart_modal::show_progress(app, &meter);
+}
+
 pub(super) fn action(app: &mut App, action: Action) {
     match action {
         Action::Start if !matches!(app.full_update, Flow::Busy) => {
+            // Check again after a failed update closes its dialog first.
+            restart_modal::close(app);
             app.full_update = Flow::Busy;
             show(
                 app,
@@ -70,14 +179,58 @@ pub(super) fn action(app: &mut App, action: Action) {
                 return;
             };
             let plan = plan.clone();
-            restart_modal::close(app);
-            app.full_update = Flow::Busy;
-            show(app, "Downloading and verifying the release, then installing and restarting all components. Please wait.", &[]);
+            let save = matches!(action, Action::SaveAndContinue);
+            // Record each window now, while its sessions are still running.
+            // A window without sessions (only blank terminals) is not kept;
+            // a session window whose view cannot be saved stops the update
+            // before anything is stopped.
+            let views = if save {
+                match app
+                    .windows
+                    .values_mut()
+                    .map(restart::save_window_view)
+                    .collect::<Result<Vec<_>>>()
+                {
+                    Ok(views) => views.into_iter().flatten().collect(),
+                    Err(error) => {
+                        restart_modal::close(app);
+                        app.full_update = Flow::Idle;
+                        show(
+                            app,
+                            &format!("The update did not start: a window could not be saved ({error:#}). Your sessions are still running."),
+                            &[("Check again", Action::Start)],
+                        );
+                        return;
+                    }
+                }
+            } else {
+                Vec::new()
+            };
+            let meter = Meter::new(plan.update_available);
+            let stop = Arc::new(AtomicBool::new(false));
+            // The dialog turns into the update's progress.
+            restart_modal::show_progress(app, &meter);
+            app.full_update = Flow::Installing(meter, stop.clone());
+            let ticker = app.event_proxy.clone();
+            let ticking = stop.clone();
+            std::thread::spawn(move || {
+                while !ticking.load(Ordering::Relaxed) {
+                    std::thread::sleep(TICK);
+                    if ticker
+                        .send_event(UserAction::FullUpdate(Event::Tick))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            });
             let proxy = app.event_proxy.clone();
             std::thread::spawn(move || {
-                let result = install(plan, matches!(action, Action::SaveAndContinue))
-                    .map_err(|e| format!("{e:#}"));
-                let _ = proxy.send_event(UserAction::FullUpdate(Event::Installed(result)));
+                let report = |event| {
+                    let _ = proxy.send_event(UserAction::FullUpdate(event));
+                };
+                let result = install(plan, save, views, &report).map_err(|e| format!("{e:#}"));
+                report(Event::Installed(result));
             });
         }
         Action::Restore => {
@@ -136,7 +289,36 @@ pub(super) fn event(app: &mut App, event: Event) {
             );
             app.full_update = Flow::Confirm(plan);
         }
+        Event::Progress(progress) => refresh_meter(app, |meter| {
+            meter.apply(&progress);
+            true
+        }),
+        Event::Restart(index, count, item) => refresh_meter(app, |meter| {
+            meter.restart(index, count, item);
+            true
+        }),
+        Event::Tick => refresh_meter(app, Meter::tick),
+        Event::Installed(Err(error)) => {
+            let text = format!("The operation could not finish.\n{error}");
+            let actions = [("Check again", Action::Start)];
+            match std::mem::take(&mut app.full_update) {
+                Flow::Installing(mut meter, stop) => {
+                    stop.store(true, Ordering::Relaxed);
+                    meter.fail();
+                    eprintln!("prismattyc-host: update progress: {}", meter.step_line());
+                    if restart_modal::is_open(app) {
+                        restart_modal::fail(app, &meter, &error);
+                    } else {
+                        show(app, &text, &actions);
+                    }
+                }
+                _ => show(app, &text, &actions),
+            }
+        }
         Event::Installed(Ok(resume)) => {
+            if let Flow::Installing(_, stop) = &app.full_update {
+                stop.store(true, Ordering::Relaxed);
+            }
             if let Err(error) = relaunch(&resume) {
                 app.full_update = Flow::Restore(resume.clone());
                 show(app, &format!("{}\nCould not restart the app: {error:#}. Quit and reopen Prismattyc. Your session configuration is saved at {}.", resume.notice, resume.backup.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "no backup was requested".into())), &[]);
@@ -144,23 +326,10 @@ pub(super) fn event(app: &mut App, event: Event) {
         }
         Event::Restored(Ok(text)) => {
             app.full_update = Flow::Idle;
-            for host in app.windows.values_mut() {
-                host.restore_prompt = host
-                    .attach_layout_path
-                    .as_ref()
-                    .and_then(|path| attach_tabs::load(path))
-                    .and_then(restore_prompt::RestorePrompt::new);
-                if host.restore_prompt.is_some() {
-                    restore_prompt::finish(host, true);
-                }
-                host.cache_writer = true;
-                host.local_views.fresh = false;
-            }
+            reopen_views(app);
             show(app, &format!("{text}\nSession restoration finished. Open a saved Space or select a session to view it."), &[]);
         }
-        Event::Prepared(Err(error))
-        | Event::Installed(Err(error))
-        | Event::Restored(Err(error)) => {
+        Event::Prepared(Err(error)) | Event::Restored(Err(error)) => {
             app.full_update = Flow::Idle;
             show(
                 app,
@@ -168,6 +337,23 @@ pub(super) fn event(app: &mut App, event: Event) {
                 &[("Check again", Action::Start)],
             );
         }
+    }
+}
+
+/// Reopen each window's saved tabs on the sessions that now exist, and let
+/// the windows write their view again.
+fn reopen_views(app: &mut App) {
+    for host in app.windows.values_mut() {
+        host.restore_prompt = host
+            .attach_layout_path
+            .as_ref()
+            .and_then(|path| attach_tabs::load(path))
+            .and_then(restore_prompt::RestorePrompt::new);
+        if host.restore_prompt.is_some() {
+            restore_prompt::finish(host, true);
+        }
+        host.cache_writer = true;
+        host.local_views.fresh = false;
     }
 }
 
@@ -220,15 +406,29 @@ pub(super) fn snapshot_path(prefix: &str) -> Result<PathBuf> {
     )))
 }
 
-fn install(plan: Plan, save: bool) -> Result<Resume> {
+fn install(
+    plan: Plan,
+    save: bool,
+    views: Vec<restart::WindowState>,
+    report: &dyn Fn(Event),
+) -> Result<Resume> {
     let pmux = find_mux_bin();
     require_same_sessions(&plan, &pmux)?;
     let file = snapshot_path("update")?;
     run(&pmux, &["session-config", "save", &file.to_string_lossy()])?;
     let backup = save.then_some(file.clone());
-    let result = complete_install(&plan, &pmux, &file, !save);
+    let result = complete_install(&plan, &pmux, &file, !save, report);
     match result {
-        Ok(notice) => Ok(Resume { notice, backup }),
+        Ok((notice, restored)) => Ok(Resume {
+            notice,
+            backup,
+            views: if restored.is_some() {
+                views
+            } else {
+                Vec::new()
+            },
+            restored,
+        }),
         Err(error) => {
             if !save {
                 let _ = std::fs::remove_file(&file);
@@ -250,15 +450,16 @@ fn complete_install(
     pmux: &Path,
     consent: &Path,
     delete_consent: bool,
-) -> Result<String> {
+    report: &dyn Fn(Event),
+) -> Result<(String, Option<Restored>)> {
     if plan.update_available {
-        let report: Value = serde_json::from_str(&run(pmux, &["update", "--json"])?)?;
+        let installed: Value = serde_json::from_str(&update_with_progress(pmux, report)?)?;
         anyhow::ensure!(
-            report["status"] == "installed",
+            installed["status"] == "installed",
             "The release was not installed. {}",
-            space_panel::maintenance_result(&report.to_string())
+            space_panel::maintenance_result(&installed.to_string())
         );
-        anyhow::ensure!(report["version"].as_str() == Some(plan.available.as_str()), "The installed release changed during the update. No sessions were stopped. Check again.");
+        anyhow::ensure!(installed["version"].as_str() == Some(plan.available.as_str()), "The installed release changed during the update. No sessions were stopped. Check again.");
     }
     // Resolve the replacement after installation, so the daemon, CLI and
     // MCP supervisor all use the same activated release.
@@ -297,8 +498,13 @@ fn complete_install(
     }
     restart.extend(["--worker".to_string(), "--json".to_string()]);
     let restart_args = restart.iter().map(String::as_str).collect::<Vec<_>>();
-    run(&installed, &restart_args)
+    report(Event::Restart(1, RESTARTS, "daemon and sessions"));
+    let restarted = run(&installed, &restart_args)
         .context("The files are installed, but the daemon restart failed")?;
+    let restored = (!delete_consent)
+        .then(|| Restored::from_report(&restarted))
+        .flatten();
+    report(Event::Restart(2, RESTARTS, "MCP adapter"));
     let mcp = run(&installed, &["restart", "--mcp", "--json"])
         .context("The daemon restarted, but the MCP restart failed")?;
     let mut versions: Value = serde_json::from_str(&run(&installed, &["versions"])?)?;
@@ -324,15 +530,23 @@ fn complete_install(
         "The running daemon is {actual}; expected {}. The app has not restarted.",
         plan.available
     );
-    Ok(format!(
-        "Prismattyc {} is installed. The daemon restarted on {}.\n{}\n{}{}",
-        plan.available,
-        actual,
-        space_panel::maintenance_result(&mcp),
-        space_panel::maintenance_result(&versions.to_string()),
-        host_lines
+    report(Event::Restart(3, RESTARTS, "app"));
+    Ok((
+        format!(
+            "Prismattyc {} is installed. The daemon restarted on {}.\n{}\n{}{}",
+            plan.available,
+            actual,
+            space_panel::maintenance_result(&mcp),
+            space_panel::maintenance_result(&versions.to_string()),
+            host_lines
+        ),
+        restored,
     ))
 }
+
+/// Components the app restarts after installing: the daemon with its
+/// sessions, the MCP adapter, then the app itself.
+const RESTARTS: usize = 3;
 
 /// Process ids of every live app process except this one.
 fn other_host_pids(versions: &Value, own: u32) -> Vec<u64> {
@@ -426,13 +640,7 @@ fn verify_installed_versions(value: &Value, expected: &str) -> Result<()> {
     Ok(())
 }
 
-/// Run a pmux command and return its standard output.
-///
-/// Output is collected in private files, not pipes. A daemon the command
-/// starts can end up holding a copy of a pipe's write end (Windows children
-/// inherit every inheritable handle), and then the end of output never comes,
-/// so waiting on a pipe could block until that daemon exits.
-pub(super) fn run(pmux: &Path, args: &[&str]) -> Result<String> {
+fn command(pmux: &Path) -> std::process::Command {
     let mut cmd = prismattyc_mux::platform::hidden_command(pmux);
     if let Some(socket) = host_mux_socket() {
         cmd.arg("--socket").arg(socket);
@@ -443,14 +651,82 @@ pub(super) fn run(pmux: &Path, args: &[&str]) -> Result<String> {
             cmd.env("PMUX_SERVER", server);
         }
     }
+    cmd
+}
+
+/// `pmux update --json`, with staged progress when the CLI supports it. A
+/// command-line tool from before progress reporting rejects the option before
+/// it downloads anything, so the update runs again without it.
+fn update_with_progress(pmux: &Path, report: &dyn Fn(Event)) -> Result<String> {
+    let mut forward = |progress| report(Event::Progress(progress));
+    match run_with_progress(pmux, &["update", "--json", "--progress"], &mut forward) {
+        Err(error) if format!("{error:#}").contains(r#"option "--progress""#) => {
+            run(pmux, &["update", "--json"])
+        }
+        result => result,
+    }
+}
+
+/// Run a command that reports progress lines on stderr. Each event goes to
+/// `on_progress` as it arrives; other stderr lines are kept for the error.
+fn run_with_progress(
+    pmux: &Path,
+    args: &[&str],
+    on_progress: &mut dyn FnMut(Progress),
+) -> Result<String> {
+    let mut child = prismattyc_process::spawn(
+        command(pmux)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .context("run update command")?;
+    let mut stdout = child.stdout.take().context("update command output")?;
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stdout.read_to_string(&mut text);
+        text
+    });
+    let stderr = child.stderr.take().context("update command messages")?;
+    let messages = read_progress(BufReader::new(stderr), on_progress);
+    let status = child.wait().context("wait for update command")?;
+    let stdout = reader.join().unwrap_or_default();
+    anyhow::ensure!(status.success(), "{stdout}{messages}");
+    Ok(stdout.trim().into())
+}
+
+/// Hand each progress line to `on_progress` and return the other lines.
+fn read_progress(input: impl BufRead, on_progress: &mut dyn FnMut(Progress)) -> String {
+    let mut messages = String::new();
+    for line in input.lines().map_while(Result::ok) {
+        match progress::parse(&line) {
+            Some(event) => on_progress(event),
+            None => {
+                messages.push_str(&line);
+                messages.push('\n');
+            }
+        }
+    }
+    messages
+}
+
+/// Run a pmux command and return its standard output.
+///
+/// Output is collected in private files, not pipes. A daemon the command
+/// starts can end up holding a copy of a pipe's write end (Windows children
+/// inherit every inheritable handle), and then the end of output never comes,
+/// so waiting on a pipe could block until that daemon exits.
+pub(super) fn run(pmux: &Path, args: &[&str]) -> Result<String> {
     let capture = Capture::new()?;
-    let status = cmd
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .stdout(capture.create("stdout")?)
-        .stderr(capture.create("stderr")?)
-        .status()
-        .context("run update command")?;
+    let status = prismattyc_process::status(
+        command(pmux)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(capture.create("stdout")?)
+            .stderr(capture.create("stderr")?),
+    )
+    .context("run update command")?;
     let stdout = capture.read("stdout")?;
     anyhow::ensure!(status.success(), "{stdout}{}", capture.read("stderr")?);
     Ok(stdout.trim().into())
@@ -503,18 +779,39 @@ fn relaunch(resume: &Resume) -> Result<()> {
     cmd.env("PRISMATTYC_COMPLETE_UPDATE", serde_json::to_string(resume)?);
     #[cfg(unix)]
     {
-        use prismattyc_mux::platform::Exec;
-        Err(cmd.exec()).context("launch updated app")
+        Err(prismattyc_process::exec(&mut cmd)).context("launch updated app")
     }
     #[cfg(windows)]
     {
         instance::release();
-        cmd.spawn().context("launch updated app")?;
+        prismattyc_process::spawn(&mut cmd).context("launch updated app")?;
         std::process::exit(0);
     }
 }
 
-pub(super) fn resume(app: &mut App) {
+/// After an update that kept the sessions, open every saved app window at
+/// its saved size and place, each on its own saved view file. Returns false
+/// when there is nothing to open, so the app opens its usual first window.
+/// [`resume`] then applies each window's tabs and shows the update notice.
+pub(super) fn open_saved_windows(
+    app: &mut App,
+    event_loop: &ActiveEventLoop,
+) -> (bool, Vec<String>) {
+    let Some(raw) = std::env::var_os("PRISMATTYC_COMPLETE_UPDATE") else {
+        return (false, Vec::new());
+    };
+    let Ok(resume) = serde_json::from_str::<Resume>(&raw.to_string_lossy()) else {
+        return (false, Vec::new());
+    };
+    if resume.restored.is_none() || resume.views.is_empty() {
+        return (false, Vec::new());
+    }
+    let (opened, failures) = restart::reopen(app, event_loop, &resume.views);
+    (opened > 0, failures)
+}
+
+/// `unopened` names each saved window the relaunch could not reopen, and why.
+pub(super) fn resume(app: &mut App, unopened: &[String]) {
     let Some(raw) = std::env::var_os("PRISMATTYC_COMPLETE_UPDATE") else {
         return;
     };
@@ -528,6 +825,29 @@ pub(super) fn resume(app: &mut App) {
     ));
     for host in app.windows.values_mut() {
         host.restore_prompt = None;
+    }
+    if let Some(restored) = &resume.restored {
+        // The restarted daemon already brought the sessions back with their
+        // IDs, so the saved tabs open on them directly. The user agreed to
+        // this when choosing Save and restart; there is nothing more to ask.
+        let mut text = format!("{}\n{}", resume.notice, restored.summary());
+        for reason in unopened {
+            text.push_str(&format!(
+                "\nA saved window could not be reopened: {reason}."
+            ));
+        }
+        if let Some(path) = &resume.backup {
+            text.push_str(&format!(
+                "\nThe session configuration also remains saved at {}.",
+                path.display()
+            ));
+        }
+        app.full_update = Flow::Idle;
+        // Every window, reopened from its saved view or the usual first
+        // one, applies its saved tabs to the sessions that came back.
+        reopen_views(app);
+        show(app, &text, &[]);
+        return;
     }
     if let Some(path) = &resume.backup {
         let text = format!("{}\nSession configuration saved at {}. Restore these sessions and relaunch their saved commands?", resume.notice, path.display());
@@ -580,7 +900,7 @@ echo note >&2"#,
         let output = run(&pmux, &[]).unwrap();
         let elapsed = started.elapsed();
         let pid = std::fs::read_to_string(pmux.parent().unwrap().join("held.pid")).unwrap();
-        let _ = std::process::Command::new("kill").arg(pid.trim()).status();
+        let _ = prismattyc_process::status(std::process::Command::new("kill").arg(pid.trim()));
         assert_eq!(output, "done");
         assert!(
             elapsed < std::time::Duration::from_secs(10),
@@ -614,6 +934,59 @@ echo note >&2"#,
         assert!(after.is_subset(&before), "output files removed: {after:?}");
         std::fs::remove_dir_all(pmux.parent().unwrap()).unwrap();
     }
+    #[test]
+    fn a_restart_report_names_the_sessions_the_daemon_brought_back() {
+        let report = r#"{"components":[{"component":"daemon","status":"restarted"},{"component":"sessions","lost":["gone"],"restored":["work","notes"],"status":"partial"},{"component":"plugins","status":"reconciled"}],"status":"restart_results"}"#;
+        let restored = Restored::from_report(report).expect("sessions entry");
+        assert_eq!(restored.restored, ["work", "notes"]);
+        assert_eq!(restored.lost, ["gone"]);
+        let text = restored.summary();
+        assert!(text.starts_with("Restored 2 sessions"), "{text}");
+        assert!(text.contains("work, notes"), "{text}");
+        assert!(text.contains("Not restored: gone."), "{text}");
+
+        let without = r#"{"components":[{"component":"daemon","status":"restarted"}],"status":"restart_results"}"#;
+        assert_eq!(
+            Restored::from_report(without),
+            None,
+            "a CLI that did not restore"
+        );
+        assert_eq!(Restored::from_report("not json"), None);
+    }
+
+    #[test]
+    fn an_unconfirmed_restore_keeps_the_saved_configuration_question() {
+        // The restart could not read the new daemon's sessions: nothing is
+        // known to be back, so the app must still offer the saved file.
+        let unconfirmed = r#"{"components":[{"component":"sessions","status":"unconfirmed","saved":["work"],"detail":"connect failed"}],"status":"restart_results"}"#;
+        assert_eq!(Restored::from_report(unconfirmed), None);
+        let without_lists = r#"{"components":[{"component":"sessions","status":"restored"}],"status":"restart_results"}"#;
+        assert_eq!(Restored::from_report(without_lists), None);
+        let unknown = r#"{"components":[{"component":"sessions","status":"later","restored":[],"lost":[]}],"status":"restart_results"}"#;
+        assert_eq!(Restored::from_report(unknown), None);
+    }
+
+    #[test]
+    fn an_older_app_relaunch_still_asks_before_restoring() {
+        // The relaunch payload written by an app from before automatic
+        // restore has no `restored` field; the new app must then ask.
+        let older: Resume =
+            serde_json::from_str(r#"{"notice":"done","backup":"/tmp/saved.json"}"#).unwrap();
+        assert!(older.restored.is_none());
+        assert!(older.backup.is_some());
+        let newer = Resume {
+            notice: "done".into(),
+            backup: None,
+            restored: Some(Restored {
+                restored: vec!["work".into()],
+                lost: Vec::new(),
+            }),
+            views: Vec::new(),
+        };
+        let round: Resume = serde_json::from_str(&serde_json::to_string(&newer).unwrap()).unwrap();
+        assert_eq!(round.restored, newer.restored);
+    }
+
     #[test]
     fn incomplete_or_mixed_installations_cannot_report_success() {
         let absent = serde_json::json!({"installed": []});
@@ -681,5 +1054,97 @@ echo note >&2"#,
         let lines = other_host_lines(Some(restart), &serde_json::json!({"running": []}), "0.3.70");
         assert!(lines.contains("did not confirm"), "{lines}");
         assert!(lines.contains("close and reopen"), "{lines}");
+    }
+
+    #[test]
+    fn progress_lines_are_forwarded_in_order_and_other_lines_kept() {
+        let first = Progress::Download {
+            item: "pmux".into(),
+            received: 10,
+            total: 40,
+        };
+        let second = Progress::Verify {
+            item: "pmux".into(),
+            index: 1,
+            count: 6,
+        };
+        let input = format!(
+            "Downloading pmux 0.3.70\n{}\n{}\nwarning: slow mirror\n",
+            progress::line(&first),
+            progress::line(&second)
+        );
+        let mut seen = Vec::new();
+        let messages = read_progress(input.as_bytes(), &mut |event| seen.push(event));
+        assert_eq!(seen, [first, second]);
+        assert_eq!(messages, "Downloading pmux 0.3.70\nwarning: slow mirror\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_running_update_streams_progress_and_returns_its_report() {
+        let event = Progress::Install {
+            item: "core binaries".into(),
+        };
+        let pmux = fake_pmux(
+            "stream",
+            &format!(
+                "echo 'Downloading pmux' >&2\necho '{}' >&2\necho '{{\"status\":\"installed\"}}'",
+                progress::line(&event)
+            ),
+        );
+        let seen = std::cell::RefCell::new(Vec::new());
+        let report = |event| seen.borrow_mut().push(event);
+        let output = update_with_progress(&pmux, &report).unwrap();
+        assert_eq!(output, r#"{"status":"installed"}"#);
+        let seen = seen.into_inner();
+        assert!(
+            matches!(seen.as_slice(), [Event::Progress(p)] if *p == event),
+            "{seen:?}"
+        );
+        std::fs::remove_dir_all(pmux.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_update_reports_its_messages_but_not_progress_lines() {
+        let pmux = fake_pmux(
+            "fail",
+            &format!(
+                "echo '{}' >&2\necho 'download digest mismatch for pmuxd' >&2\nexit 1",
+                progress::line(&Progress::Download {
+                    item: "pmuxd".into(),
+                    received: 1,
+                    total: 2
+                })
+            ),
+        );
+        let error = update_with_progress(&pmux, &|_| {})
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("download digest mismatch for pmuxd"),
+            "{error}"
+        );
+        assert!(!error.contains(progress::PREFIX), "{error}");
+        std::fs::remove_dir_all(pmux.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_older_cli_without_progress_still_updates() {
+        // The release CLI's wording for an option it does not know.
+        let pmux = fake_pmux(
+            "older",
+            r#"for arg in "$@"; do
+  if [ "$arg" = --progress ]; then
+    echo 'unknown release update option "--progress"; use --help' >&2
+    exit 1
+  fi
+done
+echo '{"status":"installed"}'"#,
+        );
+        let output = update_with_progress(&pmux, &|_| {}).unwrap();
+        assert_eq!(output, r#"{"status":"installed"}"#);
+        std::fs::remove_dir_all(pmux.parent().unwrap()).unwrap();
     }
 }

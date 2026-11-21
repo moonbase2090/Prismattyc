@@ -112,7 +112,7 @@ impl Fixture {
     }
 
     fn local(&self, binary: &str) -> Command {
-        let mut command = Command::new(binary);
+        let mut command = prismattyc_process::capture_command(binary);
         support::clear_command_env(&mut command);
         command.envs(self.env_pairs()).stdin(Stdio::null());
         command
@@ -121,14 +121,15 @@ impl Fixture {
     fn start_daemon(&mut self) {
         let _ = std::fs::remove_file(&self.socket);
         self.server = Some(
-            self.local(env!("CARGO_BIN_EXE_pmuxd"))
-                .arg("--socket")
-                .arg(&self.socket)
-                .args(["--", "/bin/sh", "-c", "exec sleep 999"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap(),
+            prismattyc_process::spawn(
+                self.local(env!("CARGO_BIN_EXE_pmuxd"))
+                    .arg("--socket")
+                    .arg(&self.socket)
+                    .args(["--", "/bin/sh", "-c", "exec sleep 999"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null()),
+            )
+            .unwrap(),
         );
         let deadline = Instant::now() + Duration::from_secs(5);
         while std::os::unix::net::UnixStream::connect(&self.socket).is_err() {
@@ -146,10 +147,8 @@ impl Fixture {
     }
 
     fn ok(&self, args: &[&str]) -> String {
-        let out = self
-            .local(env!("CARGO_BIN_EXE_pmux"))
-            .args(args)
-            .output()
+        let out = prismattyc_process::spawn(self.local(env!("CARGO_BIN_EXE_pmux")).args(args))
+            .and_then(std::process::Child::wait_with_output)
             .unwrap();
         assert!(
             out.status.success(),
@@ -211,13 +210,15 @@ impl Fixture {
     }
 
     fn ssh_with(&self, key: &Path, known_hosts: &Path, pmux_args: &[&str]) -> Output {
-        Command::new("/usr/bin/ssh")
-            .args(self.ssh_args(key, known_hosts))
-            .args(["-T", "--", &self.target.host])
-            .args(self.remote_words(pmux_args))
-            .stdin(Stdio::null())
-            .output()
-            .unwrap()
+        prismattyc_process::spawn(
+            prismattyc_process::capture_command("/usr/bin/ssh")
+                .args(self.ssh_args(key, known_hosts))
+                .args(["-T", "--", &self.target.host])
+                .args(self.remote_words(pmux_args))
+                .stdin(Stdio::null()),
+        )
+        .and_then(std::process::Child::wait_with_output)
+        .unwrap()
     }
 
     fn ssh(&self, pmux_args: &[&str]) -> Output {
@@ -236,20 +237,21 @@ impl Fixture {
 
     fn keygen(&self, name: &str) -> PathBuf {
         let path = self.dir.join(name);
-        let status = Command::new("/usr/bin/ssh-keygen")
-            .args([
-                "-q",
-                "-t",
-                "ed25519",
-                "-N",
-                "",
-                "-C",
-                "pmux-ssh-test-unauthorized",
-                "-f",
-            ])
-            .arg(&path)
-            .status()
-            .unwrap();
+        let status = prismattyc_process::status(
+            Command::new("/usr/bin/ssh-keygen")
+                .args([
+                    "-q",
+                    "-t",
+                    "ed25519",
+                    "-N",
+                    "",
+                    "-C",
+                    "pmux-ssh-test-unauthorized",
+                    "-f",
+                ])
+                .arg(&path),
+        )
+        .unwrap();
         assert!(status.success());
         path
     }

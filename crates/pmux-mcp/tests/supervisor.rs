@@ -168,9 +168,10 @@ fn child_pids(parent: u32) -> Vec<u32> {
     }
     #[cfg(target_os = "macos")]
     {
-        let output = std::process::Command::new("pgrep")
-            .args(["-P", &parent.to_string()])
-            .output();
+        let output = prismattyc_process::spawn(
+            prismattyc_process::capture_command("pgrep").args(["-P", &parent.to_string()]),
+        )
+        .and_then(std::process::Child::wait_with_output);
         let Ok(output) = output else {
             return Vec::new();
         };

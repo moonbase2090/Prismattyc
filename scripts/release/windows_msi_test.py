@@ -1,4 +1,5 @@
 """Tests for the per-user MSI version map, authoring, and checksum refresh."""
+import base64
 import hashlib
 import importlib.util
 import io
@@ -142,7 +143,7 @@ class WindowsMsiTests(unittest.TestCase):
             with self.subTest(missing=name):
                 self.assertFalse(signing_enabled(partial))
 
-    def test_installer_is_per_user_and_does_not_stop_processes(self):
+    def test_installer_is_per_user_and_replaces_its_own_daemon(self):
         source = (ROOT / "scripts/release/prismattyc.wxs").read_text(encoding="utf-8")
         reset = (ROOT / "scripts/release/reset-windows-update-pointer.ps1").read_text(encoding="utf-8")
         self.assertIn(f'UpgradeCode="{UPGRADE_CODE}"', source)
@@ -212,8 +213,42 @@ class WindowsMsiTests(unittest.TestCase):
         self.assertNotIn("Win32_Process", source)
         self.assertNotIn('Impersonate="no"', source)
         self.assertNotIn("set-arp-display-icon", source)
-        self.assertNotIn("EncodedCommand", source)
+        self.assertNotIn("InstallUISequence", source)
+        self.assertIn("-ReplaceStale", command)
+        run_key = source.split('Name="PrismattycPmuxd"', 1)[1].split("/>", 1)[0]
+        self.assertIn("start-windows-pmuxd.ps1", run_key)
+        self.assertNotIn("ReplaceStale", run_key)
+        prepare = re.search(
+            r'<CustomAction\s+Id="PrepareWindowsInstall"(.*?)/>', source, re.S
+        ).group(1)
+        self.assertIn('Execute="deferred"', prepare)
+        self.assertIn('Impersonate="yes"', prepare)
+        self.assertIn('Return="check"', prepare)
+        self.assertIn('BinaryRef="Wix4UtilCA_X64"', prepare)
+        self.assertIn('DllEntry="WixQuietExec64"', prepare)
+        self.assertNotIn("ExeCommand", prepare)
+        self.assertNotIn("EncodedCommand", prepare)
+        prepare_prop = re.search(
+            r'<SetProperty Id="PrepareWindowsInstall"(.*?)/>', source, re.S
+        ).group(1)
+        self.assertIn('Before="PrepareWindowsInstall"', prepare_prop)
+        self.assertIn('Sequence="execute"', prepare_prop)
+        self.assertIn("-EncodedCommand $(var.PrepareEncoded)", prepare_prop)
+        self.assertIn("[System64Folder]WindowsPowerShell\\v1.0\\powershell.exe", prepare_prop)
+        self.assertEqual(source.count("EncodedCommand"), 1)
+        self.assertIn(
+            'Custom Action="PrepareWindowsInstall" Before="InstallFiles" '
+            'Condition="NOT REMOVE~=&quot;ALL&quot;"',
+            source,
+        )
+        self.assertIn(
+            'Id="PrepareInstallScript" Guid="0b05feaf-af77-5734-801a-0ad8f489f4a2"',
+            source,
+        )
+        self.assertIn('Name="prepare-install"', source)
+        self.assertIn("prepare-windows-install.ps1", source)
         reset_action = source.split('Id="ResetUpdatePointer"', 1)[1].split("/>", 1)[0]
+        self.assertNotIn("EncodedCommand", reset_action)
         self.assertIn('Directory="System64Folder"', reset_action)
         self.assertIn('Impersonate="yes"', reset_action)
         self.assertNotIn("set-arp-display-icon", reset_action)
@@ -235,6 +270,29 @@ class WindowsMsiTests(unittest.TestCase):
         self.assertIn("windows-current.json", reset)
         for forbidden in ("Stop-Process", "taskkill", "kill"):
             self.assertNotIn(forbidden, reset)
+        self.assertIn("def prepare_install_encoded", builder)
+        self.assertIn('f"PrepareEncoded={prepare_install_encoded(repo)}"', builder)
+        self.assertIn("prepare-windows-install.ps1", packager)
+        start_script = (ROOT / "scripts/release/start-windows-pmuxd.ps1").read_text(encoding="utf-8")
+        self.assertIn("[switch]$ReplaceStale", start_script)
+        self.assertNotIn("Stop-Process", start_script)
+        prepare_script = (ROOT / "scripts/release/prepare-windows-install.ps1").read_text(encoding="utf-8")
+        self.assertIn("Stop-Process", prepare_script)
+        self.assertNotIn("Start-Sleep", prepare_script)
+        self.assertNotIn("Thread.Sleep", prepare_script)
+        self.assertIn("Assert-StaleDaemonUpgrade", proof)
+        self.assertIn("ManualResetEvent", proof)
+        phase = proof.split("function Assert-StaleDaemonUpgrade", 1)[1].split("$msiPath = ", 1)[0]
+        self.assertNotIn("Start-Sleep", phase)
+        self.assertNotIn("Thread.Sleep", phase)
+        self.assertIn("ManualResetEvent", phase)
+        held_open = proof.split("No stop between the stub and the installer.", 1)[1]
+        held_open = held_open.split("Invoke-Msi", 1)[0]
+        self.assertNotIn("Stop-Process", held_open)
+        self.assertNotIn("Stop-InstalledPmuxd", held_open)
+        prove = (ROOT / "scripts/release/prove-windows-msi.ps1").read_text(encoding="utf-8")
+        self.assertIn("prepare_install_encoded", prove)
+        self.assertIn("PrepareEncoded=$prepareEncoded", prove)
 
     def test_path_uses_cmd_shims_and_preview_folders_are_swept(self):
         source = (ROOT / "scripts/release/prismattyc.wxs").read_text(encoding="utf-8")
@@ -580,6 +638,272 @@ public class Stub {
             self.assertIn("Missing", gone.stdout)
             self.assertEqual(recorded()["exit"], "1")
             self.assertIn("Missing", recorded()["result"])
+
+    def classify_image(self, image, install_root, updates_root):
+        script = ROOT / "scripts/release/prepare-windows-install.ps1"
+        result = subprocess.run(
+            [
+                powershell(),
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(script),
+                "-Classify",
+                "-Image",
+                image,
+                "-InstallRoot",
+                install_root,
+                "-UpdatesRoot",
+                updates_root,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        decision = result.stdout.strip()
+        self.assertIn(decision, ("stop", "keep"), result.stdout)
+        return decision
+
+    def test_prepare_classifies_install_and_update_images_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            install = base / "Programs" / "Prismattyc"
+            updates = base / "prismattyc" / "updates"
+            other = base / "Programs" / "Prismattyc-other"
+            cases = (
+                (install / "bin" / "pmuxd.exe", "stop"),
+                (str(install / "bin" / "pmuxd.exe").upper(), "stop"),
+                (updates / "0.3.63" / "bin" / "pmuxd.exe", "stop"),
+                (other / "bin" / "pmuxd.exe", "keep"),
+                (base / "target" / "release" / "pmuxd.exe", "keep"),
+                ("", "keep"),
+            )
+            for image, expected in cases:
+                with self.subTest(image=str(image), expected=expected):
+                    decision = self.classify_image(str(image), str(install), str(updates))
+                    self.assertEqual(decision, expected)
+
+    def test_prepare_encoding_is_the_prepare_script(self):
+        from windows_msi import prepare_install_encoded
+
+        encoded = prepare_install_encoded(ROOT)
+        text = base64.b64decode(encoded.encode("ascii")).decode("utf-16le")
+        script = (ROOT / "scripts/release/prepare-windows-install.ps1").read_text(encoding="utf-8")
+        if script.startswith("\ufeff"):
+            script = script.lstrip("\ufeff")
+        self.assertEqual(text, script)
+        self.assertIn("function Test-PrismattycImageUnderRoot", text)
+
+    def test_prepare_repairs_user_only_acls_and_skips_reparse_children(self):
+        if sys.platform != "win32":
+            self.skipTest("ACL repair uses Windows file security")
+        driver = r"""
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+$root = $args[0]
+$prepare = $args[1]
+$install = Join-Path $root 'install'
+$bin = Join-Path $install 'bin'
+$outside = Join-Path $root 'outside'
+$updates = Join-Path $root 'updates'
+New-Item -ItemType Directory -Path $bin, $outside, $updates -Force | Out-Null
+$monitor = Join-Path $bin 'pmux-activity-monitor.exe'
+$alsoLocked = Join-Path $bin 'also-locked.exe'
+$ordinary = Join-Path $bin 'pmux.exe'
+$otherShape = Join-Path $bin 'private-notes.txt'
+$data = Join-Path $install 'data'
+[System.IO.File]::WriteAllBytes($monitor, [byte[]](1, 2, 3))
+[System.IO.File]::WriteAllBytes($alsoLocked, [byte[]](4, 5, 6))
+[System.IO.File]::WriteAllBytes($ordinary, [byte[]](7, 8, 9))
+Set-Content -LiteralPath $otherShape -Value 'notes' -Encoding ascii
+New-Item -ItemType Directory -Path $data -Force | Out-Null
+$secret = Join-Path $outside 'secret.txt'
+Set-Content -LiteralPath $secret -Value 'sentinel' -Encoding ascii
+New-Item -ItemType Junction -Path (Join-Path $install 'link') -Target $outside | Out-Null
+function Set-UserOnly([string]$Path) {
+    $acl = New-Object System.Security.AccessControl.FileSecurity
+    $acl.SetAccessRuleProtection($true, $false)
+    $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($user, 'FullControl', 'Allow')
+    $acl.AddAccessRule($rule)
+    Set-Acl -LiteralPath $Path -AclObject $acl
+}
+function Test-HasSid([string]$Path, [string]$Sid) {
+    $acl = Get-Acl -LiteralPath $Path
+    foreach ($ace in @($acl.Access)) {
+        if ([string]$ace.IdentityReference.Value -eq $Sid) { return $true }
+        try {
+            $resolved = $ace.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
+            if ($resolved -eq $Sid) { return $true }
+        } catch { }
+    }
+    return $false
+}
+Set-UserOnly $monitor
+Set-UserOnly $alsoLocked
+Set-UserOnly $secret
+$userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$shaped = New-Object System.Security.AccessControl.FileSecurity
+$shaped.SetAccessRuleProtection($true, $false)
+$shaped.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+    $userSid, 'Modify', 'Allow')))
+Set-Acl -LiteralPath $otherShape -AclObject $shaped
+$dirAcl = New-Object System.Security.AccessControl.DirectorySecurity
+$dirAcl.SetAccessRuleProtection($true, $false)
+$dirAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+    $userSid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
+Set-Acl -LiteralPath $data -AclObject $dirAcl
+$before = (Get-Acl -LiteralPath $secret).Sddl
+$ordinaryBefore = (Get-Acl -LiteralPath $ordinary).Sddl
+$otherBefore = (Get-Acl -LiteralPath $otherShape).Sddl
+$dirBefore = (Get-Acl -LiteralPath $data).Sddl
+$prepared = @(& $prepare -InstallRoot $install -UpdatesRoot $updates)
+if ($prepared -notcontains 'Prismattyc install prepared.') {
+    throw "prepare did not finish: $($prepared -join ' ')"
+}
+$user = $userSid.Value
+Write-Output ("monitor_user=" + (Test-HasSid $monitor $user))
+Write-Output ("monitor_system=" + (Test-HasSid $monitor 'S-1-5-18'))
+Write-Output ("monitor_admins=" + (Test-HasSid $monitor 'S-1-5-32-544'))
+Write-Output ("also_locked_system=" + (Test-HasSid $alsoLocked 'S-1-5-18'))
+Write-Output ("sentinel_same=" + ((Get-Acl -LiteralPath $secret).Sddl -eq $before))
+Write-Output ("ordinary_same=" + ((Get-Acl -LiteralPath $ordinary).Sddl -eq $ordinaryBefore))
+Write-Output ("other_shape_same=" + ((Get-Acl -LiteralPath $otherShape).Sddl -eq $otherBefore))
+Write-Output ("directory_same=" + ((Get-Acl -LiteralPath $data).Sddl -eq $dirBefore))
+$target = Join-Path $root 'reparse-target'
+$reparse = Join-Path $root 'reparse-root'
+New-Item -ItemType Directory -Path $target -Force | Out-Null
+New-Item -ItemType Junction -Path $reparse -Target $target | Out-Null
+$threw = $false
+try {
+    & $prepare -InstallRoot $reparse -UpdatesRoot $updates | Out-Null
+} catch {
+    $threw = $true
+}
+Write-Output "reparse_threw=$threw"
+"""
+        script = ROOT / "scripts/release/prepare-windows-install.ps1"
+        with tempfile.TemporaryDirectory() as tmp:
+            driver_path = Path(tmp) / "repair-acl.ps1"
+            driver_path.write_text(driver, encoding="utf-8")
+            result = subprocess.run(
+                [
+                    powershell(),
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(driver_path),
+                    tmp,
+                    str(script),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            recorded = {}
+            for line in result.stdout.splitlines():
+                if "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                recorded[key] = value
+            self.assertEqual(recorded.get("monitor_user"), "True")
+            self.assertEqual(recorded.get("monitor_system"), "True")
+            self.assertEqual(recorded.get("monitor_admins"), "True")
+            self.assertEqual(recorded.get("also_locked_system"), "True")
+            self.assertEqual(recorded.get("sentinel_same"), "True")
+            self.assertEqual(recorded.get("ordinary_same"), "True")
+            self.assertEqual(recorded.get("other_shape_same"), "True")
+            self.assertEqual(recorded.get("directory_same"), "True")
+            self.assertEqual(recorded.get("reparse_threw"), "True")
+
+    def test_prepare_stops_an_updates_dir_daemon_and_leaves_other_images(self):
+        if sys.platform != "win32":
+            self.skipTest("stopping pmuxd uses Win32_Process")
+        windir = Path(os.environ.get("WINDIR", r"C:\Windows"))
+        csc = windir / "Microsoft.NET" / "Framework64" / "v4.0.30319" / "csc.exe"
+        if not csc.is_file():
+            csc = windir / "Microsoft.NET" / "Framework" / "v4.0.30319" / "csc.exe"
+        self.assertTrue(csc.is_file(), "csc.exe is required")
+        stub = """
+using System;
+using System.Threading;
+public class Hold {
+  public static int Main() {
+    Console.Out.WriteLine("ready");
+    Console.Out.Flush();
+    using (var gate = new ManualResetEvent(false)) {
+      gate.WaitOne();
+    }
+    return 0;
+  }
+}
+"""
+        script = ROOT / "scripts/release/prepare-windows-install.ps1"
+        held = []
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                root = Path(tmp)
+                install = root / "install"
+                updates = root / "updates" / "vstub" / "bin"
+                outside = root / "target" / "release"
+                install.mkdir()
+                updates.mkdir(parents=True)
+                outside.mkdir(parents=True)
+                (root / "stub.cs").write_text(stub, encoding="utf-8")
+                compiled = subprocess.run(
+                    [str(csc), "/nologo", "/target:exe", f"/out:{updates / 'pmuxd.exe'}", str(root / "stub.cs")],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
+                shutil.copy2(updates / "pmuxd.exe", outside / "pmuxd.exe")
+                for exe in (updates / "pmuxd.exe", outside / "pmuxd.exe"):
+                    proc = subprocess.Popen(
+                        [str(exe)],
+                        stdout=subprocess.PIPE,
+                        text=True,
+                    )
+                    held.append(proc)
+                    line = proc.stdout.readline()
+                    self.assertEqual(line.strip(), "ready", exe)
+                result = subprocess.run(
+                    [
+                        powershell(),
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-File",
+                        str(script),
+                        "-InstallRoot",
+                        str(install),
+                        "-UpdatesRoot",
+                        str(root / "updates"),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+                self.assertIn("Prismattyc install prepared.", result.stdout)
+                self.assertIsNotNone(held[0].poll(), "updates-dir pmuxd survived")
+                self.assertIsNone(held[1].poll(), "pmuxd outside the install and update roots was stopped")
+            finally:
+                # The survivor stays running, so Windows keeps its image open.
+                # Stop it before the temporary directory is removed.
+                for proc in held:
+                    if proc.stdout is not None:
+                        proc.stdout.close()
+                    if proc.poll() is None:
+                        proc.kill()
+                    proc.wait()
 
     def test_refresh_replaces_a_stale_msi_hash(self):
         with tempfile.TemporaryDirectory() as tmp:

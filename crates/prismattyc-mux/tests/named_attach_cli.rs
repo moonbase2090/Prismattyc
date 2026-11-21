@@ -74,14 +74,15 @@ fn start_server(socket: &Path, root: &Path) -> ServerGuard {
     clear_command_env(&mut command);
     apply_isolation(&mut command, root);
     let guard = ServerGuard {
-        child: command
-            .arg("--socket")
-            .arg(socket)
-            .args(["--", "/bin/sh", "-c", "exec sleep 999"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn pmuxd"),
+        child: prismattyc_process::spawn(
+            command
+                .arg("--socket")
+                .arg(socket)
+                .args(["--", "/bin/sh", "-c", "exec sleep 999"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .expect("spawn pmuxd"),
         socket: socket.to_path_buf(),
     };
     for _ in 0..100 {
@@ -94,7 +95,7 @@ fn start_server(socket: &Path, root: &Path) -> ServerGuard {
 }
 
 fn pmux(socket: &Path, root: &Path, extra: &[(&str, &str)], args: &[&str]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_pmux"));
+    let mut command = prismattyc_process::capture_command(env!("CARGO_BIN_EXE_pmux"));
     clear_command_env(&mut command);
     apply_isolation(&mut command, root);
     command
@@ -106,7 +107,9 @@ fn pmux(socket: &Path, root: &Path, extra: &[(&str, &str)], args: &[&str]) -> Ou
     for (key, value) in extra {
         command.env(key, value);
     }
-    command.output().expect("run pmux")
+    prismattyc_process::spawn(&mut command)
+        .and_then(std::process::Child::wait_with_output)
+        .expect("run pmux")
 }
 
 fn text(output: &Output) -> String {

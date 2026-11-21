@@ -83,6 +83,10 @@
         <File Source="$(var.Payload)\bin\reset-windows-update-pointer.ps1" />
         <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="reset-script" Type="integer" Value="1" KeyPath="yes" />
       </Component>
+      <Component Id="PrepareInstallScript" Guid="0b05feaf-af77-5734-801a-0ad8f489f4a2">
+        <File Source="$(var.Payload)\bin\prepare-windows-install.ps1" />
+        <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="prepare-install" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
       <Component Id="SweepPreviewScript" Guid="a0bffa63-23ae-5f7d-8ccb-24e88f9e8a32">
         <File Source="$(var.Payload)\bin\remove-windows-preview-installs.ps1" />
         <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="sweep-preview" Type="integer" Value="1" KeyPath="yes" />
@@ -214,6 +218,24 @@
       <RegistryValue Root="HKCU" Key="Software\Moonbase2090\Prismattyc" Name="path" Type="integer" Value="1" KeyPath="yes" />
     </Component>
 
+    <!--
+      Deferred and impersonated, before InstallFiles. The user token can
+      rewrite a protected user-only DACL and can stop that user's pmuxd.
+      The service then reads file security and replaces executables that
+      were in use. WixQuietExec copies the script output into the MSI log.
+      A deferred action reads its command from the property of the same name.
+      The command is the encoded prepare script, so the first upgrade does
+      not need the new file to exist yet.
+    -->
+    <SetProperty Id="PrepareWindowsInstall" Before="PrepareWindowsInstall" Sequence="execute"
+                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand $(var.PrepareEncoded)" />
+    <CustomAction
+        Id="PrepareWindowsInstall"
+        BinaryRef="Wix4UtilCA_X64"
+        DllEntry="WixQuietExec64"
+        Execute="deferred"
+        Impersonate="yes"
+        Return="check" />
     <CustomAction
         Id="ResetUpdatePointer"
         Directory="System64Folder"
@@ -245,7 +267,7 @@
       same name.
     -->
     <SetProperty Id="StartPmuxd" Before="StartPmuxd" Sequence="execute"
-                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File &quot;[BINFOLDER]start-windows-pmuxd.ps1&quot;" />
+                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File &quot;[BINFOLDER]start-windows-pmuxd.ps1&quot; -ReplaceStale" />
     <CustomAction
         Id="StartPmuxd"
         BinaryRef="Wix4UtilCA_X64"
@@ -254,6 +276,7 @@
         Impersonate="yes"
         Return="ignore" />
     <InstallExecuteSequence>
+      <Custom Action="PrepareWindowsInstall" Before="InstallFiles" Condition="NOT REMOVE~=&quot;ALL&quot;" />
       <Custom Action="ResetUpdatePointer" After="InstallFiles" Condition="NOT REMOVE~=&quot;ALL&quot;" />
       <Custom Action="SweepPreviewInstalls" After="InstallFiles" Condition="NOT REMOVE~=&quot;ALL&quot;" />
       <Custom Action="SweepPreviewInstallsOnRemove" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />

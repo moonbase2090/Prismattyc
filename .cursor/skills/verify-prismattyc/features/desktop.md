@@ -8,6 +8,7 @@ The host presents terminals, space navigation, and naming overlays. Native input
 - `session-name`: naming and rename overlays preserve visible labels and derive mailbox addresses.
 - `host-restart`: terminal state survives a host restart and is presented again.
 - `complete-update`: session-stop consent, private configuration backup, full component restart, and an explicit restoration choice.
+- `update-progress`: the Update and restart progress meter (download bytes, verify and restart counts, an install bar without a percentage, and a held failed step).
 - `restart-modal`: the Restart to update modal (version change, three choices, sessions hidden behind Show and Hide).
 - `window-restore`: a Dock click restores a minimized macOS window, including when another window remains visible.
 - `plugin-settings`: install disabled, approve an exact package and endpoint grants, disable/revoke, and close a page with blocked socket work.
@@ -69,7 +70,7 @@ and exact build executable paths, including replacement processes. SIGTERM
 and SIGHUP run the same teardown and retain the result file.
 
 - On Linux or macOS, run `python3 tests/native/full-update-restart-e2e.py --bins "$verify_bins" --out "$verify_evidence/update-cli"` for daemon replacement, restored directories and commands, retry behavior, and mailbox durability. The current-build drive also checks same-layout directory and resume-command autosave, then prunes a closed session from its saved Space. Inspect `binary_version` in `result.json` against the intended revision. This fixture rejects Windows.
-- On a logged-in macOS desktop with Accessibility permission, add `--native` with a separate output directory. The fixture sends native keys to its owned host PID, checks cancellation preserves sessions, chooses Save and restart in the Restart to update modal, waits for the replacement app's restore offer, and restores sessions. Inspect the consent, offer, and result PNGs and JSON snapshots. Match each capture to the host instance, PID, and capture sequence in its frame sidecar; sequence numbers reset on exec. The PNGs show presented app pixels, not OS composition.
+- On a logged-in macOS desktop with Accessibility permission, add `--native` with a separate output directory. The fixture sends native keys to its owned host PID, checks cancellation preserves sessions, chooses Save and restart in the Restart to update modal, and waits for the replacement app's restore result: the restarted daemon brings the session back by itself and the app must not ask again. Inspect the consent and result PNGs and JSON snapshots. Match each capture to the host instance, PID, and capture sequence in its frame sidecar; sequence numbers reset on exec. The PNGs show presented app pixels, not OS composition.
 - In a disposable clean macOS VM only, install the released 0.3.38 app and run the CLI fixture with `--upgrade-app /Applications/Prismattyc.app`. This performs a real release download, verification, and app replacement. It then restarts the private daemon from the installed app and restores the saved configuration. Retain the initial app checksum and actual updater output. This command changes that VM's app installation.
 
 Inspect `initial_daemon` and `replacement_daemon` in `result.json`. Their
@@ -86,6 +87,61 @@ clean-VM UI proof. A guest with no active display can supply CLI evidence
 only; record the failed capture command and missing display prerequisite.
 A Windows desktop and a separate Windows driver are required to prove the
 Windows replacement-host path; the CLI fixture above does not provide one.
+
+## Update progress meter
+
+`tests/native/update-progress-e2e.py` drives Update and restart in a real
+window, chooses Restart without saving in the Restart to update dialog, and
+keeps every presented frame (`frames/frame-NNNNNN.png`), the change lines it
+waited on (`events.jsonl`), a capture per dialog step (`running-stepN.png`,
+`failed-stepN.png`) and `result.json`. It runs a real update to the newest
+public release, so use a disposable machine only.
+
+The drive never sleeps or polls. It sets `PRISMATTYC_UI_EVENTS=1`, under which
+the app prints `prismattyc-host: ui: {json}` after a presented frame whenever
+the update panel or the dialog changes state. The line holds positions and
+states only (page, selected row index, dialog state, step number) and the
+frame's dump sequence. Before printing it, the app publishes render status and
+waits for that write, so render status read after the line is current. The
+drive waits for a line after every key, reads the rows it checks from render
+status, and treats a second `font` line as the relaunch. Timeouts only bound a
+hung run. `PRISMATTYC_DUMP_PRESENT` with `{seq}` in the path writes each frame
+to its own file.
+
+- On Linux and Windows the fixture copies `--bins` into `OUT/install/bin` (the
+  updater refuses a build tree). Those binaries must report a version older
+  than the newest release; a proof build may lower the workspace version and
+  must say so.
+- On macOS the updater replaces the installed `Prismattyc.app`, which must be
+  older than the newest release. Put the branch binaries (built as that older
+  version) inside the installed app's `Contents/MacOS` and pass that folder as
+  `--bins`, so the app updates itself as a user's would; run from elsewhere,
+  the version check after install finds the wrong `pmux`. A guest without
+  Accessibility takes keys through `--key-relay DIR`: the drive writes one
+  JSON line per key to the named pipe `DIR/requests` and waits, bounded, for a
+  line on `DIR/acks`, which the VM console's controller answers after typing
+  the key. A relay that is absent, stalls or closes fails the run at the bound.
+- `--save` chooses Save and restart and checks that sessions come back. It
+  opens a plain session and a split one as two tabs and prints a one-time
+  `KEEP-…` marker into each of the three panes, waiting for each through a
+  watching `pmux attach --watch --json`. After the relaunch it requires the
+  same session and pane IDs, every marker in its pane's `save-buffer
+  --history`, the same tab titles in `pmux tab list --json`, and the result
+  notice, and keeps `before.json`, `after.json`, `before.png`,
+  `after-notice.png` and `after.png`. The save and restore run from the
+  installed release, so a branch build reports the newest version (no lowered
+  version); the flow is then Restart components and `stages` is `Restart`.
+- On Linux, `--fail-download NAME` cuts the download of one component's
+  release file short. Require `Failed at step 1 of 4: Download`, the
+  component's download line, its download error and `Check again` in
+  `final_rows`.
+
+Require `status` PASS and `stages` in order (`Download`, `Verify`, `Install`,
+`Restart` for an update; `Download` for the failure drive). `stages` comes from
+`step_log`, the app's own `update progress:` lines, which record every step
+however briefly it shows. Require at least two download lines in `step_log`.
+Inspect the step captures: the bar is drawn, not text, and the install bar
+moves without a percentage.
 
 ## Restart to update modal
 

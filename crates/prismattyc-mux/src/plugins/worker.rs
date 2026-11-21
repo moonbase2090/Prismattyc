@@ -76,19 +76,20 @@ impl Process {
         // open an empty console window for this console-subsystem child.
         #[cfg(windows)]
         std::os::windows::process::CommandExt::creation_flags(&mut command, 0x0800_0000);
-        let mut child = command
-            .arg(super::INTERNAL_WORKER_ARG)
-            .env_clear()
-            .current_dir(
-                executable
-                    .parent()
-                    .context("worker executable has no directory")?,
-            )
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("spawn private plug-in worker")?;
+        let mut child = prismattyc_process::spawn(
+            command
+                .arg(super::INTERNAL_WORKER_ARG)
+                .env_clear()
+                .current_dir(
+                    executable
+                        .parent()
+                        .context("worker executable has no directory")?,
+                )
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null()),
+        )
+        .context("spawn private plug-in worker")?;
         let input = BufReader::new(child.stdout.take().context("missing worker output")?);
         let output = BufWriter::new(child.stdin.take().context("missing worker input")?);
         Ok(Self {
@@ -505,14 +506,15 @@ mod tests {
 
     #[test]
     fn watchdog_terminates_a_blocked_native_child() {
-        let child = Command::new(std::env::current_exe().unwrap())
-            .args(["tests::blocked_native_child", "--ignored"])
-            .env_clear()
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+        let child = prismattyc_process::spawn(
+            Command::new(std::env::current_exe().unwrap())
+                .args(["tests::blocked_native_child", "--ignored"])
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .unwrap();
         let child = Arc::new(OwnedChild {
             child: Mutex::new(child),
             cancelled: AtomicBool::new(false),

@@ -1,12 +1,13 @@
 //! `prismattyc-host --version` / `-V` short-circuit before opening a window.
 
-use std::process::{Command, Output};
+use std::process::Output;
 
 fn host(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_prismattyc-host"))
-        .args(args)
-        .output()
-        .expect("run prismattyc-host")
+    prismattyc_process::spawn(
+        prismattyc_process::capture_command(env!("CARGO_BIN_EXE_prismattyc-host")).args(args),
+    )
+    .and_then(std::process::Child::wait_with_output)
+    .expect("run prismattyc-host")
 }
 
 #[test]
@@ -44,11 +45,13 @@ fn isolated_config_path(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
 }
 
 fn host_with_config(config: &std::path::Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_prismattyc-host"))
-        .args(args)
-        .env("PRISMATTYC_CONFIG", config)
-        .output()
-        .expect("run prismattyc-host")
+    prismattyc_process::spawn(
+        prismattyc_process::capture_command(env!("CARGO_BIN_EXE_prismattyc-host"))
+            .args(args)
+            .env("PRISMATTYC_CONFIG", config),
+    )
+    .and_then(std::process::Child::wait_with_output)
+    .expect("run prismattyc-host")
 }
 
 #[test]

@@ -79,7 +79,9 @@ fn umbrella_vars(socket: &Path, extra: &[(&str, std::ffi::OsString)], args: &[&s
         command.env(key, value);
     }
     clear_command_env(&mut command);
-    command.output().expect("run pmux")
+    prismattyc_process::spawn(&mut command)
+        .and_then(std::process::Child::wait_with_output)
+        .expect("run pmux")
 }
 
 /// Run a test client while retaining explicit extras after the standard scrub.
@@ -98,11 +100,13 @@ fn umbrella_vars_cleared(
     for (key, value) in extra {
         command.env(key, value);
     }
-    command.output().expect("run pmux")
+    prismattyc_process::spawn(&mut command)
+        .and_then(std::process::Child::wait_with_output)
+        .expect("run pmux")
 }
 
 fn umbrella_command(socket: &Path, args: &[&str]) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_pmux"));
+    let mut command = prismattyc_process::capture_command(env!("CARGO_BIN_EXE_pmux"));
     command
         .env("PMUX_SERVER", env!("CARGO_BIN_EXE_pmuxd"))
         .env("PMUX_ATTACH", env!("CARGO_BIN_EXE_pmux-attach"))
@@ -404,10 +408,8 @@ fn recycled_pidfile_pid_is_never_signalled() {
     let _guard = start_server(&socket);
 
     // Plant a live process that is not a pmuxd in the pidfile.
-    let mut decoy = Command::new("/bin/sleep")
-        .arg("60")
-        .spawn()
-        .expect("spawn decoy");
+    let mut decoy =
+        prismattyc_process::spawn(Command::new("/bin/sleep").arg("60")).expect("spawn decoy");
     std::fs::write(socket.with_extension("pid"), format!("{}\n", decoy.id())).unwrap();
 
     let stop = umbrella(&socket, &["stop"]);
@@ -450,10 +452,9 @@ fn stop_falls_back_to_signal_when_verb_times_out() {
         .trim()
         .parse()
         .unwrap();
-    let stopped = Command::new("kill")
-        .args(["-STOP", &pid.to_string()])
-        .status()
-        .expect("SIGSTOP server");
+    let stopped =
+        prismattyc_process::status(Command::new("kill").args(["-STOP", &pid.to_string()]))
+            .expect("SIGSTOP server");
     assert!(stopped.success(), "SIGSTOP pid {pid}");
 
     let stop = umbrella(&socket, &["stop"]);
@@ -471,15 +472,17 @@ fn stop_falls_back_to_signal_when_verb_times_out() {
 #[test]
 fn failed_start_reports_dead_child_with_log_tail() {
     let socket = socket_path();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_pmux"));
+    let mut command = prismattyc_process::capture_command(env!("CARGO_BIN_EXE_pmux"));
     clear_command_env(&mut command);
-    let up = command
-        .env("PMUX_SERVER", "/usr/bin/false")
-        .arg("--socket")
-        .arg(&socket)
-        .args(["up", "--", "/bin/sh"])
-        .output()
-        .expect("run pmux");
+    let up = prismattyc_process::spawn(
+        command
+            .env("PMUX_SERVER", "/usr/bin/false")
+            .arg("--socket")
+            .arg(&socket)
+            .args(["up", "--", "/bin/sh"]),
+    )
+    .and_then(std::process::Child::wait_with_output)
+    .expect("run pmux");
     assert!(!up.status.success());
     assert!(
         stderr(&up).contains("server exited during start"),
@@ -492,16 +495,17 @@ fn failed_start_reports_dead_child_with_log_tail() {
 fn spawn_viewer(socket: &Path, session: &str) -> std::process::Child {
     let mut command = Command::new(env!("CARGO_BIN_EXE_pmux-attach"));
     clear_command_env(&mut command);
-    command
-        .arg("--socket")
-        .arg(socket)
-        .arg("--session")
-        .arg(session)
-        .arg("--watch")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn viewer attach")
+    prismattyc_process::spawn(
+        command
+            .arg("--socket")
+            .arg(socket)
+            .arg("--session")
+            .arg(session)
+            .arg("--watch")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .expect("spawn viewer attach")
 }
 
 fn wait_for(mut pred: impl FnMut() -> bool, timeout: Duration) -> bool {
@@ -597,17 +601,19 @@ fn attach_all_execs_host_with_one_flag_per_session() {
     let created = umbrella(&socket, &["new", "work", "--", "/bin/sh"]);
     assert!(created.status.success(), "{}", stderr(&created));
 
-    let mut command = Command::new(env!("CARGO_BIN_EXE_pmux"));
+    let mut command = prismattyc_process::capture_command(env!("CARGO_BIN_EXE_pmux"));
     clear_command_env(&mut command);
-    let out = command
-        .env("PMUX_SERVER", env!("CARGO_BIN_EXE_pmuxd"))
-        .env("PRISMATTYC_HOST", "/bin/echo")
-        .env("DISPLAY", ":0")
-        .arg("--socket")
-        .arg(&socket)
-        .args(["attach", "--all"])
-        .output()
-        .expect("attach --all");
+    let out = prismattyc_process::spawn(
+        command
+            .env("PMUX_SERVER", env!("CARGO_BIN_EXE_pmuxd"))
+            .env("PRISMATTYC_HOST", "/bin/echo")
+            .env("DISPLAY", ":0")
+            .arg("--socket")
+            .arg(&socket)
+            .args(["attach", "--all"]),
+    )
+    .and_then(std::process::Child::wait_with_output)
+    .expect("attach --all");
     assert!(out.status.success(), "{}", stderr(&out));
     let text = format!("{}{}", stdout(&out), stderr(&out));
     assert!(
@@ -687,17 +693,19 @@ fn attach_all_passes_session_id_not_ambiguous_name() {
     );
     assert!(created_comma.status.success(), "{}", stderr(&created_comma));
 
-    let mut command = Command::new(env!("CARGO_BIN_EXE_pmux"));
+    let mut command = prismattyc_process::capture_command(env!("CARGO_BIN_EXE_pmux"));
     clear_command_env(&mut command);
-    let out = command
-        .env("PMUX_SERVER", env!("CARGO_BIN_EXE_pmuxd"))
-        .env("PRISMATTYC_HOST", "/bin/echo")
-        .env("DISPLAY", ":0")
-        .arg("--socket")
-        .arg(&socket)
-        .args(["attach", "--all"])
-        .output()
-        .expect("attach --all");
+    let out = prismattyc_process::spawn(
+        command
+            .env("PMUX_SERVER", env!("CARGO_BIN_EXE_pmuxd"))
+            .env("PRISMATTYC_HOST", "/bin/echo")
+            .env("DISPLAY", ":0")
+            .arg("--socket")
+            .arg(&socket)
+            .args(["attach", "--all"]),
+    )
+    .and_then(std::process::Child::wait_with_output)
+    .expect("attach --all");
     assert!(out.status.success(), "{}", stderr(&out));
     let text = format!("{}{}", stdout(&out), stderr(&out));
     assert!(
@@ -859,11 +867,10 @@ fn completions_emit_bash_zsh_fish_and_reject_unknown() {
 
 #[test]
 fn version_flag_prints_package_and_exits_zero() {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_pmux"));
+    let mut command = prismattyc_process::capture_command(env!("CARGO_BIN_EXE_pmux"));
     clear_command_env(&mut command);
-    let out = command
-        .arg("--version")
-        .output()
+    let out = prismattyc_process::spawn(command.arg("--version"))
+        .and_then(std::process::Child::wait_with_output)
         .expect("run pmux --version");
     assert!(out.status.success(), "{}", stderr(&out));
     let text = stdout(&out);
@@ -877,9 +884,11 @@ fn version_flag_prints_package_and_exits_zero() {
 
 #[test]
 fn top_help_opens_with_session_tab_space() {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_pmux"));
+    let mut command = prismattyc_process::capture_command(env!("CARGO_BIN_EXE_pmux"));
     clear_command_env(&mut command);
-    let out = command.arg("--help").output().expect("run pmux --help");
+    let out = prismattyc_process::spawn(command.arg("--help"))
+        .and_then(std::process::Child::wait_with_output)
+        .expect("run pmux --help");
     assert!(out.status.success(), "{}", stderr(&out));
     let text = stdout(&out);
     assert!(
@@ -1491,18 +1500,19 @@ fn explicit_socket_spaces_are_stable_across_runtime_directories() {
         .expect("private second runtime");
     let socket = socket_parent.join("pmux.sock");
     let mut daemon = Command::new(env!("CARGO_BIN_EXE_pmuxd"));
-    let mut daemon = daemon
-        .env("XDG_RUNTIME_DIR", &runtime_a)
-        .env("XDG_DATA_HOME", data.0.as_os_str())
-        .env("XDG_CONFIG_HOME", data.0.join("config"))
-        .arg("--socket")
-        .arg(&socket)
-        .args(["--", "/bin/sh"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn default daemon");
+    let mut daemon = prismattyc_process::spawn(
+        daemon
+            .env("XDG_RUNTIME_DIR", &runtime_a)
+            .env("XDG_DATA_HOME", data.0.as_os_str())
+            .env("XDG_CONFIG_HOME", data.0.join("config"))
+            .arg("--socket")
+            .arg(&socket)
+            .args(["--", "/bin/sh"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .expect("spawn default daemon");
     let deadline = Instant::now() + Duration::from_secs(5);
     while UnixStream::connect(&socket).is_err() {
         if daemon.try_wait().expect("poll default daemon").is_some() {
@@ -1535,7 +1545,7 @@ fn explicit_socket_spaces_are_stable_across_runtime_directories() {
     );
     assert!(saved.status.success(), "{}", stderr(&saved));
     let routed_ls = |runtime: &Path, socket_env: Option<&Path>| {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_pmux"));
+        let mut command = prismattyc_process::capture_command(env!("CARGO_BIN_EXE_pmux"));
         command
             .env("PMUX_SERVER", env!("CARGO_BIN_EXE_pmuxd"))
             .env("PMUX_ATTACH", env!("CARGO_BIN_EXE_pmux-attach"));
@@ -1547,9 +1557,8 @@ fn explicit_socket_spaces_are_stable_across_runtime_directories() {
         if let Some(socket) = socket_env {
             command.env("PMUX_SOCKET", socket);
         }
-        command
-            .args(["space", "ls"])
-            .output()
+        prismattyc_process::spawn(command.args(["space", "ls"]))
+            .and_then(std::process::Child::wait_with_output)
             .expect("run pmux route")
     };
     let implicit = routed_ls(&runtime_a, None);
@@ -1585,18 +1594,19 @@ fn explicit_socket_spaces_are_stable_across_runtime_directories() {
     let _ = daemon.kill();
     let _ = daemon.wait();
     let mut restarted = Command::new(env!("CARGO_BIN_EXE_pmuxd"));
-    let mut restarted = restarted
-        .env("XDG_RUNTIME_DIR", &runtime_b)
-        .env("XDG_DATA_HOME", data.0.as_os_str())
-        .env("XDG_CONFIG_HOME", data.0.join("config"))
-        .arg("--socket")
-        .arg(&socket)
-        .args(["--", "/bin/sh"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("restart default daemon");
+    let mut restarted = prismattyc_process::spawn(
+        restarted
+            .env("XDG_RUNTIME_DIR", &runtime_b)
+            .env("XDG_DATA_HOME", data.0.as_os_str())
+            .env("XDG_CONFIG_HOME", data.0.join("config"))
+            .arg("--socket")
+            .arg(&socket)
+            .args(["--", "/bin/sh"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .expect("restart default daemon");
     let deadline = Instant::now() + Duration::from_secs(5);
     while UnixStream::connect(&socket).is_err() {
         if restarted
@@ -4557,29 +4567,31 @@ fn space_cli_termwright_save_ls_open_no_attach() {
     // `termwright run-steps` hits a local IPC spawn race in 0.2.0; `run`
     // still wraps a PTY and is the gate. Wait for the last command's skip
     // line so the capture includes save, ls, and open, not only save.
-    let mut command = Command::new(&termwright);
+    let mut command = prismattyc_process::capture_command(&termwright);
     clear_command_env(&mut command);
-    let out = command
-        .args([
-            "run",
-            "--cols",
-            "100",
-            "--rows",
-            "24",
-            "--wait-for",
-            "skip pt64-tw-a (already exists)",
-            "--format",
-            "text",
-            "--",
-            "/bin/sh",
-            "-c",
-            &script,
-        ])
-        .env("XDG_DATA_HOME", &data.0)
-        .env("PMUX_SERVER", env!("CARGO_BIN_EXE_pmuxd"))
-        .env("PMUX_ATTACH", env!("CARGO_BIN_EXE_pmux-attach"))
-        .output()
-        .expect("run termwright");
+    let out = prismattyc_process::spawn(
+        command
+            .args([
+                "run",
+                "--cols",
+                "100",
+                "--rows",
+                "24",
+                "--wait-for",
+                "skip pt64-tw-a (already exists)",
+                "--format",
+                "text",
+                "--",
+                "/bin/sh",
+                "-c",
+                &script,
+            ])
+            .env("XDG_DATA_HOME", &data.0)
+            .env("PMUX_SERVER", env!("CARGO_BIN_EXE_pmuxd"))
+            .env("PMUX_ATTACH", env!("CARGO_BIN_EXE_pmux-attach")),
+    )
+    .and_then(std::process::Child::wait_with_output)
+    .expect("run termwright");
     let text = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -4619,26 +4631,25 @@ fn help_termwright_names_session_tab_space() {
 
     let pmux = env!("CARGO_BIN_EXE_pmux");
     let script = format!("set -e; {pmux} --help; {pmux} space --help");
-    let mut command = Command::new(&termwright);
+    let mut command = prismattyc_process::capture_command(&termwright);
     clear_command_env(&mut command);
-    let out = command
-        .args([
-            "run",
-            "--cols",
-            "80",
-            "--rows",
-            "40",
-            "--wait-for",
-            "only one Space",
-            "--format",
-            "text",
-            "--",
-            "/bin/sh",
-            "-c",
-            &script,
-        ])
-        .output()
-        .expect("run termwright");
+    let out = prismattyc_process::spawn(command.args([
+        "run",
+        "--cols",
+        "80",
+        "--rows",
+        "40",
+        "--wait-for",
+        "only one Space",
+        "--format",
+        "text",
+        "--",
+        "/bin/sh",
+        "-c",
+        &script,
+    ]))
+    .and_then(std::process::Child::wait_with_output)
+    .expect("run termwright");
     let text = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -4806,16 +4817,17 @@ fn save_buffer_writes_readpane_text() {
 fn umbrella_spawn(socket: &Path, args: &[&str]) -> std::process::Child {
     let mut command = Command::new(env!("CARGO_BIN_EXE_pmux"));
     clear_command_env(&mut command);
-    command
-        .env("PMUX_SERVER", env!("CARGO_BIN_EXE_pmuxd"))
-        .env("PMUX_ATTACH", env!("CARGO_BIN_EXE_pmux-attach"))
-        .arg("--socket")
-        .arg(socket)
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn pmux")
+    prismattyc_process::spawn(
+        command
+            .env("PMUX_SERVER", env!("CARGO_BIN_EXE_pmuxd"))
+            .env("PMUX_ATTACH", env!("CARGO_BIN_EXE_pmux-attach"))
+            .arg("--socket")
+            .arg(socket)
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped()),
+    )
+    .expect("spawn pmux")
 }
 
 fn wait_file_contains(path: &Path, needle: &str, timeout: Duration) -> String {

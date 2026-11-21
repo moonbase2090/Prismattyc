@@ -1,6 +1,7 @@
 # Drop the pmux update forwarding pointer after an MSI install.
-# The next launch of the installed executables runs those files. This script
-# does not stop or restart any process. A running daemon keeps its image.
+# prepare-windows-install.ps1 already clears the same file and stops a stale
+# daemon before the files are copied. This script repeats the clear after the
+# files are in place and does not stop or restart any process.
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 

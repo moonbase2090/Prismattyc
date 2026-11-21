@@ -16,6 +16,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 mod monitor_launcher;
+pub mod progress;
+use progress::Progress;
 
 pub const REPOSITORY: &str = "moonbase2090/Prismattyc";
 pub const BINARIES: [&str; 6] = [
@@ -63,6 +65,8 @@ struct Options {
     bin_dir: Option<PathBuf>,
     repair_monitor: bool,
     from_monitor_version: Option<String>,
+    /// Report staged progress on stderr (see [`progress`]).
+    progress: bool,
 }
 
 fn options(args: &[String]) -> Result<Options> {
@@ -132,6 +136,7 @@ fn set_update_flag(options: &mut Options, arg: &str) -> bool {
         "--rollback" => options.rollback = true,
         "--repair-monitor-launcher" => options.repair_monitor = true,
         "--pre" => options.pre = true,
+        "--progress" => options.progress = true,
         "--all" => {}
         _ => return false,
     }
@@ -699,10 +704,7 @@ fn run_release_json(program: &str, url: &str, auth_config: Option<&str>) -> Resu
     if auth_config.is_some() {
         cmd.args(["--config", "-"]).stdin(Stdio::piped());
     }
-    let mut child = cmd
-        .arg(url)
-        .stdout(Stdio::piped())
-        .spawn()
+    let mut child = prismattyc_process::spawn(cmd.arg(url).stdout(Stdio::piped()))
         .context("start HTTPS download (curl is required)")?;
     if let Some(config) = auth_config {
         let mut stdin = child.stdin.take().context("curl stdin")?;
@@ -714,12 +716,13 @@ fn run_release_json(program: &str, url: &str, auth_config: Option<&str>) -> Resu
 }
 
 pub(crate) fn download_bounded(url: &str, cap: usize) -> Result<Vec<u8>> {
-    let mut child = curl()
-        .args(["--max-filesize", &cap.to_string()])
-        .arg(url)
-        .stdout(Stdio::piped())
-        .spawn()
-        .context("start bounded HTTPS download")?;
+    let mut child = prismattyc_process::spawn(
+        curl()
+            .args(["--max-filesize", &cap.to_string()])
+            .arg(url)
+            .stdout(Stdio::piped()),
+    )
+    .context("start bounded HTTPS download")?;
     read_capped_child_stdout(&mut child, cap)
 }
 
@@ -790,7 +793,7 @@ fn executable_probe(executable: &Path, argument: &str, cap: usize, label: &str) 
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     #[cfg(unix)]
-    let mut child = command.spawn()?;
+    let mut child = prismattyc_process::spawn(&mut command)?;
     #[cfg(windows)]
     let (mut child, probe_job) = crate::platform::spawn_probe(&mut command)?;
     let mut stdout = child.stdout.take().context("version stdout")?;
@@ -1080,6 +1083,9 @@ pub fn run(args: &[String]) -> Result<()> {
         return Ok(());
     }
     let options = options(args)?;
+    if options.progress {
+        progress::enable();
+    }
     let root = root()?;
     run_locked(&root, &options)
 }
@@ -1103,7 +1109,7 @@ fn is_help_flag(arg: &String) -> bool {
 }
 
 fn print_update_help() {
-    println!("pmux update [--check] [--json] [--pre] [--bin-dir PATH]\nprismattyc update [--check] [--json] [--pre] [--bin-dir PATH]\npmux update --rollback\npmux update --repair-monitor-launcher [--from-monitor-version VERSION] [--bin-dir PATH] [--check] [--json]\npmux update --source [--host|--mux|--all]\n\nDownload a complete stable release from {REPOSITORY} (0.2.0 onward).\n--pre includes immutable prereleases such as v0.3.0-rc.3. The default channel and the app menu stay on stable releases such as v0.3.0.\nVerify immutable release metadata, asset sizes, and SHA-256 digests.\nOn Linux and Windows, stage all six binaries, then activate them together. --rollback restores that previous installation.\nOn macOS, verify SHA256SUMS-macos, Developer ID Team ID S24C53PD3Y, and Gatekeeper notarization. Keep the previous verified app for --rollback.\nThe explicit --repair-monitor-launcher operation verifies only the frontend matching the installed managed core, with a backup and independent receipt. --from-monitor-version establishes ownership of an unreceipted legacy frontend by its immutable official asset digest. --check verifies the plan without replacing the launcher, receipt, or backup. Core rollback remains a six-binary transaction. macOS uses normal app replacement.\nprismattyc update is the same command as pmux update.\nUpdating does not stop sessions. The app menu restarts the host and safely restarts the daemon when it has no active sessions.\n--source is an explicit development-only source build.");
+    println!("pmux update [--check] [--json] [--pre] [--progress] [--bin-dir PATH]\nprismattyc update [--check] [--json] [--pre] [--progress] [--bin-dir PATH]\npmux update --rollback\npmux update --repair-monitor-launcher [--from-monitor-version VERSION] [--bin-dir PATH] [--check] [--json]\npmux update --source [--host|--mux|--all]\n\nDownload a complete stable release from {REPOSITORY} (0.2.0 onward).\n--pre includes immutable prereleases such as v0.3.0-rc.3. The default channel and the app menu stay on stable releases such as v0.3.0.\n--progress writes staged progress (download bytes, verify and install steps) to stderr as lines starting with \"pmux-progress \" followed by JSON, in place of the human download lines.\nVerify immutable release metadata, asset sizes, and SHA-256 digests.\nOn Linux and Windows, stage all six binaries, then activate them together. --rollback restores that previous installation.\nOn macOS, verify SHA256SUMS-macos, Developer ID Team ID S24C53PD3Y, and Gatekeeper notarization. Keep the previous verified app for --rollback.\nThe explicit --repair-monitor-launcher operation verifies only the frontend matching the installed managed core, with a backup and independent receipt. --from-monitor-version establishes ownership of an unreceipted legacy frontend by its immutable official asset digest. --check verifies the plan without replacing the launcher, receipt, or backup. Core rollback remains a six-binary transaction. macOS uses normal app replacement.\nprismattyc update is the same command as pmux update.\nUpdating does not stop sessions. The app menu restarts the host and safely restarts the daemon when it has no active sessions.\n--source is an explicit development-only source build.");
 }
 
 /// Fetch the latest release, compare versions, and either report or install.
@@ -1382,6 +1388,9 @@ fn stage_and_activate(
 ) -> Result<()> {
     download_binary_set(staging, version, assets)?;
     verify_staged_versions(staging, version)?;
+    progress::emit(&Progress::Install {
+        item: "core binaries".into(),
+    });
     write_receipt(
         staging,
         &Receipt {
@@ -1397,36 +1406,48 @@ fn stage_and_activate(
 
 /// Download each binary into `staging`, verifying size, digest, and mode.
 fn download_binary_set(staging: &Path, version: &Version, assets: &[&Asset]) -> Result<()> {
+    let total = assets.iter().map(|asset| asset.size).sum();
+    let mut before = 0;
     for (binary, asset) in BINARIES.iter().zip(assets) {
-        eprintln!("Downloading {binary} {version}");
+        progress::say!("Downloading {binary} {version}");
+        let path = staging.join(crate::platform::executable_name(binary));
         download_one_binary(
-            &staging.join(crate::platform::executable_name(binary)),
-            binary,
+            &progress::Part {
+                item: binary,
+                path: &path,
+                before,
+                total,
+            },
             asset,
         )?;
+        before += asset.size;
     }
     Ok(())
 }
 
 /// Download, verify, and mark one binary executable. Split out of
 /// [`download_binary_set`] to keep each function's CRAP low.
-fn download_one_binary(path: &Path, binary: &str, asset: &Asset) -> Result<()> {
-    fetch_binary(path, binary, asset)?;
-    finalize_binary(path, asset)
+fn download_one_binary(part: &progress::Part<'_>, asset: &Asset) -> Result<()> {
+    fetch_binary(part, asset)?;
+    finalize_binary(part.path, asset)
 }
 
-/// Curl one asset to `path`, failing if the download did not succeed.
-fn fetch_binary(path: &Path, binary: &str, asset: &Asset) -> Result<()> {
-    let status = curl()
-        .arg("--max-filesize")
-        .arg(MAX_ASSET.to_string())
-        .arg("--output")
-        .arg(path)
-        .arg(&asset.browser_download_url)
-        .status()?;
+/// Curl one asset to `part.path`, reporting its size as it arrives, and fail
+/// if the download did not succeed.
+fn fetch_binary(part: &progress::Part<'_>, asset: &Asset) -> Result<()> {
+    let mut child = prismattyc_process::spawn(
+        curl()
+            .arg("--max-filesize")
+            .arg(MAX_ASSET.to_string())
+            .arg("--output")
+            .arg(part.path)
+            .arg(&asset.browser_download_url),
+    )?;
+    let status = progress::wait_download(&mut child, part, &mut progress::emit)?;
     ensure!(
         status.success(),
-        "download failed for {binary}; installed version unchanged"
+        "download failed for {}; installed version unchanged",
+        part.item
     );
     Ok(())
 }
@@ -1441,7 +1462,12 @@ fn finalize_binary(path: &Path, asset: &Asset) -> Result<()> {
 
 /// The complete set is trusted before any downloaded program executes.
 fn verify_staged_versions(staging: &Path, version: &Version) -> Result<()> {
-    for binary in BINARIES {
+    for (index, binary) in BINARIES.iter().enumerate() {
+        progress::emit(&Progress::Verify {
+            item: (*binary).into(),
+            index: index + 1,
+            count: BINARIES.len(),
+        });
         let text = version_label(&staging.join(crate::platform::executable_name(binary)))?;
         ensure!(
             text.split_whitespace()
@@ -1916,14 +1942,18 @@ fn ensure_parent_dir(destination: &Path) -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn download_asset(asset: &Asset, path: &Path) -> Result<()> {
-    let status = curl()
-        .arg("--max-filesize")
-        .arg(asset.size.to_string())
-        .arg("--output")
-        .arg(path)
-        .arg(&asset.browser_download_url)
-        .status()
+fn download_asset(asset: &Asset, part: &progress::Part<'_>) -> Result<()> {
+    let path = part.path;
+    let mut child = prismattyc_process::spawn(
+        curl()
+            .arg("--max-filesize")
+            .arg(asset.size.to_string())
+            .arg("--output")
+            .arg(path)
+            .arg(&asset.browser_download_url),
+    )
+    .with_context(|| format!("download {}", asset.name))?;
+    let status = progress::wait_download(&mut child, part, &mut progress::emit)
         .with_context(|| format!("download {}", asset.name))?;
     ensure!(
         status.success(),
@@ -1936,22 +1966,25 @@ fn download_asset(asset: &Asset, path: &Path) -> Result<()> {
 
 #[cfg(target_os = "macos")]
 fn verify_macos_trust(app: &Path, tag: &str, target: &str) -> Result<()> {
-    let codesign = Command::new("codesign")
-        .args(["--verify", "--strict", "--verbose=2"])
-        .arg(app)
-        .status()
-        .context("codesign is required to verify Prismattyc.app")?;
+    let codesign = prismattyc_process::status(
+        Command::new("codesign")
+            .args(["--verify", "--strict", "--verbose=2"])
+            .arg(app),
+    )
+    .context("codesign is required to verify Prismattyc.app")?;
     ensure!(
         codesign.success(),
         "codesign rejected {} ({codesign}). The installed app was not changed because the downloaded bundle failed code signature verification. {}",
         app.display(),
         manual_update_instructions(tag, target)
     );
-    let identity = Command::new("codesign")
-        .args(["--display", "--verbose=4"])
-        .arg(app)
-        .output()
-        .context("codesign is required to inspect Prismattyc.app identity")?;
+    let identity = prismattyc_process::spawn(
+        prismattyc_process::capture_command("codesign")
+            .args(["--display", "--verbose=4"])
+            .arg(app),
+    )
+    .and_then(std::process::Child::wait_with_output)
+    .context("codesign is required to inspect Prismattyc.app identity")?;
     let identity_text = format!(
         "{}\n{}",
         String::from_utf8_lossy(&identity.stdout),
@@ -1966,11 +1999,13 @@ fn verify_macos_trust(app: &Path, tag: &str, target: &str) -> Result<()> {
         app.display(),
         manual_update_instructions(tag, target)
     );
-    let gatekeeper = Command::new("spctl")
-        .args(["--assess", "--verbose=4", "--type", "exec"])
-        .arg(app)
-        .output()
-        .context("spctl is required to assess Prismattyc.app")?;
+    let gatekeeper = prismattyc_process::spawn(
+        prismattyc_process::capture_command("spctl")
+            .args(["--assess", "--verbose=4", "--type", "exec"])
+            .arg(app),
+    )
+    .and_then(std::process::Child::wait_with_output)
+    .context("spctl is required to assess Prismattyc.app")?;
     let assessment = format!(
         "{}\n{}",
         String::from_utf8_lossy(&gatekeeper.stdout),
@@ -1988,12 +2023,9 @@ fn verify_macos_trust(app: &Path, tag: &str, target: &str) -> Result<()> {
 
 #[cfg(target_os = "macos")]
 fn extract_macos_zip(zip: &Path, dest: &Path, tag: &str, target: &str) -> Result<PathBuf> {
-    let status = Command::new("ditto")
-        .args(["-x", "-k"])
-        .arg(zip)
-        .arg(dest)
-        .status()
-        .context("ditto is required to unpack the macOS update")?;
+    let status =
+        prismattyc_process::status(Command::new("ditto").args(["-x", "-k"]).arg(zip).arg(dest))
+            .context("ditto is required to unpack the macOS update")?;
     ensure!(
         status.success(),
         "unpacking {} failed ({status}). The installed app was not changed. {}",
@@ -2012,15 +2044,19 @@ fn extract_macos_zip(zip: &Path, dest: &Path, tag: &str, target: &str) -> Result
 
 #[cfg(target_os = "macos")]
 fn clear_quarantine(app: &Path) {
-    let _ = Command::new("xattr")
-        .args(["-dr", "com.apple.quarantine"])
-        .arg(app)
-        .status();
+    let _ = prismattyc_process::status(
+        Command::new("xattr")
+            .args(["-dr", "com.apple.quarantine"])
+            .arg(app),
+    );
 }
 
 #[cfg(target_os = "macos")]
 fn app_process_running(app: &Path) -> bool {
-    let Ok(output) = Command::new("/bin/ps").args(["-axo", "command="]).output() else {
+    let Ok(output) = prismattyc_process::spawn(
+        prismattyc_process::capture_command("/bin/ps").args(["-axo", "command="]),
+    )
+    .and_then(std::process::Child::wait_with_output) else {
         return true;
     };
     let text = String::from_utf8_lossy(&output.stdout);
@@ -2112,6 +2148,9 @@ fn install_macos_bundle_steps(
     } = download;
     let extracted =
         download_and_extract_macos_zip(staging, zip, checksums, manifest, version, tag, target)?;
+    progress::emit(&Progress::Install {
+        item: "Prismattyc.app".into(),
+    });
     let staged = stage_macos_bundle(destination, &extracted, tag, target)?;
     *incoming = Some(staged.clone());
     let swap = replace_app_bundle(destination, &staged)?;
@@ -2160,12 +2199,29 @@ fn download_macos_inputs(
     manifest: Option<&Asset>,
     version: &Version,
 ) -> Result<PathBuf> {
-    eprintln!("Downloading {MACOS_CHECKSUMS_NAME} {version}");
-    download_asset(checksums, &staging.join(MACOS_CHECKSUMS_NAME))?;
-    eprintln!("Downloading {} {version}", zip.name);
+    let total = checksums.size + zip.size + manifest.map_or(0, |asset| asset.size);
+    progress::say!("Downloading {MACOS_CHECKSUMS_NAME} {version}");
+    download_asset(
+        checksums,
+        &progress::Part {
+            item: MACOS_CHECKSUMS_NAME,
+            path: &staging.join(MACOS_CHECKSUMS_NAME),
+            before: 0,
+            total,
+        },
+    )?;
+    progress::say!("Downloading {} {version}", zip.name);
     let zip_path = staging.join(&zip.name);
-    download_asset(zip, &zip_path)?;
-    download_macos_manifest(staging, manifest, version)?;
+    download_asset(
+        zip,
+        &progress::Part {
+            item: &zip.name,
+            path: &zip_path,
+            before: checksums.size,
+            total,
+        },
+    )?;
+    download_macos_manifest(staging, manifest, version, checksums.size + zip.size, total)?;
     Ok(zip_path)
 }
 
@@ -2183,6 +2239,7 @@ fn confirm_and_extract_macos_zip(
     tag: &str,
     target: &str,
 ) -> Result<PathBuf> {
+    emit_macos_verify("checksums", 1);
     confirm_downloaded_macos_zip(staging, zip, checksums, manifest, version, target)?;
     let extracted = extract_macos_zip(zip_path, &staging.join("unpacked"), tag, target)?;
     clear_quarantine(&extracted);
@@ -2215,8 +2272,20 @@ fn verify_extracted_bundle(
     tag: &str,
     target: &str,
 ) -> Result<()> {
+    emit_macos_verify("signature and notarization", 2);
     verify_macos_trust(extracted, tag, target)?;
+    emit_macos_verify("version", 3);
     reported_release_version(&extracted.join("Contents/MacOS/pmux"), version)
+}
+
+/// One of the three checks of a downloaded macOS app.
+#[cfg(target_os = "macos")]
+fn emit_macos_verify(item: &str, index: usize) {
+    progress::emit(&Progress::Verify {
+        item: item.into(),
+        index,
+        count: 3,
+    });
 }
 
 /// Read the manifest bytes previously downloaded into `staging`, if any.
@@ -2234,12 +2303,22 @@ fn download_macos_manifest(
     staging: &Path,
     manifest: Option<&Asset>,
     version: &Version,
+    before: u64,
+    total: u64,
 ) -> Result<()> {
     let Some(manifest) = manifest else {
         return Ok(());
     };
-    eprintln!("Downloading {MACOS_MANIFEST_NAME} {version}");
-    download_asset(manifest, &staging.join(MACOS_MANIFEST_NAME))
+    progress::say!("Downloading {MACOS_MANIFEST_NAME} {version}");
+    download_asset(
+        manifest,
+        &progress::Part {
+            item: MACOS_MANIFEST_NAME,
+            path: &staging.join(MACOS_MANIFEST_NAME),
+            before,
+            total,
+        },
+    )
 }
 
 /// Copy the extracted bundle into a sibling `.Prismattyc.app.incoming-<pid>`
@@ -2270,10 +2349,7 @@ fn ditto_copy(extracted: &Path, staged: &Path) -> Result<()> {
     if staged.exists() {
         fs::remove_dir_all(staged)?;
     }
-    let copied = Command::new("ditto")
-        .arg(extracted)
-        .arg(staged)
-        .status()
+    let copied = prismattyc_process::status(Command::new("ditto").arg(extracted).arg(staged))
         .context("ditto is required to stage Prismattyc.app")?;
     ensure!(
         copied.success(),
@@ -2644,9 +2720,8 @@ mod windows_update {
             .join(state.current)
             .join(crate::platform::executable_name(binary));
         complete(target.parent().context("version directory")?)?;
-        let status = Command::new(target)
-            .args(std::env::args_os().skip(1))
-            .status()?;
+        let status =
+            prismattyc_process::status(Command::new(target).args(std::env::args_os().skip(1)))?;
         std::process::exit(status.code().unwrap_or(1));
     }
 }
@@ -2961,12 +3036,11 @@ mod tests {
             }
         }
         let ready = dir.join("ready");
-        let mut child = ChildGuard(Command::new(&executable)
+        let mut child = ChildGuard(prismattyc_process::spawn(Command::new(&executable)
             .args(["--exact", "release_update::tests::displaced_app_keeps_mapped_executables_until_the_process_exits"])
             .env("PRISMATTYC_TEST_MAPPED_READY", &ready)
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn().unwrap());
+            .stderr(Stdio::null())).unwrap());
         let deadline = Instant::now() + Duration::from_secs(5);
         while !ready.exists() {
             assert!(
@@ -3599,6 +3673,20 @@ mod tests {
     }
 
     #[test]
+    fn progress_is_off_unless_asked_for() {
+        assert!(!options(&["--json".into()]).unwrap().progress);
+        let o = options(&["--json".into(), "--progress".into()]).unwrap();
+        assert!(o.progress && o.json);
+        // The app falls back to a plain update when an older command-line
+        // tool rejects --progress with this wording.
+        let error = options(&["--nope".into()]).err().unwrap().to_string();
+        assert!(
+            error.contains(r#"unknown release update option "--nope""#),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn set_update_flag_recognizes_booleans() {
         let mut o = Options::default();
         assert!(set_update_flag(&mut o, "--check"));
@@ -3646,20 +3734,19 @@ mod tests {
     #[test]
     fn read_capped_child_stdout_reads_and_caps() {
         // Within cap: returns the bytes.
-        let mut child = Command::new("printf")
-            .arg("hello")
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let mut child =
+            prismattyc_process::spawn(Command::new("printf").arg("hello").stdout(Stdio::piped()))
+                .unwrap();
         let bytes = read_capped_child_stdout(&mut child, 64).unwrap();
         assert_eq!(bytes, b"hello");
 
         // Over cap: errors and does not return oversized data.
-        let mut big = Command::new("sh")
-            .args(["-c", "printf 'aaaaaaaaaa'"]) // 10 bytes
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let mut big = prismattyc_process::spawn(
+            Command::new("sh")
+                .args(["-c", "printf 'aaaaaaaaaa'"]) // 10 bytes
+                .stdout(Stdio::piped()),
+        )
+        .unwrap();
         assert!(read_capped_child_stdout(&mut big, 3).is_err());
     }
 

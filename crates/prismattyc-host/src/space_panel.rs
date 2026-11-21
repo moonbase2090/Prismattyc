@@ -838,7 +838,7 @@ fn command(host: &mut HostState, args: Vec<String>, kind: &'static str) {
     let socket = host_mux_socket();
     std::thread::spawn(move || {
         let result = (|| -> Result<Payload, String> {
-            let mut cmd = pmux_command();
+            let mut cmd = pmux_capture_command();
             if let Some(socket) = socket {
                 cmd.arg("--socket").arg(socket);
             }
@@ -846,9 +846,8 @@ fn command(host: &mut HostState, args: Vec<String>, kind: &'static str) {
             if kind == "maintenance" {
                 cmd.arg("--json");
             }
-            let output = cmd
-                .stdin(std::process::Stdio::null())
-                .output()
+            let output = prismattyc_process::spawn(cmd.stdin(std::process::Stdio::null()))
+                .and_then(std::process::Child::wait_with_output)
                 .map_err(|e| e.to_string())?;
             if !output.status.success() {
                 return Err(format!(
@@ -947,6 +946,27 @@ pub(super) fn rows(host: &HostState) -> Option<(String, Vec<PaletteRow>)> {
             .collect()
     };
     Some((header, rows))
+}
+
+/// The update panel's page and selected row index, for the opt-in UI change
+/// lines (see `ui_events`). Only the update panel reports, and only positions.
+pub(super) fn update_state(host: &HostState) -> Option<serde_json::Value> {
+    let panel = host
+        .space_panel
+        .as_ref()
+        .filter(|panel| panel.maintenance)?;
+    let page = match panel.page {
+        Page::Maintenance => "maintenance",
+        Page::Update(..) => "update",
+        Page::Text(_) => "result",
+        _ => "other",
+    };
+    Some(serde_json::json!({
+        "page": page,
+        "selected": host.context_menu.as_ref().map(|menu| menu.selected),
+        "rows": panel.rows.len(),
+        "loading": panel.pending.is_some(),
+    }))
 }
 
 pub(super) fn status(host: &HostState) -> Option<serde_json::Value> {

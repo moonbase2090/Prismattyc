@@ -73,7 +73,7 @@ impl Fixture {
         f
     }
     fn command(&self, binary: &str) -> Command {
-        let mut cmd = Command::new(binary);
+        let mut cmd = prismattyc_process::capture_command(binary);
         support::clear_command_env(&mut cmd);
         cmd.env("XDG_DATA_HOME", &self.dir)
             .env("XDG_CONFIG_HOME", self.dir.join("config"))
@@ -85,14 +85,15 @@ impl Fixture {
     }
     fn start(&mut self) {
         self.server = Some(
-            self.command(env!("CARGO_BIN_EXE_pmuxd"))
-                .arg("--socket")
-                .arg(&self.socket)
-                .args(["--", "/bin/sh", "-c", "exec sleep 999"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap(),
+            prismattyc_process::spawn(
+                self.command(env!("CARGO_BIN_EXE_pmuxd"))
+                    .arg("--socket")
+                    .arg(&self.socket)
+                    .args(["--", "/bin/sh", "-c", "exec sleep 999"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null()),
+            )
+            .unwrap(),
         );
         let deadline = Instant::now() + Duration::from_secs(5);
         while UnixStream::connect(&self.socket).is_err() {
@@ -112,7 +113,9 @@ impl Fixture {
         cmd
     }
     fn ok(&self, args: &[&str]) -> String {
-        ok(self.cli(args).output().unwrap())
+        ok(prismattyc_process::spawn(&mut self.cli(args))
+            .and_then(std::process::Child::wait_with_output)
+            .unwrap())
     }
     fn snapshot(&self) -> Snapshot {
         let mut stream = UnixStream::connect(&self.socket).unwrap();
@@ -219,12 +222,13 @@ fn readable_space_sessions_rename_keeps_process_mail_and_old_addresses() {
     assert_eq!(saved["sessions"][0]["agent"], "reviewer");
     assert_eq!(saved["tabs"][0]["sessions"][0], "reviewer");
     // Already-running children carry the old environment. Seat lookup must win.
-    let out = f
-        .cli(&["mail", "inbox"])
-        .env("PRISMATTYC_PANE_ID", pane.id.to_string())
-        .env("PMUX_AGENT", "unrelated-old-env")
-        .output()
-        .unwrap();
+    let out = prismattyc_process::spawn(
+        f.cli(&["mail", "inbox"])
+            .env("PRISMATTYC_PANE_ID", pane.id.to_string())
+            .env("PMUX_AGENT", "unrelated-old-env"),
+    )
+    .and_then(std::process::Child::wait_with_output)
+    .unwrap();
     assert!(ok(out).contains("open: 1 held: 1"));
     // Claim retains exact IDs and content. Previously held IDs still commit.
     let claimed: serde_json::Value =
@@ -343,9 +347,8 @@ fn mixed_case_display_names_keep_case_and_use_lowercase_unique_mailboxes() {
 #[test]
 fn explicit_opt_out_rejects_mixed_case_but_keeps_lowercase_names() {
     let f = Fixture::new_without_mixed_case_names();
-    let out = f
-        .cli(&["new", "--no-attach", "Graphite-Main"])
-        .output()
+    let out = prismattyc_process::spawn(&mut f.cli(&["new", "--no-attach", "Graphite-Main"]))
+        .and_then(std::process::Child::wait_with_output)
         .unwrap();
     assert!(
         !out.status.success(),
@@ -384,8 +387,8 @@ fn session_names_and_lookup_remain_exact_case_sensitive_strings() {
     assert_eq!(upper.agent_id.as_deref(), Some("graphite-main"));
     assert_eq!(lower.agent_id.as_deref(), Some("graphite-main-2"));
     assert!(
-        !f.cli(&["new", "--no-attach", "Graphite-Main"])
-            .output()
+        !prismattyc_process::spawn(&mut f.cli(&["new", "--no-attach", "Graphite-Main"]))
+            .and_then(std::process::Child::wait_with_output)
             .unwrap()
             .status
             .success(),
@@ -463,25 +466,33 @@ fn bind_existing_unassigned_session_and_reject_name_conflicts_without_changes() 
     let snap = f.snapshot();
     let session = snap.sessions.iter().find(|s| s.name == "legacy").unwrap();
     let pane = session.windows[0].panes[0].id;
-    ok(f.cli(&["session", "name", "astra-spaces"])
-        .env("PRISMATTYC_PANE_ID", pane.to_string())
-        .output()
-        .unwrap());
-    let who = ok(f
-        .cli(&["whoami", "--json"])
-        .env("PRISMATTYC_PANE_ID", pane.to_string())
-        .output()
-        .unwrap());
+    ok(prismattyc_process::spawn(
+        f.cli(&["session", "name", "astra-spaces"])
+            .env("PRISMATTYC_PANE_ID", pane.to_string()),
+    )
+    .and_then(std::process::Child::wait_with_output)
+    .unwrap());
+    let who = ok(prismattyc_process::spawn(
+        f.cli(&["whoami", "--json"])
+            .env("PRISMATTYC_PANE_ID", pane.to_string()),
+    )
+    .and_then(std::process::Child::wait_with_output)
+    .unwrap());
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&who).unwrap()["agent"],
         "astra-spaces"
     );
     f.ok(&["new", "--no-attach", "taken-name", "--", "/bin/sh"]);
     for invalid in ["taken-name", "", &"x".repeat(65)] {
-        let out = f
-            .cli(&["session", "name", invalid, "--session", "astra-spaces"])
-            .output()
-            .unwrap();
+        let out = prismattyc_process::spawn(&mut f.cli(&[
+            "session",
+            "name",
+            invalid,
+            "--session",
+            "astra-spaces",
+        ]))
+        .and_then(std::process::Child::wait_with_output)
+        .unwrap();
         assert!(!out.status.success(), "invalid name {invalid:?} succeeded");
         let current = f.snapshot();
         let same = current
@@ -494,10 +505,15 @@ fn bind_existing_unassigned_session_and_reject_name_conflicts_without_changes() 
         assert_eq!(same.windows[0].panes[0].id, pane);
         assert!(!f.spaces_dir().join(".session-name-transaction").exists());
     }
-    let visible = ok(f
-        .cli(&["session", "name", "Bad Name", "--session", "astra-spaces"])
-        .output()
-        .unwrap());
+    let visible = ok(prismattyc_process::spawn(&mut f.cli(&[
+        "session",
+        "name",
+        "Bad Name",
+        "--session",
+        "astra-spaces",
+    ]))
+    .and_then(std::process::Child::wait_with_output)
+    .unwrap());
     assert!(visible.contains("session: Bad Name\n"), "{visible}");
     assert!(visible.contains("agent: bad-name\n"), "{visible}");
     let named = f.snapshot();
@@ -505,11 +521,12 @@ fn bind_existing_unassigned_session_and_reject_name_conflicts_without_changes() 
     assert_eq!(same.name, "Bad Name");
     assert_eq!(same.agent_id.as_deref(), Some("bad-name"));
     assert_eq!(same.windows[0].panes[0].id, pane);
-    let who = ok(f
-        .cli(&["whoami", "--json"])
-        .env("PRISMATTYC_PANE_ID", pane.to_string())
-        .output()
-        .unwrap());
+    let who = ok(prismattyc_process::spawn(
+        f.cli(&["whoami", "--json"])
+            .env("PRISMATTYC_PANE_ID", pane.to_string()),
+    )
+    .and_then(std::process::Child::wait_with_output)
+    .unwrap());
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&who).unwrap()["agent"],
         "bad-name"
@@ -532,10 +549,15 @@ fn mailbox_failure_leaves_the_session_and_saved_space_unchanged() {
     let saved = f.saved();
     let db = rusqlite::Connection::open(f.dir.join("prismattyc/mail.db")).unwrap();
     db.execute_batch("CREATE TRIGGER fail_rename BEFORE UPDATE OF recipient ON letters BEGIN SELECT RAISE(ABORT, 'fixture disk failure'); END;").unwrap();
-    let refused = f
-        .cli(&["session", "name", "new-name", "--session", "work-1"])
-        .output()
-        .unwrap();
+    let refused = prismattyc_process::spawn(&mut f.cli(&[
+        "session",
+        "name",
+        "new-name",
+        "--session",
+        "work-1",
+    ]))
+    .and_then(std::process::Child::wait_with_output)
+    .unwrap();
     assert!(!refused.status.success());
     assert_eq!(f.saved(), saved);
     assert!(f
@@ -607,10 +629,15 @@ fn pane_label_keeps_its_case_and_mail_uses_the_derived_address() {
     assert!(f
         .ok(&["mail", "--as", "hello-world", "inbox"])
         .contains("open: 2 held: 0"));
-    let collision = f
-        .cli(&["session", "name", "Hello World", "--session", "work-2"])
-        .output()
-        .unwrap();
+    let collision = prismattyc_process::spawn(&mut f.cli(&[
+        "session",
+        "name",
+        "Hello World",
+        "--session",
+        "work-2",
+    ]))
+    .and_then(std::process::Child::wait_with_output)
+    .unwrap();
     assert!(
         !collision.status.success(),
         "duplicate visible name must fail"

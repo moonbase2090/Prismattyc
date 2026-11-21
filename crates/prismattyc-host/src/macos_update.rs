@@ -1,6 +1,6 @@
 //! Background release checks and install commands for the macOS app menu.
 
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 use std::thread;
 
 use anyhow::{ensure, Context, Result};
@@ -129,11 +129,13 @@ fn ensure_daemon(pmux: &std::path::Path) -> String {
 }
 
 fn run(pmux: &std::path::Path, args: &[&str]) -> Result<Output> {
-    Command::new(pmux)
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .with_context(|| format!("run {} {}", pmux.display(), args.join(" ")))
+    prismattyc_process::spawn(
+        prismattyc_process::capture_command(pmux)
+            .args(args)
+            .stdin(Stdio::null()),
+    )
+    .and_then(std::process::Child::wait_with_output)
+    .with_context(|| format!("run {} {}", pmux.display(), args.join(" ")))
 }
 
 fn command_error(output: &Output) -> String {

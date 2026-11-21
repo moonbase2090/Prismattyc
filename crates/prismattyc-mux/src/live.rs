@@ -1438,11 +1438,12 @@ impl LiveRuntime {
             pane.cell_w = cell_w;
             pane.cell_h = cell_h;
             pane.log = PaneLog::from_frames(rec.tail.clone(), DEFAULT_PANE_LOG_BYTES);
-            // The screen belongs to the old child; the newly spawned child owns input modes.
-            pane.emulator.reset_input_reporting();
-            pane.record(PaneEvent::Output {
-                bytes: prismattyc_emulator::RESET_INPUT_REPORTING.to_vec(),
-            });
+            // The screen belongs to the old child; the newly spawned child owns
+            // input modes. Its output starts on a new line, not after the old
+            // child's last prompt.
+            let restart = [prismattyc_emulator::RESET_INPUT_REPORTING, b"\r\n"].concat();
+            let _ = pane.emulator.feed(&restart);
+            pane.record(PaneEvent::Output { bytes: restart });
             pane.revision = pane.revision.saturating_add(1);
             let size = pty_size_with_cell_pixels(cols, rows, cell_w, cell_h);
             let _ = pane.session.resize(size);
@@ -2146,6 +2147,37 @@ mod tests {
             assert!(pane.emulator.focus_report());
             assert!(pane.emulator.bracketed_paste());
         }
+    }
+
+    #[test]
+    fn a_restored_pane_starts_new_output_on_its_own_line() {
+        use crate::pane_log_persist::EmulatorStateCodec;
+        let mut pane = spawn_test_pane(1, &sleep_spawn(BTreeMap::new()), None);
+        // The old child left its cursor after a prompt, mid-line.
+        pane.apply_pty_chunk(PtyChunk {
+            bytes: b"old prompt> ".to_vec(),
+            _reservation: None,
+        });
+        let mut runtime = LiveRuntime {
+            panes: HashMap::from([(1, pane)]),
+            mux_socket: None,
+            watch: PaneLogWatch::new(),
+            pending_size_owner: None,
+        };
+        let keys = [(1, "work".into(), 0)];
+        let saved = runtime.export_persist(&keys, &EmulatorStateCodec);
+        runtime
+            .panes
+            .insert(1, spawn_test_pane(1, &sleep_spawn(BTreeMap::new()), None));
+        runtime.restore_persist(&saved, &keys, &EmulatorStateCodec);
+        let pane = runtime.panes.get_mut(&1).unwrap();
+        pane.apply_pty_chunk(PtyChunk {
+            bytes: b"new child".to_vec(),
+            _reservation: None,
+        });
+        let lines = pane.content(1).lines;
+        assert_eq!(lines[0].trim_end(), "old prompt>", "{lines:?}");
+        assert!(lines[1].starts_with("new child"), "{lines:?}");
     }
 
     #[cfg(unix)]

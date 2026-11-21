@@ -55,16 +55,17 @@ fn start(config: Option<&str>, flag: bool) -> Fixture {
     if flag {
         command.arg("--experimental-activity");
     }
-    let child = command
-        .args(["--", "/bin/sh", "-c", "exec sleep 999"])
-        // A missing file is the default config; never read the caller's own.
-        .env("PRISMATTYC_CONFIG", &config_path)
-        .env("XDG_DATA_HOME", &dir)
-        .env("PMUX_SESSION_AGENTS", dir.join("session-agents.json"))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn pmuxd");
+    let child = prismattyc_process::spawn(
+        command
+            .args(["--", "/bin/sh", "-c", "exec sleep 999"])
+            // A missing file is the default config; never read the caller's own.
+            .env("PRISMATTYC_CONFIG", &config_path)
+            .env("XDG_DATA_HOME", &dir)
+            .env("PMUX_SESSION_AGENTS", dir.join("session-agents.json"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .expect("spawn pmuxd");
     let fixture = Fixture { child, dir, socket };
     for _ in 0..250 {
         if UnixStream::connect(&fixture.socket).is_ok() {

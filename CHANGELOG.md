@@ -5,8 +5,27 @@
 ### Fixed
 
 - **Update and restart all components** now restarts every open Prismattyc app process, not only the one you used, and the result lists any window that is still on the previous version with the exact next action. `pmux restart --host` accepts `--except-pid` to leave one app process for last.
-- On Windows, **Update and restart** no longer stays on the daemon restart step after the update installs: the new daemon kept a copy of the app's output pipe, so the app never saw the restart finish. The app now reads command output from private files, and `pmux` no longer hands its standard handles to the programs it starts unless they ask.
+
+## [0.3.72] - 2026-11-20
+
+### Added
+
+- **Update and restart** shows the update's progress in the Restart to update dialog: bytes downloaded of the whole release, each component as it is verified, the install step, and each component as it restarts, with what happens to your sessions. If the update fails, the dialog keeps the failed step and its error and offers **Check again** or **Close**. `pmux update --progress` reports the same stages on stderr for other tools.
+
+### Changed
+
+- **Save and restart** in **Update and restart** now brings your sessions back by itself. The restarted daemon recreates them with their IDs, split panes, working directories, Space ownership and scrollback, and starts their programs again, so the relaunched app reopens your tabs without a second **Restore sessions** question. The result names the sessions that came back and any that did not. A restored pane starts the new program's output on a new line below its saved output. `pmux up --restore-workspace` starts the daemon from the saved workspace.
+
+### Fixed
+
+- A Windows install stops `pmuxd` when that executable is in the install directory or the update store, then starts the installed daemon. Signing in still leaves a running daemon alone. Setup also grants SYSTEM and Administrators access on a file whose access list is the protected user-only list written by an in-app update, so that file can be replaced. Other files and directories are left unchanged.
+
+## [0.3.71] - 2026-11-20
+
+### Fixed
+
 - **Update and restart** no longer refuses to finish when macOS reports a warning about an unrelated mount, such as a Time Machine snapshot, while checking which processes still run the previous app. A real failure to inspect the app, or a warning about the volume the app lives on, still keeps the previous app.
+- When the daemon starts after an update, an enabled official Activity Monitor or activity connector moves to the newer version bundled with the release and keeps its permissions. An explicitly disabled plug-in stays disabled. `pmux restart` waits for this step and lists what changed in the `plugins` entry of its JSON result. When live sessions defer the daemon restart, the entry reports `pending`; end those sessions and run `pmux restart --daemon` again.
 
 ## [0.3.70] - 2026-11-19
 
@@ -18,6 +37,8 @@
 
 ### Fixed
 
+- On Windows, **Update and restart** no longer stays on the daemon restart step after the update installs: the new daemon kept a copy of the app's output pipe, so the app never saw the restart finish. The app now reads command output from private files, and `pmux` no longer hands its standard handles to the programs it starts unless they ask.
+- A restored session of a supported coding agent that was started with a query resumes its latest conversation instead of running the query again, and keeps its conversation selector, profile, provider, model and permission options.
 - This release embeds official plug-in catalog 1.3.5, which adds activity-monitor 1.3.5 and keeps the earlier packages.
 - Updated Wasmtime to 36.0.21 for the November advisories.
 

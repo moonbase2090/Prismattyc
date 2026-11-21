@@ -38,16 +38,17 @@ fn isolated_space_windows_create_move_and_render() {
     std::env::set_var("PMUX", &pmux);
     let socket = host_mux_socket().unwrap();
     let _daemon = Daemon(
-        Command::new(pmuxd)
-            .env("PRISMATTYC_DEFAULT_SPACE", "0")
-            .arg("--socket")
-            .arg(&socket)
-            .args(["--", "/bin/sh"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .unwrap(),
+        prismattyc_process::spawn(
+            Command::new(pmuxd)
+                .env("PRISMATTYC_DEFAULT_SPACE", "0")
+                .arg("--socket")
+                .arg(&socket)
+                .args(["--", "/bin/sh"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit()),
+        )
+        .unwrap(),
     );
     let start = Instant::now();
     while attach_log::live_snapshot().is_none() {
@@ -118,7 +119,10 @@ fn text(host: &HostState) -> String {
 }
 
 fn command(args: &[&str]) {
-    let result = Command::new(pmux_bin()).args(args).output().unwrap();
+    let result =
+        prismattyc_process::spawn(prismattyc_process::capture_command(pmux_bin()).args(args))
+            .and_then(std::process::Child::wait_with_output)
+            .unwrap();
     assert!(
         result.status.success(),
         "pmux {args:?}: {}",
@@ -752,16 +756,17 @@ fn stale_snapshot_keeps_a_newer_layout_pending() {
     std::env::set_var("PMUX", &pmux);
     let socket = host_mux_socket().unwrap();
     let _daemon = Daemon(
-        Command::new(pmuxd)
-            .env("PRISMATTYC_DEFAULT_SPACE", "0")
-            .arg("--socket")
-            .arg(&socket)
-            .args(["--", "/bin/sh"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .unwrap(),
+        prismattyc_process::spawn(
+            Command::new(pmuxd)
+                .env("PRISMATTYC_DEFAULT_SPACE", "0")
+                .arg("--socket")
+                .arg(&socket)
+                .args(["--", "/bin/sh"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit()),
+        )
+        .unwrap(),
     );
     let start = Instant::now();
     while attach_log::live_snapshot().is_none() {
@@ -924,16 +929,17 @@ fn stale_cache_does_not_detach_a_newer_attachment() {
     std::env::set_var("PMUX", &pmux);
     let socket = host_mux_socket().unwrap();
     let _daemon = Daemon(
-        Command::new(pmuxd)
-            .env("PRISMATTYC_DEFAULT_SPACE", "0")
-            .arg("--socket")
-            .arg(&socket)
-            .args(["--", "/bin/sh"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .unwrap(),
+        prismattyc_process::spawn(
+            Command::new(pmuxd)
+                .env("PRISMATTYC_DEFAULT_SPACE", "0")
+                .arg("--socket")
+                .arg(&socket)
+                .args(["--", "/bin/sh"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit()),
+        )
+        .unwrap(),
     );
     let start = Instant::now();
     while attach_log::live_snapshot().is_none() {
@@ -1128,16 +1134,17 @@ fn launch_reopen_child(test_name: &str, recycle_ids: bool) {
     std::env::set_var("PMUX", &pmux);
     let socket = host_mux_socket().unwrap();
     let daemon = Daemon(
-        Command::new(&pmuxd)
-            .env("PRISMATTYC_DEFAULT_SPACE", "0")
-            .arg("--socket")
-            .arg(&socket)
-            .args(["--", "/bin/sh"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .unwrap(),
+        prismattyc_process::spawn(
+            Command::new(&pmuxd)
+                .env("PRISMATTYC_DEFAULT_SPACE", "0")
+                .arg("--socket")
+                .arg(&socket)
+                .args(["--", "/bin/sh"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit()),
+        )
+        .unwrap(),
     );
     let started = Instant::now();
     while attach_log::live_snapshot().is_none() {
@@ -1233,9 +1240,8 @@ fn pump_command_with(app: &mut App, window: WindowId, args: &[&str], pump: fn(&m
     let pmux = pmux_bin();
     let owned: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
     let handle = std::thread::spawn(move || {
-        Command::new(pmux)
-            .args(&owned)
-            .output()
+        prismattyc_process::spawn(prismattyc_process::capture_command(pmux).args(&owned))
+            .and_then(std::process::Child::wait_with_output)
             .expect("spawn pmux")
     });
     let started = Instant::now();
@@ -1303,16 +1309,17 @@ fn replace_daemon(daemon: &mut Daemon, pmuxd: &Path, socket: &Path) {
     let _ = daemon.0.kill();
     let _ = daemon.0.wait();
     let _ = std::fs::remove_file(socket);
-    daemon.0 = Command::new(pmuxd)
-        .env("PRISMATTYC_DEFAULT_SPACE", "0")
-        .arg("--socket")
-        .arg(socket)
-        .args(["--", "/bin/sh"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .unwrap();
+    daemon.0 = prismattyc_process::spawn(
+        Command::new(pmuxd)
+            .env("PRISMATTYC_DEFAULT_SPACE", "0")
+            .arg("--socket")
+            .arg(socket)
+            .args(["--", "/bin/sh"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit()),
+    )
+    .unwrap();
     let started = Instant::now();
     while attach_log::live_snapshot().is_none() {
         assert!(
@@ -1544,16 +1551,17 @@ fn space_reopen_after_daemon_restart_reused_ids_reconnect_each_view() {
     std::env::set_var("PMUX", &pmux);
     let socket = host_mux_socket().unwrap();
     let daemon = Daemon(
-        Command::new(&pmuxd)
-            .env("PRISMATTYC_DEFAULT_SPACE", "0")
-            .arg("--socket")
-            .arg(&socket)
-            .args(["--", "/bin/sh"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .unwrap(),
+        prismattyc_process::spawn(
+            Command::new(&pmuxd)
+                .env("PRISMATTYC_DEFAULT_SPACE", "0")
+                .arg("--socket")
+                .arg(&socket)
+                .args(["--", "/bin/sh"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit()),
+        )
+        .unwrap(),
     );
     let started = Instant::now();
     while attach_log::live_snapshot().is_none() {

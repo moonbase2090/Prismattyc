@@ -165,6 +165,56 @@ however briefly it shows. Require at least two download lines in `step_log`.
 Inspect the step captures: the bar is drawn, not text, and the install bar
 moves without a percentage.
 
+## One-step update
+
+`pmux update` with no options installs the newest release, includes its
+monitor launcher on Linux and Windows, runs the safe restart, and prints one
+receipt. `pmux update --json` stays install-only (the app's flow and other
+drives depend on that); `--json --restart` prints the receipt as JSON. Unit
+tests: `cargo test -p prismattyc-mux --lib release_update::complete`.
+
+`tests/native/one-step-update-e2e.py` proves it on a disposable machine that
+has an older public release installed by the platform's own installer, with
+the newest public release newer than it. Build this branch with the workspace
+version lowered to that older release (the updater installs only a newer
+release and never from a build tree), then replace the installed `pmux` with
+it: that is a user on a release carrying this change. Say so in the proof.
+
+```
+python3 tests/native/one-step-update-e2e.py --pmux ~/.local/bin/pmux \
+  --notice-host target/release/prismattyc-host --again-pmux target/release/pmux \
+  --out results/one-step --notice --screenshots
+```
+
+- `--pmux` is the installed `pmux` carrying this change (Linux
+  `~/.local/bin/pmux`, Windows the installer's `pmux.exe`, macOS
+  `/Applications/Prismattyc.app/Contents/MacOS/pmux`). Its sibling, the
+  installed release's own `prismattyc-host`, is opened on a session so the
+  update restarts it. After the update that `pmux` is the newest release's,
+  so `--again-pmux` (this build) runs the second update.
+- `--notice` (Linux, Windows) opens this build's app, waits for the update
+  notice in the change lines (`toasts`: kind, chip rectangle, `opens_update`),
+  clicks the chip, waits for the Restart to update review, then closes it
+  with Escape. Toast text never appears in change lines.
+- The receipt must name the core and launcher on the new release and the
+  daemon deferred with its next step. The open older window must be
+  restarted (then `pmux versions` shows it on the new release), or named
+  `deferred` with its own reason and "Fix what the window names", or, when
+  that release's app stopped renewing its registration while idle, named
+  `idle` with "Close and reopen that window". Its session prints steadily so
+  it usually stays registered. On macOS the windows the drive opens start
+  with automatic update checks off (a private `PRISMATTYC_CONFIG`): the
+  launch update prompt there is modal and would hold their main loop. Every installed component must be on the new
+  release and the sessions keep running. A second run must find the core and
+  launcher current.
+- `--idle-host` (macOS; Linux and Windows use the `--notice` window) runs this
+  build's app on an idle session and checks that it stays registered past
+  the five seconds a registration lasts.
+- `--screenshots` captures `screen-notice`, `screen-notice-review`,
+  `screen-before-update` and `screen-after-update`; on a macOS guest without
+  screen recording, `--key-relay DIR` asks the VM console's controller for
+  them as `{"snap": NAME}` lines.
+
 ## Restart to update modal
 
 `python3 tests/native/restart-modal-e2e.py --bins "$verify_bins" --out "$verify_evidence/restart-modal"`

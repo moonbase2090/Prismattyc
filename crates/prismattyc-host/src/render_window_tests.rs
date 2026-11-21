@@ -985,6 +985,7 @@ fn verify_pixels_and_overlays(host: &mut HostState) {
         until: Instant::now() + Duration::from_secs(10),
         label: " test bell ".into(),
         status: None,
+        opens_update: false,
     });
     assert_ne!(
         frame(host),
@@ -2543,7 +2544,27 @@ fn update_notice_appears_once_in_a_private_window() {
                     )
                     .unwrap();
                 }
-                host.bell_toasts.clear();
+                // A click on the notice opens the Update and restart review.
+                let toast = &host.bell_toasts[0];
+                let (x, y, w, h) = bell_toast_rect(host, toast).expect("the notice has a chip");
+                // A driver finds the same chip in the app's change lines.
+                assert_eq!(
+                    ui_events::snapshot(host)["toasts"],
+                    serde_json::json!([{"kind": "notice", "opens_update": true, "rect": [x, y, w, h]}])
+                );
+                host.pointer_px = Some(((x + w / 2) as f64, (y + h / 2) as f64));
+                assert!(handle_bell_toast_click(host, MouseButton::Left));
+                assert!(
+                    host.bell_toasts.is_empty(),
+                    "the click dismisses the notice"
+                );
+                assert!(
+                    matches!(
+                        host.toast_update_action.take(),
+                        Some(update_flow::Action::Start)
+                    ),
+                    "the click asks for the Update and restart review"
+                );
                 update_check::start_check(self.proxy.clone());
             } else {
                 // The toast was cleared above, so a repeat announcement would bring it back.

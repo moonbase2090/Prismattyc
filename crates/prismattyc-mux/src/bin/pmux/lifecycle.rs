@@ -377,11 +377,24 @@ fn restart_cooperative(
     results: &mut Vec<serde_json::Value>,
 ) -> Result<()> {
     let mut pending = Vec::new();
+    // A window that is open but has not renewed its registration (an idle
+    // window from an older release) is named instead of being skipped silently.
+    let idle_hosts: Vec<u32> = if opts.host {
+        components::idle_components(&paths.socket, "host")
+            .into_iter()
+            .filter(|pid| !opts.except_pids.contains(pid))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    for pid in &idle_hosts {
+        results.push(json!({"component":"host","status":"idle","pid":pid,"detail":"open but idle, so it was not asked to restart"}));
+    }
     for (component, pids, enabled) in [("host", hosts, opts.host), ("mcp", adapters, opts.mcp)] {
         if !enabled {
             continue;
         }
-        if pids.is_empty() {
+        if pids.is_empty() && (component != "host" || idle_hosts.is_empty()) {
             results.push(json!({"component":component,"status":"not_registered","detail":"no cooperative component found; older hosts must be reopened manually"}));
         }
         for pid in pids {

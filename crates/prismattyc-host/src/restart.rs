@@ -37,6 +37,31 @@ pub(super) fn receive() -> Result<Option<Resume>> {
     Ok(Some(resume))
 }
 
+/// How often an idle app wakes to renew its restart registration. It must
+/// stay well inside the registration's freshness, or `pmux restart` and
+/// `pmux update` stop seeing an open window that has nothing to draw.
+pub(super) const HEARTBEAT: Duration = Duration::from_secs(2);
+
+/// Wake the app every `period` while `alive` can be upgraded, so the pump
+/// renews the registration (in [`poll`]) even with nothing to draw. The
+/// heartbeat itself stays on the UI thread: a hung window still goes stale.
+pub(super) fn spawn_heartbeat(
+    period: Duration,
+    alive: std::sync::Weak<()>,
+    wake: crate::mux::Wake,
+) -> Option<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("registration-heartbeat".into())
+        .spawn(move || {
+            while alive.upgrade().is_some() {
+                // keep-alive: the period between wakes, not a test wait.
+                std::thread::sleep(period);
+                wake();
+            }
+        })
+        .ok()
+}
+
 pub(super) fn poll(app: &mut App) {
     let now = Instant::now();
     if app
@@ -343,6 +368,30 @@ pub(super) fn resume(app: &mut App, event_loop: &ActiveEventLoop) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_idle_app_is_woken_until_it_is_gone() {
+        // Two missed wakes still leave the registration current.
+        assert!(
+            HEARTBEAT * 2 < requests::FRESH,
+            "{HEARTBEAT:?} vs {:?}",
+            requests::FRESH
+        );
+        let (sender, wakes) = std::sync::mpsc::channel();
+        let sender = std::sync::Mutex::new(sender);
+        let wake: crate::mux::Wake = Arc::new(move || {
+            let _ = sender.lock().unwrap().send(());
+        });
+        let app = Arc::new(());
+        let thread = spawn_heartbeat(Duration::from_millis(1), Arc::downgrade(&app), wake).unwrap();
+        for _ in 0..3 {
+            wakes
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the idle app is woken again and again");
+        }
+        drop(app);
+        thread.join().unwrap();
+    }
     use prismattyc_mux::attach_tabs::{AttachTabRecord, AttachTabsFile};
 
     fn tab(title: &str, sessions: &[&str]) -> AttachTabRecord {

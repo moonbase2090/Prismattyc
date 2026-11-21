@@ -196,9 +196,9 @@ fn main() -> Result<()> {
     };
     // A fresh daemon starts with one session; the default Space adopts it.
     let adopt = saved.is_none().then_some(BOOTSTRAP_SESSION);
-    let mut plane = match saved.as_ref() {
-        Some(saved) => saved.restore(&cli.socket)?,
-        None => bootstrap_plane(&cli)?,
+    let (mut plane, deferred_resumes) = match saved.as_ref() {
+        Some(saved) => saved.restore_plane(&cli.socket)?,
+        None => (bootstrap_plane(&cli)?, Vec::new()),
     };
     if let Some(saved) = &saved {
         saved.checkpoint(&cli.socket)?;
@@ -255,6 +255,9 @@ fn main() -> Result<()> {
     // before any of them can open one.
     ensure_default_space(&cli.socket, adopt);
     instance.publish_pid(&cli.socket)?;
+    // Send workspace resume commands only after the control socket is bound and
+    // ready for clients such as `pmux-activity-monitor` or agent CLI tools.
+    prismattyc_mux::workspace::Workspace::resume_panes(&server.plane(), &deferred_resumes)?;
     // Off the startup path; a failure is logged and the daemon keeps running.
     server.seed_default_plugins();
     let checkpoint =

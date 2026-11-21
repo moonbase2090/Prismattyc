@@ -2,10 +2,11 @@
 //! Opt-in change lines for native drivers.
 //!
 //! With `PRISMATTYC_UI_EVENTS=1`, the app prints one stderr line after a
-//! presented frame whenever the update panel or the Restart to update dialog
-//! is in a different state from the last line. A line names only states and
-//! positions (which page, which row index is selected, the dialog's state and
-//! step number), never row text or session names. A driver reads the app's
+//! presented frame whenever the update panel, the Restart to update dialog,
+//! the open modal or its scrim is in a different state from the last line.
+//! A line names only states and positions (which page, which row index is
+//! selected, the dialog's state and step number, the kind of modal), never
+//! row text or session names. A driver reads the app's
 //! stderr and waits for these lines instead of polling or sleeping, then reads
 //! the rendered rows from render status for its checks: before a line is
 //! printed, the app publishes render status and waits for that write, so a
@@ -23,11 +24,14 @@ pub(super) fn enabled() -> bool {
 }
 
 /// What a driver can wait for: the update panel's page and selected row
-/// index, and the dialog's state, selection and step.
+/// index, the dialog's state, selection and step, which modal is open, and
+/// whether the scrim under it has finished fading in and blurs.
 pub(super) fn snapshot(host: &HostState) -> serde_json::Value {
     serde_json::json!({
         "panel": space_panel::update_state(host),
         "dialog": host.restart_modal.as_ref().map(restart_modal::RestartModal::state),
+        "modal": open_modal(host),
+        "scrim": host.modal_scrim.painted(),
     })
 }
 

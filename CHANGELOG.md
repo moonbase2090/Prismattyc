@@ -10,6 +10,7 @@
 
 ### Changed
 
+- Every dialog, picker and modal menu (the command palette, settings, the theme picker, Transparency, Update and restart, confirmations and the rest) now dims the app behind it and blurs it slightly, so the dialog stands out. The backdrop fades in; with `reduced_motion = true` it appears at once. On a very large window, or where the blur would slow the frame, it only dims. Clicking outside a dialog works as before.
 - **Update and restart** shows each step of the restart (saving or stopping the sessions, stopping the old daemon, starting the new one, checking the restored sessions, reconciling the official plug-ins, the MCP adapter and the relaunch), and the relaunched app continues the same progress: it opens the windows, then shows **Update finished** with each step's outcome until you close it. A failed update shows the same list with the step that failed. A session started while the dialog is open now fails on **Checking the sessions** by name. `pmux restart` prints the same steps on stderr, and `pmux restart --progress` reports them as progress lines; `pmux update` also prints its verify and install steps.
 
 ### Fixed

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.3.73] - 2026-11-21
+
+### Added
+
+- Experimental native terminal grids and uploaded images for direct local PTY applications on supported Linux and Apple Silicon macOS hosts, enabled with `--experimental-rich`. Native content supplies rendering and text readers; release, resize or lease expiry restores the retained ANSI terminal. The feature remains off by default.
+
 ### Changed
 
 - Every dialog, picker and modal menu (the command palette, settings, the theme picker, Transparency, Update and restart, confirmations and the rest) now dims the app behind it and blurs it slightly, so the dialog stands out. The backdrop fades in; with `reduced_motion = true` it appears at once. On a very large window, or where the blur would slow the frame, it only dims. Clicking outside a dialog works as before.
@@ -18,7 +24,6 @@
 ### Added
 
 - **Update and restart** shows the update's progress in the Restart to update dialog: bytes downloaded of the whole release, each component as it is verified, the install step, and each component as it restarts, with what happens to your sessions. If the update fails, the dialog keeps the failed step and its error and offers **Check again** or **Close**. `pmux update --progress` reports the same stages on stderr for other tools.
-- Experimental native terminal grids and uploaded images for direct local PTY applications on supported Linux and Apple Silicon macOS hosts, enabled with `--experimental-rich`. Native content supplies rendering and text readers; release, resize or lease expiry restores the retained ANSI terminal. The feature remains off by default.
 
 ### Changed
 

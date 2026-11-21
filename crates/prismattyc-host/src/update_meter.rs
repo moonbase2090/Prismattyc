@@ -6,6 +6,7 @@
 //! items. Installing has no measurable fraction, so its bar moves without a
 //! percentage instead of showing a made-up one.
 use prismattyc_mux::release_update::progress::Progress;
+use serde::{Deserialize, Serialize};
 
 /// A progress bar: filled to a fraction, or a block that sweeps across it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,7 +41,7 @@ pub(super) fn meter_fill(width: usize, bar: MeterBar) -> (usize, usize) {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) enum Step {
     Download,
     Verify,
@@ -59,21 +60,27 @@ impl Step {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum Amount {
     Bytes { received: u64, total: u64 },
     Items { index: usize, count: usize },
     Unknown,
 }
 
-#[derive(Clone, Debug)]
+/// The meter's state travels with the relaunch, so the new app continues
+/// the same steps and ends on the same receipt.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct Meter {
     steps: Vec<Step>,
     step: usize,
     detail: String,
     amount: Amount,
     failed: bool,
+    /// Every step has finished.
+    #[serde(default)]
+    finished: bool,
     /// Moves the bar of a step without a fraction.
+    #[serde(skip)]
     frame: usize,
 }
 
@@ -87,17 +94,16 @@ impl Meter {
         } else {
             vec![Step::Restart]
         };
-        let detail = if update_available {
-            "Starting the download"
-        } else {
-            "Preparing to restart"
-        };
+        // The update first checks that the sessions are the ones the user
+        // agreed to restart.
+        let detail = "Checking the sessions";
         Meter {
             steps,
             step: 0,
             detail: detail.into(),
             amount: Amount::Unknown,
             failed: false,
+            finished: false,
             frame: 0,
         }
     }
@@ -118,46 +124,49 @@ impl Meter {
     }
 
     pub(super) fn apply(&mut self, progress: &Progress) {
-        if self.failed {
+        if self.failed || self.finished {
             return;
         }
+        // The command line prints the same words for each event.
+        self.detail = progress.describe();
         match progress {
             Progress::Download {
-                item,
-                received,
-                total,
+                received, total, ..
             } => {
                 self.enter(Step::Download);
-                self.detail = format!("Downloading {item}");
                 self.amount = Amount::Bytes {
                     received: *received,
                     total: *total,
                 };
             }
-            Progress::Verify { item, index, count } => {
+            Progress::Verify { index, count, .. } => {
                 self.enter(Step::Verify);
-                self.detail = format!("Verifying {index} of {count}: {item}");
                 self.amount = Amount::Items {
                     index: *index,
                     count: *count,
                 };
             }
-            Progress::Install { item } => {
+            Progress::Install { .. } => {
                 self.enter(Step::Install);
-                self.detail = format!("Installing {item}");
                 self.amount = Amount::Unknown;
+            }
+            Progress::Restart { index, count, .. } => {
+                self.enter(Step::Restart);
+                self.amount = Amount::Items {
+                    index: *index,
+                    count: *count,
+                };
             }
         }
     }
 
-    /// A restart of one component, reported by the app itself.
-    pub(super) fn restart(&mut self, index: usize, count: usize, item: &str) {
-        if self.failed {
+    /// A check the app makes within the current step, without a fraction.
+    pub(super) fn doing(&mut self, detail: &str) {
+        if self.failed || self.finished {
             return;
         }
-        self.enter(Step::Restart);
-        self.detail = format!("Restarting {index} of {count}: {item}");
-        self.amount = Amount::Items { index, count };
+        self.detail = detail.into();
+        self.amount = Amount::Unknown;
     }
 
     /// Keep the bar at the step that failed.
@@ -165,9 +174,41 @@ impl Meter {
         self.failed = true;
     }
 
+    /// Every step has finished: the bar is full.
+    pub(super) fn finish(&mut self) {
+        if !self.failed {
+            self.finished = true;
+        }
+    }
+
+    pub(super) fn finished(&self) -> bool {
+        self.finished
+    }
+
+    /// One line for each step: done, failed with what it was doing, under
+    /// way, or not started.
+    pub(super) fn receipt(&self) -> Vec<String> {
+        self.steps
+            .iter()
+            .enumerate()
+            .map(|(index, step)| {
+                let state = if index < self.step || (index == self.step && self.finished) {
+                    "done".to_string()
+                } else if index > self.step {
+                    "not started".to_string()
+                } else if self.failed {
+                    format!("failed at {}", self.detail)
+                } else {
+                    format!("under way: {}", self.detail)
+                };
+                format!("{}: {state}", step.name())
+            })
+            .collect()
+    }
+
     /// Advance the moving bar; true when the meter has one to move.
     pub(super) fn tick(&mut self) -> bool {
-        if self.failed || self.amount != Amount::Unknown {
+        if self.failed || self.finished || self.amount != Amount::Unknown {
             return false;
         }
         self.frame = self.frame.wrapping_add(1);
@@ -194,6 +235,8 @@ impl Meter {
             "{} {} of {}: {}",
             if self.failed {
                 "Failed at step"
+            } else if self.finished {
+                "Finished step"
             } else {
                 "Step"
             },
@@ -217,6 +260,7 @@ impl Meter {
     /// fraction, nothing when it does not.
     pub(super) fn bar(&self) -> (MeterBar, String) {
         let fraction = match self.amount {
+            _ if self.finished => Some(1.0),
             Amount::Bytes { received, total } if total > 0 => {
                 Some(received.min(total) as f64 / total as f64)
             }
@@ -287,13 +331,24 @@ mod tests {
         assert_ne!(meter.bar().0, first, "the bar moves on each tick");
     }
 
+    fn restart(index: usize, count: usize, item: &str) -> Progress {
+        Progress::Restart {
+            item: item.into(),
+            index,
+            count,
+        }
+    }
+
     #[test]
     fn restart_only_has_a_single_step() {
         let mut meter = Meter::new(false);
-        meter.restart(2, 3, "MCP adapter");
+        meter.apply(&restart(2, 3, "Restarting the MCP adapter"));
         assert_eq!(
             meter.lines(),
-            ["Step 1 of 1: Restart", "Restarting 2 of 3: MCP adapter"]
+            [
+                "Step 1 of 1: Restart",
+                "Restarting the MCP adapter (2 of 3)"
+            ]
         );
         assert_eq!(meter.bar(), (MeterBar::Fraction(333), "33%".into()));
     }
@@ -308,7 +363,7 @@ mod tests {
         });
         meter.fail();
         meter.apply(&Progress::Install { item: "x".into() });
-        meter.restart(1, 3, "daemon");
+        meter.apply(&restart(1, 3, "Stopping the old daemon"));
         assert!(!meter.tick());
         assert_eq!(
             meter.lines(),
@@ -318,13 +373,89 @@ mod tests {
     }
 
     #[test]
+    fn the_receipt_names_each_steps_outcome() {
+        let mut meter = Meter::new(true);
+        meter.apply(&Progress::Verify {
+            item: "pmuxd".into(),
+            index: 2,
+            count: 6,
+        });
+        assert_eq!(
+            meter.receipt(),
+            [
+                "Download: done",
+                "Verify: under way: Verifying 2 of 6: pmuxd",
+                "Install: not started",
+                "Restart: not started"
+            ]
+        );
+        meter.fail();
+        meter.finish();
+        assert!(!meter.finished(), "a failed update cannot finish");
+        assert_eq!(
+            meter.receipt()[1],
+            "Verify: failed at Verifying 2 of 6: pmuxd"
+        );
+    }
+
+    #[test]
+    fn a_failure_before_any_stage_names_the_session_check() {
+        let mut meter = Meter::new(false);
+        meter.fail();
+        assert_eq!(
+            meter.lines(),
+            ["Failed at step 1 of 1: Restart", "Checking the sessions"]
+        );
+        assert_eq!(
+            meter.receipt(),
+            ["Restart: failed at Checking the sessions"]
+        );
+    }
+
+    #[test]
+    fn a_failed_check_is_named_under_its_step() {
+        let mut meter = Meter::new(false);
+        meter.doing("Checking the installed versions");
+        assert_eq!(
+            meter.lines(),
+            ["Step 1 of 1: Restart", "Checking the installed versions"]
+        );
+        assert!(meter.tick(), "a check has no fraction; its bar moves");
+        meter.fail();
+        meter.doing("Checking the sessions");
+        assert_eq!(
+            meter.receipt(),
+            ["Restart: failed at Checking the installed versions"]
+        );
+    }
+
+    #[test]
+    fn a_finished_meter_is_full_and_still() {
+        let mut meter = Meter::new(false);
+        meter.apply(&restart(3, 6, "Starting the new daemon"));
+        meter.finish();
+        assert_eq!(meter.bar(), (MeterBar::Fraction(1000), "100%".into()));
+        assert!(!meter.tick());
+        meter.apply(&restart(4, 6, "Reconciling the official plug-ins"));
+        assert_eq!(
+            meter.lines(),
+            [
+                "Finished step 1 of 1: Restart",
+                "Starting the new daemon (3 of 6)"
+            ],
+            "events after the finish do not move it"
+        );
+        assert_eq!(meter.receipt(), ["Restart: done"]);
+    }
+
+    #[test]
     fn the_note_warns_when_sessions_stop() {
         let mut meter = Meter::new(true);
         assert_eq!(
             meter.note(),
             "Your sessions keep running until the restart step."
         );
-        meter.restart(1, 3, "daemon and sessions");
+        meter.apply(&restart(1, 3, "Saving the sessions"));
         assert_eq!(
             meter.note(),
             "Stopping the running sessions and restarting each component."

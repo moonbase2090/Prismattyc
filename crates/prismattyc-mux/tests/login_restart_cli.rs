@@ -3,6 +3,7 @@
 
 #![cfg(unix)]
 
+use prismattyc_mux::release_update::progress;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -1287,7 +1288,7 @@ fn session_configuration_restart_stops_only_consented_sessions() {
         &["session-config", "save", file.to_str().unwrap()],
     ));
 
-    let restarted = ok(&pmux(
+    let output = pmux(
         &socket,
         &root,
         &[],
@@ -1301,10 +1302,27 @@ fn session_configuration_restart_stops_only_consented_sessions() {
             "--worker",
             "--json",
         ],
-    ));
+    );
+    let restarted = ok(&output);
     assert!(
         restarted.contains("\"status\":\"restarted\""),
         "{restarted}"
+    );
+    // Without --progress, each step is a plain line with the same words the
+    // app shows.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let steps: Vec<_> = stderr
+        .lines()
+        .filter(|line| line.ends_with(" of 3)"))
+        .collect();
+    assert_eq!(
+        steps,
+        [
+            "Stopping the sessions (1 of 3)",
+            "Starting the new daemon (2 of 3)",
+            "Reconciling the official plug-ins (3 of 3)",
+        ],
+        "{stderr}"
     );
     assert!(
         !file.exists(),
@@ -1340,7 +1358,7 @@ fn saved_restart_restores_sessions_with_their_ids_and_scrollback() {
     let file = root.join("configuration.json");
     ok(&pmux(&["session-config", "save", file.to_str().unwrap()]));
 
-    let restarted = ok(&pmux(&[
+    let output = pmux(&[
         "restart",
         "--daemon",
         "--stop-sessions",
@@ -1348,7 +1366,31 @@ fn saved_restart_restores_sessions_with_their_ids_and_scrollback() {
         file.to_str().unwrap(),
         "--worker",
         "--json",
-    ]));
+        "--progress",
+    ]);
+    let restarted = ok(&output);
+    // Each step is reported on stderr as it starts, in order; stdout keeps
+    // only the report.
+    let steps: Vec<_> = String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .filter_map(progress::parse)
+        .collect();
+    let expected: Vec<_> = [
+        "Saving the sessions",
+        "Stopping the old daemon",
+        "Starting the new daemon",
+        "Checking the restored sessions",
+        "Reconciling the official plug-ins",
+    ]
+    .iter()
+    .enumerate()
+    .map(|(index, item)| progress::Progress::Restart {
+        item: (*item).into(),
+        index: index + 1,
+        count: 5,
+    })
+    .collect();
+    assert_eq!(steps, expected, "{}", text(&output));
     let report: serde_json::Value = serde_json::from_str(restarted.trim()).unwrap();
     let sessions = report["components"]
         .as_array()

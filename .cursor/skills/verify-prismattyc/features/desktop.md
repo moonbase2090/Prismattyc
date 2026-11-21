@@ -109,9 +109,11 @@ hung run. `PRISMATTYC_DUMP_PRESENT` with `{seq}` in the path writes each frame
 to its own file.
 
 - On Linux and Windows the fixture copies `--bins` into `OUT/install/bin` (the
-  updater refuses a build tree). Those binaries must report a version older
-  than the newest release; a proof build may lower the workspace version and
-  must say so.
+  updater refuses a build tree). For an update those binaries must report a
+  version older than the newest release; a proof build may lower the
+  workspace version and must say so. A build at or above the newest release
+  runs Restart components, which exercises the branch's own restart code;
+  only `--fail-download` requires an older build.
 - On macOS the updater replaces the installed `Prismattyc.app`, which must be
   older than the newest release. Put the branch binaries (built as that older
   version) inside the installed app's `Contents/MacOS` and pass that folder as
@@ -135,9 +137,25 @@ to its own file.
   release file short. Require `Failed at step 1 of 4: Download`, the
   component's download line, its download error and `Check again` in
   `final_rows`.
+- On every platform, `--fail-changed-sessions` starts one more session while
+  the dialog is open. Require `Failed at step 1` on `Checking the sessions`,
+  the receipt line `failed at Checking the sessions`, the error `The running
+  sessions changed since confirmation. No sessions were stopped.`, and every
+  session still running with its IDs; keep `failed.png`.
+- Every successful run checks the progress across the relaunch: the
+  relaunched app must show the finished meter on `Opening the windows (n of
+  n)` with every receipt line `done` (`receipt_rows`, `after-receipt.png`),
+  and `restart_steps` must list the restart's steps once each and in order,
+  from both apps' step lines: Saving the sessions, Stopping the old daemon,
+  Starting the new daemon, Checking the restored sessions (with `--save`; or
+  Stopping the sessions, Starting the new daemon without it), then
+  Reconciling the official plug-ins, Restarting the MCP adapter, Relaunching
+  the app, Opening the windows. Escape closes the receipt first; the notice
+  stays.
 
 Require `status` PASS and `stages` in order (`Download`, `Verify`, `Install`,
-`Restart` for an update; `Download` for the failure drive). `stages` comes from
+`Restart` for an update; `Download` for the failure drive; the first stage
+for `--fail-changed-sessions`). `stages` comes from
 `step_log`, the app's own `update progress:` lines, which record every step
 however briefly it shows. Require at least two download lines in `step_log`.
 Inspect the step captures: the bar is drawn, not text, and the install bar

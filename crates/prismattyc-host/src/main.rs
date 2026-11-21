@@ -6178,9 +6178,11 @@ fn open_modal(host: &HostState) -> Option<&'static str> {
 /// Paint the modal scrim when a modal is open, and keep frames coming while
 /// it fades in.
 fn paint_modal_scrim(host: &mut HostState, buffer: &mut [u32], width: usize, height: usize) {
-    let open = open_modal(host).is_some();
-    if host.modal_scrim.opens_with(open) {
-        host.modal_scrim.follow_system(system_accessibility::read());
+    let modal = open_modal(host);
+    let open = modal.is_some();
+    if host.modal_scrim.opens_with(modal) {
+        host.modal_scrim
+            .follow_system(modal, system_accessibility::read());
     }
     let Some(level) = host
         .modal_scrim

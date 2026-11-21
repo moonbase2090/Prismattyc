@@ -72,6 +72,8 @@ pub(crate) struct Scrim {
     /// The system's reduce-motion and reduce-transparency choices, read when
     /// the open modal opened.
     system: Preferences,
+    /// Which modal the choices above belong to.
+    modal: Option<&'static str>,
 }
 
 /// The scrim a frame painted, for native drivers' change lines.
@@ -84,14 +86,21 @@ pub(crate) struct Painted {
 }
 
 impl Scrim {
-    /// Whether the next `level` call with `open` set opens a modal.
-    pub(crate) fn opens_with(&self, open: bool) -> bool {
-        open && self.opened_at.is_none()
+    /// Whether `modal` is a dialog the system choices have not been read for:
+    /// one opening, or one handed over to by another without a frame between
+    /// (the palette's Transparency command).
+    pub(crate) fn opens_with(&self, modal: Option<&'static str>) -> bool {
+        modal.is_some() && modal != self.modal
     }
 
-    /// The system choices the modal opening now follows.
-    pub(crate) fn follow_system(&mut self, system: Preferences) {
+    /// The system choices `modal` follows. A dialog taking over from another
+    /// keeps the fade already under way but chooses its own look.
+    pub(crate) fn follow_system(&mut self, modal: Option<&'static str>, system: Preferences) {
+        self.modal = modal;
         self.system = system;
+        if self.opened_at.is_some() {
+            self.blur = !self.slow && !self.system.reduce_transparency;
+        }
     }
 
     /// How far the scrim has faded in, from 0 to 1, or `None` with no modal.
@@ -99,6 +108,7 @@ impl Scrim {
         if !open {
             self.opened_at = None;
             self.painted = None;
+            self.modal = None;
             return None;
         }
         let opened = *self.opened_at.get_or_insert_with(|| {
@@ -518,10 +528,13 @@ mod tests {
     #[test]
     fn the_system_reduce_motion_setting_shows_the_scrim_at_once() {
         let mut scrim = Scrim::default();
-        scrim.follow_system(Preferences {
-            reduce_motion: true,
-            reduce_transparency: false,
-        });
+        scrim.follow_system(
+            Some("palette"),
+            Preferences {
+                reduce_motion: true,
+                reduce_transparency: false,
+            },
+        );
         assert_eq!(scrim.level(true, Instant::now(), false), Some(1.0));
         let mut fading = Scrim::default();
         let t0 = Instant::now();
@@ -534,7 +547,7 @@ mod tests {
         let look = Look::new(ThemeVariant::Dark, 1.0);
         let painted = |system: Preferences| {
             let mut scrim = Scrim::default();
-            scrim.follow_system(system);
+            scrim.follow_system(Some("palette"), system);
             scrim.level(true, Instant::now(), true);
             let mut frame = vec![pack_argb(255, [100; 3]); 32 * 8];
             scrim.paint(&mut frame, 32, 8, look, 1.0);
@@ -551,11 +564,47 @@ mod tests {
     #[test]
     fn a_modal_opens_once_until_it_closes() {
         let mut scrim = Scrim::default();
-        assert!(!scrim.opens_with(false));
-        assert!(scrim.opens_with(true));
+        assert!(!scrim.opens_with(None));
+        assert!(scrim.opens_with(Some("palette")));
+        scrim.follow_system(Some("palette"), Preferences::default());
         scrim.level(true, Instant::now(), false);
-        assert!(!scrim.opens_with(true));
+        assert!(!scrim.opens_with(Some("palette")));
         scrim.level(false, Instant::now(), false);
-        assert!(scrim.opens_with(true));
+        assert!(scrim.opens_with(Some("palette")));
+    }
+
+    #[test]
+    fn a_dialog_handed_over_to_reads_the_system_choices_again() {
+        let look = Look::new(ThemeVariant::Dark, 1.0);
+        let mut scrim = Scrim::default();
+        let t0 = Instant::now();
+        // The palette opens with the system asking for nothing.
+        scrim.follow_system(Some("palette"), Preferences::default());
+        scrim.level(true, t0, false);
+        let mut frame = vec![pack_argb(255, [100; 3]); 32 * 8];
+        scrim.paint(&mut frame, 32, 8, look, 0.5);
+        assert_eq!(scrim.painted().map(|p| p.blur), Some(true));
+        // The person turns Reduce transparency and Reduce motion on, then
+        // picks Transparency from the palette: no frame has no modal.
+        assert!(scrim.opens_with(Some("transparency")));
+        scrim.follow_system(
+            Some("transparency"),
+            Preferences {
+                reduce_motion: true,
+                reduce_transparency: true,
+            },
+        );
+        assert!(!scrim.opens_with(Some("transparency")));
+        assert_eq!(
+            scrim.level(true, t0, false),
+            Some(1.0),
+            "the new dialog follows the new reduce-motion choice"
+        );
+        scrim.paint(&mut frame, 32, 8, look, 1.0);
+        assert_eq!(
+            scrim.painted().map(|p| p.blur),
+            Some(false),
+            "and the new reduce-transparency choice"
+        );
     }
 }

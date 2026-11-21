@@ -175,6 +175,8 @@ def main():
     assert {version_in(item['version'] or '') for item in before['installed']} == {old}, before
     passed(f'installed release {old}, newest release {latest}')
 
+    # A fresh installation may have no daemon yet; `up` leaves a running one alone.
+    run(installed_pmux, 'up', timeout=60)
     for name in ('work-1', 'work-2'):
         run(installed_pmux, 'new', '--no-attach', name, '--', *BUSY)
     sessions = set(run(installed_pmux, 'ls').stdout.split())

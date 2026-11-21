@@ -655,8 +655,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn menu_commands_return_while_the_helper_is_blocked_and_report_its_result() {
-        use std::os::unix::fs::PermissionsExt;
-
         struct Gate {
             dir: PathBuf,
             release: Option<Sender<()>>,
@@ -721,8 +719,7 @@ mod tests {
             ));
             std::fs::create_dir(&dir).unwrap();
             let helper = dir.join("pmux-gated");
-            std::fs::write(&helper, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\nprintf started > \"$0.started\"\nwhile [ ! -f \"$0.release\" ]; do sleep 0.01; done\nexit {exit}\n")).unwrap();
-            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+            crate::test_support::write_script(&helper, &format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\nprintf started > \"$0.started\"\nwhile [ ! -f \"$0.release\" ]; do sleep 0.01; done\nexit {exit}\n"), "700");
             let timed_out = Arc::new(AtomicBool::new(false));
             let timeout_flag = Arc::clone(&timed_out);
             let release_path = helper.with_extension("release");
@@ -837,12 +834,7 @@ mod tests {
             writeln!(file, "exit 0").unwrap();
         }
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&script).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&script, perms).unwrap();
-        }
+        crate::test_support::make_executable(&script, "755");
         let client = Client::spawn(Arc::new(|| {}));
         let started = Instant::now();
         assert!(client.submit_save(SaveJob {
@@ -929,12 +921,7 @@ mod tests {
         )
         .unwrap();
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&script).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&script, perms).unwrap();
-        }
+        crate::test_support::make_executable(&script, "755");
         let report = run_save(SaveJob {
             pmux: script,
             name: "review-a".into(),
@@ -1007,12 +994,7 @@ mod tests {
         )
         .unwrap();
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&script).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&script, perms).unwrap();
-        }
+        crate::test_support::make_executable(&script, "755");
         let view = prismattyc_mux::attach_tabs::AttachTabsFile {
             tabs: vec![prismattyc_mux::attach_tabs::AttachTabRecord {
                 title: "review-a".into(),

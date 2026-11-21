@@ -60,6 +60,17 @@ pub(crate) struct Scrim {
     pub(crate) opened_at: Option<Instant>,
     /// A blur went over budget while this modal was open.
     slow: bool,
+    /// What the last frame painted.
+    painted: Option<Painted>,
+}
+
+/// The scrim a frame painted, for native drivers' change lines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct Painted {
+    /// The fade-in had finished.
+    pub settled: bool,
+    /// It blurred as well as dimmed.
+    pub blur: bool,
 }
 
 impl Scrim {
@@ -68,6 +79,7 @@ impl Scrim {
         if !open {
             self.opened_at = None;
             self.slow = false;
+            self.painted = None;
             return None;
         }
         let opened = *self.opened_at.get_or_insert(now);
@@ -98,7 +110,16 @@ impl Scrim {
         if look.step > 0 && started.elapsed() > BLUR_BUDGET {
             self.slow = true;
         }
+        self.painted = Some(Painted {
+            settled: level >= 1.0,
+            blur: look.step > 0,
+        });
         level < 1.0
+    }
+
+    /// The scrim the last frame painted; `None` when it painted none.
+    pub(crate) fn painted(&self) -> Option<Painted> {
+        self.painted
     }
 }
 

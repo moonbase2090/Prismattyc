@@ -6061,25 +6061,43 @@ fn transient_overlay_visible(state: TransientOverlayState) -> bool {
 /// The rail's `+` chip stays a compact glyph. Chrome snapshots therefore do
 /// not see the typed name. Partial raster must treat this modal like the
 /// command palette: force a full frame while it is visible.
-/// A dialog, picker or modal menu is open over the panes. Each one paints
-/// over [`modal_scrim`]; inline prompts (find, tab rename), toasts, the
-/// walkthrough and the splash do not.
-fn modal_open(host: &HostState) -> bool {
-    host.theme_picker.is_some()
-        || host.palette.is_some()
-        || host.space_picker.is_some()
-        || host.context_menu.is_some()
-        || save_space_modal_open(host.space_rail.edit.as_ref())
-        || host.restore_prompt.is_some()
-        || host.restart_modal.is_some()
-        || host.session_prompt.is_some()
-        || host.transparency.is_some()
+/// The topmost dialog, picker or modal menu open over the panes. Each one
+/// paints over [`modal_scrim`]; inline prompts (find, tab rename), toasts,
+/// the walkthrough and the splash are not modals.
+fn open_modal(host: &HostState) -> Option<&'static str> {
+    if host.transparency.is_some() {
+        Some("transparency")
+    } else if host.session_prompt.is_some() {
+        Some("session prompt")
+    } else if host.restart_modal.is_some() {
+        Some("restart")
+    } else if host.restore_prompt.is_some() {
+        Some("restore prompt")
+    } else if save_space_modal_open(host.space_rail.edit.as_ref()) {
+        Some("new space")
+    } else if host.context_menu.is_some() {
+        Some(if host.settings.is_some() {
+            "settings"
+        } else if host.space_panel.is_some() {
+            "space panel"
+        } else {
+            "menu"
+        })
+    } else if host.space_picker.is_some() {
+        Some("space picker")
+    } else if host.palette.is_some() {
+        Some("palette")
+    } else if host.theme_picker.is_some() {
+        Some("theme picker")
+    } else {
+        None
+    }
 }
 
 /// Paint the modal scrim when a modal is open, and keep frames coming while
 /// it fades in.
 fn paint_modal_scrim(host: &mut HostState, buffer: &mut [u32], width: usize, height: usize) {
-    let open = modal_open(host);
+    let open = open_modal(host).is_some();
     let Some(level) = host
         .modal_scrim
         .level(open, Instant::now(), host.reduced_motion)

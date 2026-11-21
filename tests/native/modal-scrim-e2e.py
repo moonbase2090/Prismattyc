@@ -136,9 +136,9 @@ def band_metrics(rows, columns):
     return total / count, edges / count
 
 
-def free_margin(before, after):
-    """The widest band at the window's left or right edge that the modal
-    leaves uncovered. From the edge inward, in blocks of 1/128 of the width
+def free_margins(before, after):
+    """The bands at the window's left and right edges that the modal leaves
+    uncovered, widest first. Each is the widest band from its edge. From the edge inward, in blocks of 1/128 of the width
     (wider than the blur spreads a thin line), take the blocks whose mean
     brightness fell to between 40% and 85% of before, as only the scrim makes
     it, and leave out the last one, which may reach the modal."""
@@ -148,7 +148,7 @@ def free_margin(before, after):
     def mean(rows, columns):
         return sum(sum(row[x]) for row in rows for x in columns) / (3 * len(rows) * len(columns))
 
-    best = range(0)
+    bands = []
     for side in ('left', 'right'):
         taken = 0
         while (taken + 1) * step <= width // 4:
@@ -161,9 +161,8 @@ def free_margin(before, after):
             taken += 1
         taken = max(0, taken - 1)
         band = range(0, taken * step) if side == 'left' else range(width - taken * step, width)
-        if len(band) > len(best):
-            best = band
-    return best
+        bands.append(band)
+    return sorted(bands, key=len, reverse=True)
 
 
 def main():
@@ -295,11 +294,18 @@ def main():
         shutil.copy(frame(settled['seq']), out / f'{name}.png')
         screenshot(name)
         before_rows, after_rows = png_rgb(frame(before_seq)), png_rgb(frame(settled['seq']))
-        band = free_margin(before_rows, after_rows)
+        bands = [b for b in free_margins(before_rows, after_rows) if len(b) >= 8]
+        band = bands[0] if bands else range(0)
         assert len(band) >= 8, f'{name}: no dimmed margin beside the modal ({len(band)} columns)'
         before, after = band_metrics(before_rows, band), band_metrics(after_rows, band)
         assert before[1] > 0.3, f'{name}: the margin has no text to blur ({before[1]:.2f})'
         dim, edge = after[0] / before[0], after[1] / before[1]
+        # The widest band can reach the modal's own edge and keep contrast the
+        # blur removed elsewhere, so a blur is judged by the band that kept the
+        # least contrast; the absence of one by the widest band.
+        edges = [band_metrics(after_rows, b)[1] / band_metrics(before_rows, b)[1] for b in bands
+                 if band_metrics(before_rows, b)[1] > 0.3]
+        edge = min(edges) if not expect_flat and edges else edge
         side = 'left' if band.start == 0 else 'right'
         blur = settled['ui']['scrim']['blur']
         result['modals'][name] = {'modal': kind, 'margin': [band.start, band.stop], 'brightness': round(dim, 3),

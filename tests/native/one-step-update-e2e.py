@@ -212,13 +212,15 @@ def main():
             host.wait(30)
 
     # The installed older app, open on a session, so the update restarts it.
+    app_log = (out / 'app-host.log').open('w')
     app_host = subprocess.Popen([str(installed_host), '--no-splash', '--attach-session', 'work-2'], env=env,
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                stdout=app_log, stderr=subprocess.STDOUT)
     await_versions(installed_pmux, lambda report: any(item.get('component') == 'host' and
                                                       item.get('pid') == app_host.pid
                                                       for item in report['running']),
                    'the installed app registered')
     screenshot('before-update')
+    versions(installed_pmux)  # recorded: what runs just before the update
 
     update = run(installed_pmux, 'update', timeout=900, check=False)
     (out / 'receipt.txt').write_text(update.stdout)
@@ -275,4 +277,11 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except BaseException as error:
+        # Keep what the run saw; the arguments name the output directory.
+        out = Path(sys.argv[sys.argv.index('--out') + 1]).resolve()
+        if out.is_dir() and not (out / 'result.json').exists():
+            (out / 'result.json').write_text(json.dumps({'status': 'FAIL', 'error': repr(error)}, indent=2) + '\n')
+        raise

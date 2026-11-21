@@ -5,8 +5,9 @@
 //! the first modal, so every dialog, picker and modal menu gets the same one.
 //! It fades in when a modal opens; with reduced motion it appears at once.
 //! The blur runs on a copy of the frame four logical pixels to the pixel.
-//! Where that would cost too much (a very large window, or a frame that took
-//! longer than the budget) the scrim dims only.
+//! Where that would cost too much the scrim dims only: on a very large
+//! window, and for the next modal after a blurred frame took longer than the
+//! budget. A modal keeps the look it opened with until it closes.
 
 use std::time::{Duration, Instant};
 
@@ -26,7 +27,7 @@ const STEP_LOGICAL: f64 = 4.0;
 const BLUR_RADIUS: usize = 1;
 /// Above this many pixels the scrim dims only.
 const BLUR_PIXEL_LIMIT: usize = 6144 * 3456;
-/// A blur slower than this switches the open modal's scrim to dim only.
+/// After a blur slower than this, the next modal's scrim dims only.
 const BLUR_BUDGET: Duration = Duration::from_millis(12);
 
 /// What the scrim does to the frame behind a modal.
@@ -58,8 +59,11 @@ impl Look {
 pub(crate) struct Scrim {
     /// When the current modal opened; `None` while no modal is open.
     pub(crate) opened_at: Option<Instant>,
-    /// A blur went over budget while this modal was open.
+    /// The last blurred frame went over budget.
     slow: bool,
+    /// The open modal's scrim blurs. Chosen when it opens, from `slow`, and
+    /// kept until it closes, so a dialog never changes look while it is up.
+    blur: bool,
     /// What the last frame painted.
     painted: Option<Painted>,
 }
@@ -78,11 +82,13 @@ impl Scrim {
     pub(crate) fn level(&mut self, open: bool, now: Instant, reduced_motion: bool) -> Option<f32> {
         if !open {
             self.opened_at = None;
-            self.slow = false;
             self.painted = None;
             return None;
         }
-        let opened = *self.opened_at.get_or_insert(now);
+        let opened = *self.opened_at.get_or_insert_with(|| {
+            self.blur = !self.slow;
+            now
+        });
         if reduced_motion {
             return Some(1.0);
         }
@@ -100,15 +106,15 @@ impl Scrim {
         look: Look,
         level: f32,
     ) -> bool {
-        let look = if self.slow || width.saturating_mul(height) > BLUR_PIXEL_LIMIT {
+        let look = if !self.blur || width.saturating_mul(height) > BLUR_PIXEL_LIMIT {
             look.dim_only()
         } else {
             look
         };
         let started = Instant::now();
         paint(buffer, width, height, look, level);
-        if look.step > 0 && started.elapsed() > BLUR_BUDGET {
-            self.slow = true;
+        if look.step > 0 {
+            self.slow = started.elapsed() > BLUR_BUDGET;
         }
         self.painted = Some(Painted {
             settled: level >= 1.0,
@@ -466,24 +472,30 @@ mod tests {
     }
 
     #[test]
-    fn a_slow_scrim_dims_only() {
-        let look = Look::new(ThemeVariant::Dark, 2.0);
-        assert_eq!(look.step, 8);
-        assert_eq!(Look::new(ThemeVariant::Dark, 1.0).step, 4);
+    fn a_slow_blur_dims_only_from_the_next_modal() {
+        let look = Look::new(ThemeVariant::Dark, 1.0);
+        assert_eq!(look.step, 4);
+        assert_eq!(Look::new(ThemeVariant::Dark, 2.0).step, 8);
         assert_eq!(Look::new(ThemeVariant::Light, 1.0).dim, DIM_LIGHT);
-        let mut scrim = Scrim {
-            slow: true,
-            ..Scrim::default()
+        let (w, h) = (32, 8);
+        let edge = |scrim: &mut Scrim| {
+            let mut frame: Vec<u32> = (0..w * h)
+                .map(|i| pack_argb(255, if i % w < w / 2 { [0; 3] } else { [240; 3] }))
+                .collect();
+            assert!(!scrim.paint(&mut frame, w, h, look, 1.0));
+            channel(frame[w / 2 - 1])
         };
-        let (w, h) = (16, 4);
-        let mut frame: Vec<u32> = (0..w * h)
-            .map(|i| pack_argb(255, if i % w < w / 2 { [0; 3] } else { [240; 3] }))
-            .collect();
-        assert!(!scrim.paint(&mut frame, w, h, look, 1.0));
-        assert_eq!(
-            channel(frame[w / 2 - 1]),
-            0,
-            "a slow scrim leaves the edge sharp"
-        );
+        let t0 = Instant::now();
+        let mut scrim = Scrim::default();
+        scrim.level(true, t0, true);
+        // A blur over budget while this modal is up does not change its look.
+        scrim.slow = true;
+        assert!(edge(&mut scrim) > 0, "the open modal keeps its blur");
+        assert_eq!(scrim.painted().map(|p| p.blur), Some(true));
+        scrim.slow = true;
+        scrim.level(false, t0, true);
+        scrim.level(true, t0, true);
+        assert_eq!(edge(&mut scrim), 0, "the next modal dims only");
+        assert_eq!(scrim.painted().map(|p| p.blur), Some(false));
     }
 }

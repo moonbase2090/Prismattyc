@@ -9,6 +9,7 @@
 ### Fixed
 
 - **Restart components** no longer fails with "expected" the newest release's version when the installed Prismattyc is newer than that release; it restarts on the installed version.
+- On Linux and Windows, a key held while a window gains focus is no longer applied twice. One Escape pressed as the app reopened after an update closed both the update dialog and the result notice under it.
 
 ## [0.3.72] - 2026-11-20
 

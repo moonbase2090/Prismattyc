@@ -21265,7 +21265,11 @@ impl ApplicationHandler<UserAction> for App {
                     host.window.request_redraw();
                 }
             }
-            WindowEvent::KeyboardInput { mut event, .. } => {
+            WindowEvent::KeyboardInput {
+                mut event,
+                is_synthetic,
+                ..
+            } => {
                 // Wayland can deliver KeyboardInput before ModifiersChanged for the
                 // same physical chord. Fold modifier keys from this event into state.
                 let prior_chord = host.modifiers.control_key() && host.modifiers.shift_key();
@@ -21281,6 +21285,14 @@ impl ApplicationHandler<UserAction> for App {
                 }
 
                 if event.state != ElementState::Pressed {
+                    return;
+                }
+                // A window that gains focus while a key is held gets a
+                // synthetic press for it (X11, Windows), then the real press
+                // when it arrives. Acting on both would apply one key twice:
+                // one Escape would close a dialog and the panel under it.
+                // Modifier state above still follows synthetic events.
+                if is_synthetic {
                     return;
                 }
                 // Every dialog, menu and overlay below matches Escape by its

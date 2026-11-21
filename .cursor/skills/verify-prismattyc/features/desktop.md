@@ -185,6 +185,25 @@ restart step. The
 drive opens the menu with Ctrl+Shift+Y (Option+letter can be a dead key over a
 console) and follows render-status `space_details.selected` to the row it needs.
 
+## Modal scrim
+
+Every modal (palette, pickers, settings, Transparency, the update panel and
+dialog, the new-space prompt, context menus) paints over one shared scrim,
+`modal_scrim.rs`: it dims the frame and blurs it slightly, fading in unless
+`reduced_motion = true`. `python3 tests/native/modal-scrim-e2e.py --bins
+"$verify_bins" --out "$verify_evidence/scrim" --screenshots` opens eight of
+them in a real window over a session showing text. It keeps `before.png`,
+one PNG per modal, `after.png`, and with `--screenshots` the whole screen at
+each step (`screen-*.png`). Require PASS. For each modal, the left strip of the
+window must be dimmed to between 45% and 85% of its earlier brightness, and
+blurred: its edge contrast must fall well below the dimming alone. The change
+line must say the scrim blurs, and Escape must leave no scrim and the strip's
+old brightness. The drive waits on `PRISMATTYC_UI_EVENTS` lines; their `modal`
+and `scrim` (`settled`, `blur`) fields name the open modal and its scrim. On a
+macOS guest, pass `--key-relay DIR`: the relay then also answers
+`{"snap": NAME}` with a console screenshot. Show the owner the captures for
+any change to the scrim's look.
+
 ## Gotchas
 
 Keep fixture environments separate from the running desktop. Read `host_pid`, expected space, and a successful frame in `render-status` before injecting events. The present PNG is the host framebuffer, not an OS-level screenshot. Mac presenters, X11, native Wayland, and Windows are distinct proof targets. Existing scripts under `tests/native/docker/` cover Linux native paths; follow `docs/testing-policy.md` for their serialized execution and compositor limits.

@@ -14,7 +14,8 @@ text, opens the app on it, and then opens, one at a time:
 - the Restart to update confirmation, opened from the update panel.
 
 For each one it waits until the scrim has finished fading in, then checks a
-strip at the left edge of the window that no modal covers. Against the frame
+strip at the left edge of the window that no modal covers (the window opens
+112 cells wide, wider than any modal). Against the frame
 just before the modal opened, the strip must be dimmed (its mean brightness
 down to between 45% and 85%) and blurred (its edge contrast down well beyond
 the dimming alone). Escape then closes every modal; the first frame without
@@ -66,6 +67,7 @@ MODALS = [('palette', 'p', 'palette'), ('theme-picker', 'k', 'theme picker'),
           ('transparency', 'j', 'transparency'), ('switcher', 'o', 'space picker'),
           ('new-space', 'l', 'new space'), ('settings', 'i', 'settings'),
           ('update-panel', 'y', 'space panel')]
+WINDOW_CELLS = '112x34'
 TEXT = 'the quick brown fox jumps over the lazy dog 0123456789'
 DONE = 'SCRIM-READY'
 
@@ -149,7 +151,9 @@ def main():
     if socket_path:
         socket_path.parent.mkdir(mode=0o700)
     env.update(PMUX=str(bins / ('pmux' + EXE)), PRISMATTYC_CONFIG=str(config), PRISMATTYC_NO_AGENT_SKILLS='1',
-               PRISMATTYC_UI_EVENTS='1', PRISMATTYC_DUMP_PRESENT=str(frames / 'frame-{seq}.png'))
+               PRISMATTYC_UI_EVENTS='1', PRISMATTYC_DUMP_PRESENT=str(frames / 'frame-{seq}.png'),
+               # Wider than the widest modal, so the strip stays outside it.
+               PRISMATTYC_E2E_WINDOW_CELLS=WINDOW_CELLS)
     if socket_path:
         env['PMUX_SOCKET'] = str(socket_path)
     if os.name == 'nt':

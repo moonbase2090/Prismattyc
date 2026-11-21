@@ -52,8 +52,9 @@ back to `false` stops the feed and discards its history.
 
 After upgrading, a daemon with no saved plug-in state enables both packages
 as above; one you disabled stays off. On Linux and Windows, an
-older updater still manages six core executables. Update the core first,
-then run the new command `pmux update --repair-monitor-launcher`; use
+updater from 0.3.72 or earlier manages only the six core executables; later
+`pmux update` runs include the launcher. After an older updater, run the new
+command `pmux update --repair-monitor-launcher`; use
 `--from-monitor-version 0.3.54` for an unreceipted official 0.3.54 launcher.
 See [launcher repair](../../docs/update-and-restart.md#replace-an-older-activity-monitor-launcher)
 for ownership checks, dry checks, and rollback. macOS replaces the verified app.

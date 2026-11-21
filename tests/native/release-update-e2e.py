@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Exercise the updater CLI with local curl fixtures and disposable installations."""
+"""Exercise the updater CLI with local curl fixtures and disposable installations.
+
+The install transaction runs through `update --json`, the install-only report;
+plain `pmux update` adds the launcher and restart steps (one-step-update-e2e.py)."""
 import argparse,hashlib,json,os,platform
 from pathlib import Path
 import subprocess,tempfile,time
@@ -42,7 +45,7 @@ pathlib.Path(args[args.index('--output')+1]).write_bytes((root/'assets'/name).re
         for name in names:assert subprocess.check_output([str(bins/name),'--version'],text=True).strip()==f'{name} {version}'
     metadata=release(initial)
     cli('--check','--json')
-    child=subprocess.Popen([str(binary),'update','--bin-dir',str(bins)],env=dict(env,INTERRUPT='1'),stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
+    child=subprocess.Popen([str(binary),'update','--json','--bin-dir',str(bins)],env=dict(env,INTERRUPT='1'),stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
     try:
         deadline=time.monotonic()+8
         while not (root/'paused').exists():
@@ -54,13 +57,13 @@ pathlib.Path(args[args.index('--output')+1]).write_bytes((root/'assets'/name).re
     installed('0.1.319');records.append(dict(check='interrupted-download-preserves-all-old-binaries'))
     # Corrupt one member without changing the trusted fixture digest.
     corrupted=assets/metadata['assets'][2]['name'];original=corrupted.read_bytes();corrupted.write_bytes(original.replace(b'echo',b'exit'))
-    cli('--bin-dir',str(bins),success=False);installed('0.1.319');corrupted.write_bytes(original)
-    cli('--bin-dir',str(bins));installed(initial)
+    cli('--json','--bin-dir',str(bins),success=False);installed('0.1.319');corrupted.write_bytes(original)
+    cli('--json','--bin-dir',str(bins));installed(initial)
     assert not list((root/'data/prismattyc/updates').glob('.stage-*'))
     cli('--rollback');installed('0.1.319')
-    cli('--bin-dir',str(bins));installed(initial)
+    cli('--json','--bin-dir',str(bins));installed(initial)
     metadata=release(following);metadata['immutable']=False;(root/'metadata.json').write_text(json.dumps(metadata))
-    cli('--bin-dir',str(bins),success=False);installed(initial)
+    cli('--json','--bin-dir',str(bins),success=False);installed(initial)
     release(following);cli('--json');installed(following)
     cli('--rollback');installed(initial)
 (out/'result.json').write_text(json.dumps(dict(status='PASS',transport='local curl fixture; no production release published',records=records),indent=2)+'\n')

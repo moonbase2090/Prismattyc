@@ -516,6 +516,7 @@ fn complete_install(
     // MCP supervisor all use the same activated release.
     let installed = prismattyc_mux::release_update::installed_binary("pmux")
         .unwrap_or_else(|| pmux.to_path_buf());
+    let launcher = monitor_launcher(&installed, plan, report);
     report(Event::Doing("Checking the installed versions"));
     let installed_versions: Value = serde_json::from_str(&run(&installed, &["versions"])?)?;
     verify_installed_versions(&installed_versions, plan.target())?;
@@ -586,9 +587,10 @@ fn complete_install(
     report(restart_step("Relaunching the app", steps + 2, steps));
     Ok((
         format!(
-            "Prismattyc {} is installed. The daemon restarted on {}.\n{}\n{}{}",
+            "Prismattyc {} is installed. The daemon restarted on {}.\n{}{}\n{}{}",
             plan.target(),
             actual,
+            launcher,
             space_panel::maintenance_result(&mcp),
             space_panel::maintenance_result(&versions.to_string()),
             host_lines
@@ -596,6 +598,25 @@ fn complete_install(
         restored,
         steps,
     ))
+}
+
+/// The monitor launcher is part of the update on Linux and Windows (the
+/// macOS app carries its own). Returns the result's line for it, ending in a
+/// newline, or nothing on macOS. A launcher that cannot be replaced is kept
+/// and named with what to do; it does not stop the restart.
+fn monitor_launcher(pmux: &Path, plan: &Plan, report: &dyn Fn(Event)) -> String {
+    if cfg!(target_os = "macos") {
+        return String::new();
+    }
+    report(Event::Doing("Updating the monitor launcher"));
+    let launcher =
+        prismattyc_mux::release_update::repair_monitor_launcher(pmux, &plan.installed, None);
+    let mut line = format!("Monitor launcher: {}\n", launcher.summary(plan.target()));
+    if let Some(next) = launcher.next(plan.target()) {
+        line.push_str(&next);
+        line.push('\n');
+    }
+    line
 }
 
 /// Steps the app takes itself after the daemon restart: the MCP adapter,
@@ -1145,6 +1166,69 @@ echo note >&2"#,
             ..carried
         };
         assert!(without_meter.finish().is_none(), "nothing to finish");
+    }
+
+    // The launcher-step tests that use it run on Linux and macOS only.
+    #[cfg(unix)]
+    fn update_plan(installed: &str, available: &str) -> Plan {
+        Plan {
+            installed: installed.into(),
+            available: available.into(),
+            update_available: true,
+            sessions: Vec::new(),
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn the_update_includes_the_monitor_launcher_checked_against_the_previous_release() {
+        let pmux = fake_pmux(
+            "launcher",
+            r#"echo "$@" > "$(dirname "$0")/args"
+echo '{"status":"repaired","binary":"pmux-activity-monitor","version":"0.3.73","warning":null}'"#,
+        );
+        let steps = std::cell::RefCell::new(Vec::new());
+        let line = monitor_launcher(&pmux, &update_plan("0.3.72", "0.3.73"), &|event| {
+            steps.borrow_mut().push(format!("{event:?}"));
+        });
+        assert_eq!(line, "Monitor launcher: installed 0.3.73\n");
+        let args = std::fs::read_to_string(pmux.with_file_name("args")).unwrap();
+        assert_eq!(
+            args.trim(),
+            "update --repair-monitor-launcher --json --from-monitor-version 0.3.72"
+        );
+        assert_eq!(
+            *steps.borrow(),
+            ["Doing(\"Updating the monitor launcher\")"]
+        );
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn a_launcher_that_cannot_be_replaced_is_kept_and_named_without_stopping_the_update() {
+        let pmux = fake_pmux(
+            "launcher-kept",
+            "echo 'Error: existing monitor does not match the immutable official source asset' >&2\nexit 1",
+        );
+        let line = monitor_launcher(&pmux, &update_plan("0.3.72", "0.3.73"), &|_| {});
+        let lines: Vec<&str> = line.lines().collect();
+        assert_eq!(
+            lines[0],
+            "Monitor launcher: kept the existing launcher: existing monitor does not match the immutable official source asset"
+        );
+        assert!(
+            lines[1].contains("pmux update --repair-monitor-launcher --from-monitor-version"),
+            "{line}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_macos_app_carries_its_own_monitor_launcher() {
+        let pmux = fake_pmux("launcher-macos", r#"echo ran > "$(dirname "$0")/args""#);
+        let line = monitor_launcher(&pmux, &update_plan("0.3.72", "0.3.73"), &|_| {});
+        assert_eq!(line, "");
+        assert!(!pmux.with_file_name("args").exists());
     }
 
     #[test]

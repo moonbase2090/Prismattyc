@@ -35,7 +35,17 @@ or its scrim changed, carrying the frame's dump sequence
 (PRISMATTYC_DUMP_PRESENT with {seq}). Keys go to the host as in
 update-progress-e2e.py (Quartz events, XTEST, SendInput, or --key-relay).
 
+--system names what the operating system is set to when the drive starts, which
+the operator sets first (macOS Accessibility > Display, Windows Settings, GNOME
+Settings or gsettings): none (the default), reduce-motion, reduce-transparency
+or both. The drive then also requires what the setting changes. With reduce
+motion each scrim is already settled on the modal's first change line. With
+reduce transparency the scrim dims only: blur false and edge contrast kept.
+Reduce motion alone must still blur. The first change line's state is recorded
+as `settled_at_once`.
+
   modal-scrim-e2e.py --bins target/release --out DIR [--key-relay DIR] [--screenshots]
+                     [--system none|reduce-motion|reduce-transparency|both]
 """
 import argparse
 import importlib.util
@@ -162,7 +172,11 @@ def main():
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--key-relay', type=Path)
     parser.add_argument('--screenshots', action='store_true', help='also capture the whole screen')
+    parser.add_argument('--system', choices=['none', 'reduce-motion', 'reduce-transparency', 'both'], default='none',
+                        help='the system accessibility setting in force; the drive checks its effect')
     args = parser.parse_args()
+    expect_still = args.system in ('reduce-motion', 'both')
+    expect_flat = args.system in ('reduce-transparency', 'both')
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=False)
     frames = out / 'frames'
@@ -193,7 +207,7 @@ def main():
                    XDG_DATA_HOME=str(out / 'data'), XDG_CONFIG_HOME=str(out / 'config'),
                    XDG_STATE_HOME=str(out / 'state'))
     env['PATH'] = str(bins) + os.pathsep + env['PATH']
-    result = {'status': 'FAIL', 'platform': sys.platform, 'checks': [], 'modals': {}}
+    result = {'status': 'FAIL', 'platform': sys.platform, 'system': args.system, 'checks': [], 'modals': {}}
     owned, readers = [], []
     keys = app = None
 
@@ -263,7 +277,9 @@ def main():
         return before_seq, settle(name, kind, before_seq, opened)
 
     def settle(name, kind, before_seq, opened):
-        settled = opened if (opened['ui'].get('scrim') or {}).get('settled') else change(
+        at_once = bool((opened['ui'].get('scrim') or {}).get('settled'))
+        assert at_once or not expect_still, f'{name}: the scrim faded in although the system asks for reduced motion'
+        settled = opened if at_once else change(
             lambda ui: ui.get('modal') == kind and (ui.get('scrim') or {}).get('settled'), f'{name} scrim settled')
         shutil.copy(frame(settled['seq']), out / f'{name}.png')
         screenshot(name)
@@ -276,12 +292,19 @@ def main():
         side = 'left' if band.start == 0 else 'right'
         blur = settled['ui']['scrim']['blur']
         result['modals'][name] = {'modal': kind, 'margin': [band.start, band.stop], 'brightness': round(dim, 3),
-                                  'edges': round(edge, 3), 'blur': blur, 'before_seq': before_seq,
+                                  'edges': round(edge, 3), 'blur': blur, 'settled_at_once': at_once, 'before_seq': before_seq,
                                   'seq': settled['seq']}
         assert 0.45 <= dim <= 0.85, f'{name}: margin brightness went to {dim:.2f} of before'
+        if expect_flat:
+            assert not blur, f'{name}: the scrim blurred although the system asks for reduced transparency'
+            assert edge >= dim * 0.8, f'{name}: edges fell to {edge:.2f} against brightness {dim:.2f}; the frame was blurred'
+            record(f'{name}: {side} margin ({len(band)} px) dimmed to {dim:.2f}, not blurred (edges {edge:.2f}), '
+                   f'{"at once" if at_once else "faded in"} behind the {kind}')
+            return settled
         assert blur, f'{name}: the scrim fell back to dim only'
         assert edge < dim * 0.8, f'{name}: edges kept {edge:.2f} against brightness {dim:.2f}; no blur'
-        record(f'{name}: {side} margin ({len(band)} px) dimmed to {dim:.2f} and blurred (edges {edge:.2f}) behind the {kind}')
+        record(f'{name}: {side} margin ({len(band)} px) dimmed to {dim:.2f} and blurred (edges {edge:.2f}), '
+               f'{"at once" if at_once else "faded in"} behind the {kind}')
         return settled
 
     def close_all(label):

@@ -3,7 +3,9 @@
 //!
 //! The frame paints the scrim once, after the panes and chrome and before
 //! the first modal, so every dialog, picker and modal menu gets the same one.
-//! It fades in when a modal opens; with reduced motion it appears at once.
+//! It fades in when a modal opens; with reduced motion, from the app's
+//! `reduced_motion` setting or the system's, it appears at once. When the
+//! system asks for reduced transparency the scrim dims without blurring.
 //! The blur runs on a copy of the frame four logical pixels to the pixel.
 //! Where that would cost too much the scrim dims only: on a very large
 //! window, and for the next modal after a blurred frame took longer than the
@@ -12,6 +14,7 @@
 use std::time::{Duration, Instant};
 
 use crate::raster::{alpha_of, pack_argb, unpack_rgb};
+use crate::system_accessibility::Preferences;
 use crate::theme::ThemeVariant;
 
 /// Fade-in when a modal opens.
@@ -66,6 +69,9 @@ pub(crate) struct Scrim {
     blur: bool,
     /// What the last frame painted.
     painted: Option<Painted>,
+    /// The system's reduce-motion and reduce-transparency choices, read when
+    /// the open modal opened.
+    system: Preferences,
 }
 
 /// The scrim a frame painted, for native drivers' change lines.
@@ -78,6 +84,16 @@ pub(crate) struct Painted {
 }
 
 impl Scrim {
+    /// Whether the next `level` call with `open` set opens a modal.
+    pub(crate) fn opens_with(&self, open: bool) -> bool {
+        open && self.opened_at.is_none()
+    }
+
+    /// The system choices the modal opening now follows.
+    pub(crate) fn follow_system(&mut self, system: Preferences) {
+        self.system = system;
+    }
+
     /// How far the scrim has faded in, from 0 to 1, or `None` with no modal.
     pub(crate) fn level(&mut self, open: bool, now: Instant, reduced_motion: bool) -> Option<f32> {
         if !open {
@@ -86,10 +102,10 @@ impl Scrim {
             return None;
         }
         let opened = *self.opened_at.get_or_insert_with(|| {
-            self.blur = !self.slow;
+            self.blur = !self.slow && !self.system.reduce_transparency;
             now
         });
-        if reduced_motion {
+        if reduced_motion || self.system.reduce_motion {
             return Some(1.0);
         }
         let t = (now.saturating_duration_since(opened).as_secs_f32() / FADE.as_secs_f32()).min(1.0);
@@ -497,5 +513,49 @@ mod tests {
         scrim.level(true, t0, true);
         assert_eq!(edge(&mut scrim), 0, "the next modal dims only");
         assert_eq!(scrim.painted().map(|p| p.blur), Some(false));
+    }
+
+    #[test]
+    fn the_system_reduce_motion_setting_shows_the_scrim_at_once() {
+        let mut scrim = Scrim::default();
+        scrim.follow_system(Preferences {
+            reduce_motion: true,
+            reduce_transparency: false,
+        });
+        assert_eq!(scrim.level(true, Instant::now(), false), Some(1.0));
+        let mut fading = Scrim::default();
+        let t0 = Instant::now();
+        fading.level(true, t0, false);
+        assert!(fading.level(true, t0, false).unwrap() < 1.0);
+    }
+
+    #[test]
+    fn the_system_reduce_transparency_setting_dims_without_blur() {
+        let look = Look::new(ThemeVariant::Dark, 1.0);
+        let painted = |system: Preferences| {
+            let mut scrim = Scrim::default();
+            scrim.follow_system(system);
+            scrim.level(true, Instant::now(), true);
+            let mut frame = vec![pack_argb(255, [100; 3]); 32 * 8];
+            scrim.paint(&mut frame, 32, 8, look, 1.0);
+            scrim.painted().unwrap()
+        };
+        let reduced = painted(Preferences {
+            reduce_motion: false,
+            reduce_transparency: true,
+        });
+        assert!(reduced.settled && !reduced.blur);
+        assert!(painted(Preferences::default()).blur);
+    }
+
+    #[test]
+    fn a_modal_opens_once_until_it_closes() {
+        let mut scrim = Scrim::default();
+        assert!(!scrim.opens_with(false));
+        assert!(scrim.opens_with(true));
+        scrim.level(true, Instant::now(), false);
+        assert!(!scrim.opens_with(true));
+        scrim.level(false, Instant::now(), false);
+        assert!(scrim.opens_with(true));
     }
 }

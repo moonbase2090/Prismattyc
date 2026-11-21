@@ -14,9 +14,10 @@ text, opens the app on it, and then opens, one at a time:
 - the Restart to update confirmation, opened from the update panel.
 
 For each one it waits until the scrim has finished fading in, then checks a
-strip at the left edge of the window that no modal covers: its left 4%, over
-the whole height (modals keep a wider margin; the window opens 112 cells
-wide). Against the frame
+strip at an edge of the window that the modal does not cover: 4% of the
+width at the left or the right edge (a docked menu covers one of them), over
+the whole height. Modals keep a wider margin; the window opens 112 cells
+wide. Against the frame
 just before the modal opened, the strip must be dimmed (its mean brightness
 down to between 45% and 85%) and blurred (its edge contrast down well beyond
 the dimming alone). Escape then closes every modal; the first frame without
@@ -113,15 +114,17 @@ def png_rgb(path):
     return rows
 
 
-def strip_metrics(rows):
-    """Mean brightness and mean horizontal edge contrast of the left strip:
-    the window's left 4% (narrower than any modal's margin), over its whole
-    height, where the chrome's and the pane's text give it edges."""
+def strip_metrics(rows, side='left'):
+    """Mean brightness and mean horizontal edge contrast of a strip at the
+    window's left or right edge: 4% of its width (narrower than any modal's
+    margin), over its whole height, where the chrome's and the pane's text
+    give it edges."""
     height, width = len(rows), len(rows[0])
     x1 = max(8, width * 4 // 100)
+    span = slice(0, x1) if side == 'left' else slice(width - x1, width)
     total = edges = count = 0
     for row in rows:
-        values = [sum(px) / 3 for px in row[:x1]]
+        values = [sum(px) / 3 for px in row[span]]
         total += sum(values)
         edges += sum(abs(b - a) for a, b in zip(values, values[1:]))
         count += len(values)
@@ -237,16 +240,23 @@ def main():
             lambda ui: ui.get('modal') == kind and (ui.get('scrim') or {}).get('settled'), f'{name} scrim settled')
         shutil.copy(frame(settled['seq']), out / f'{name}.png')
         screenshot(name)
-        before = strip_metrics(png_rgb(frame(before_seq)))
-        after = strip_metrics(png_rgb(frame(settled['seq'])))
-        dim, edge = after[0] / before[0], after[1] / before[1]
+        before_rows, after_rows = png_rgb(frame(before_seq)), png_rgb(frame(settled['seq']))
+        # A modal docked at one edge covers that strip; measure the other.
+        ratios = {}
+        for side in ('left', 'right'):
+            before, after = strip_metrics(before_rows, side), strip_metrics(after_rows, side)
+            ratios[side] = (after[0] / before[0], after[1] / max(before[1], 1e-6))
+        side = min(ratios, key=lambda key: ratios[key][0])
+        dim, edge = ratios[side]
+        assert strip_metrics(before_rows, side)[1] > 0.3, f'{name}: the {side} strip has no text to blur'
         blur = settled['ui']['scrim']['blur']
-        result['modals'][name] = {'modal': kind, 'brightness': round(dim, 3), 'edges': round(edge, 3),
-                                  'blur': blur, 'before_seq': before_seq, 'seq': settled['seq']}
+        result['modals'][name] = {'modal': kind, 'strip': side, 'brightness': round(dim, 3),
+                                  'edges': round(edge, 3), 'blur': blur, 'before_seq': before_seq,
+                                  'seq': settled['seq']}
         assert 0.45 <= dim <= 0.85, f'{name}: strip brightness went to {dim:.2f} of before'
         assert blur, f'{name}: the scrim fell back to dim only'
         assert edge < dim * 0.8, f'{name}: edges kept {edge:.2f} against brightness {dim:.2f}; no blur'
-        record(f'{name}: dimmed to {dim:.2f} and blurred (edges {edge:.2f}) behind the {kind}')
+        record(f'{name}: {side} strip dimmed to {dim:.2f} and blurred (edges {edge:.2f}) behind the {kind}')
         return settled
 
     def close_all(label):

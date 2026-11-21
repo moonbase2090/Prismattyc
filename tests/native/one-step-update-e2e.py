@@ -286,16 +286,21 @@ def main():
     assert any(line.startswith('  Daemon: deferred') for line in lines), lines
     nexts = lines[lines.index('Next:') + 1:]
     assert any(line.startswith('  - Daemon: ') and '--stop-sessions' in line for line in nexts), lines
-    # The older app renews its registration only while it draws. The receipt
-    # either restarted the window or names it idle with what to do.
+    # The older window either restarted, or the receipt names why it did not
+    # (it deferred, giving its reason, or it stopped answering while idle)
+    # with what to do next.
     window = [line for line in lines if line.startswith(f'  App window {app_host.pid}: ')]
     assert len(window) == 1, lines
     window_restarted = window[0].endswith(': restarted')
+    how = 'restarted'
     if not window_restarted:
-        assert window[0].startswith(f'  App window {app_host.pid}: idle ('), lines
-        assert any(line.startswith('  - App window: Close and reopen') for line in nexts), lines
-        assert app_host.poll() is None, 'the idle window keeps running'
-    how = 'restarted' if window_restarted else 'named idle with its next step'
+        outcome = window[0][len(f'  App window {app_host.pid}: '):].split(' (')[0]
+        assert outcome in ('deferred', 'idle'), lines
+        expected = {'deferred': '  - App window: Fix what the window names',
+                    'idle': '  - App window: Close and reopen'}[outcome]
+        assert any(line.startswith(expected) for line in nexts), lines
+        assert app_host.poll() is None, 'the window keeps running'
+        how = f'named {outcome} with its reason and next step'
     passed(f'one receipt: core installed, launcher included, the open window {how}, daemon deferred with its next step')
 
     # The installed CLI is now the new release's.

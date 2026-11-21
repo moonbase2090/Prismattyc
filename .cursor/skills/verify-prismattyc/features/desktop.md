@@ -197,11 +197,14 @@ python3 tests/native/one-step-update-e2e.py --pmux ~/.local/bin/pmux \
   clicks the chip, waits for the Restart to update review, then closes it
   with Escape. Toast text never appears in change lines.
 - The receipt must name the core and launcher on the new release and the
-  daemon deferred with its next step. The open older window must be either
-  restarted (then `pmux versions` shows it on the new release) or, when that
-  release's app stopped renewing its registration while idle, named `idle`
-  with "Close and reopen that window". Its session prints steadily so it
-  usually stays registered. Every installed component must be on the new
+  daemon deferred with its next step. The open older window must be
+  restarted (then `pmux versions` shows it on the new release), or named
+  `deferred` with its own reason and "Fix what the window names", or, when
+  that release's app stopped renewing its registration while idle, named
+  `idle` with "Close and reopen that window". Its session prints steadily so
+  it usually stays registered. On macOS the windows the drive opens start
+  with automatic update checks off (a private `PRISMATTYC_CONFIG`): the
+  launch update prompt there is modal and would hold their main loop. Every installed component must be on the new
   release and the sessions keep running. A second run must find the core and
   launcher current.
 - `--idle-host` (macOS; Linux and Windows use the `--notice` window) runs this

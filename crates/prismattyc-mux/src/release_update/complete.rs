@@ -232,6 +232,7 @@ fn component_from(value: &Value) -> Component {
     };
     let status = text(&source["status"]).unwrap_or_else(|| "unknown".into());
     let detail = text(&source["detail"])
+        .map(|detail| detail.trim().to_string())
         .filter(|detail| !detail.is_empty())
         .or_else(|| {
             value["sessions"]
@@ -768,7 +769,7 @@ mod tests {
             {"component":"daemon","status":"deferred","detail":"sessions are running; use --stop-sessions only when ready to end them","sessions":["a","b"]},
             {"component":"plugins","status":"pending","detail":"bundled plug-in migration waits for the daemon restart"},
             {"component":"host","response":{"id":"r1","pid":41,"status":"restarted","detail":"","version":"0.3.73"}},
-            {"component":"host","response":{"id":"r2","pid":42,"status":"deferred","detail":"owns a local terminal","version":"0.3.72"}},
+            {"component":"host","response":{"id":"r2","pid":42,"status":"deferred","detail":" Restart deferred: owns a local terminal","version":"0.3.72"}},
             {"component":"mcp","status":"not_registered","detail":"no cooperative component found"},
         ]})
         .to_string()
@@ -791,7 +792,7 @@ mod tests {
         let window = by("host", Some(42));
         assert_eq!(
             (window.status.as_str(), window.detail.as_deref()),
-            ("deferred", Some("owns a local terminal"))
+            ("deferred", Some("Restart deferred: owns a local terminal"))
         );
         assert!(window
             .next
@@ -905,7 +906,7 @@ mod tests {
         assert!(lines.contains(&"  Daemon: deferred (sessions are running; use --stop-sessions only when ready to end them)"), "{text}");
         assert!(lines.contains(&"  App window 41: restarted"), "{text}");
         assert!(
-            lines.contains(&"  App window 42: deferred (owns a local terminal)"),
+            lines.contains(&"  App window 42: deferred (Restart deferred: owns a local terminal)"),
             "{text}"
         );
         assert!(lines.contains(&"  MCP adapter: none running"), "{text}");

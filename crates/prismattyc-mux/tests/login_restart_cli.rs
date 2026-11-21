@@ -80,6 +80,33 @@ fn start_server_with_env(socket: &Path, root: &Path, env: &[(&str, &str)]) -> Se
     guard
 }
 
+/// A shell snippet that, once the command before it has finished, reports
+/// completion through a FIFO, plus the receiver that sees the report.
+/// The command's own output file exists before it holds the output, so
+/// waiting for the file is not waiting for the command.
+fn completion_signal(root: &Path) -> (String, std::sync::mpsc::Receiver<()>) {
+    let fifo = root.join("launch-done");
+    assert!(
+        prismattyc_process::status(Command::new("mkfifo").arg(&fifo))
+            .unwrap()
+            .success()
+    );
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let reader = fifo.clone();
+    std::thread::spawn(move || {
+        if std::fs::read(&reader).is_ok() {
+            let _ = sender.send(());
+        }
+    });
+    (format!("echo > '{}'", fifo.display()), receiver)
+}
+
+fn await_completion(signal: &std::sync::mpsc::Receiver<()>, seconds: u64) {
+    signal
+        .recv_timeout(Duration::from_secs(seconds))
+        .expect("the restored command never reported completion");
+}
+
 fn wait_for_server_ready(
     child: &mut Child,
     socket: &Path,
@@ -602,7 +629,8 @@ fn session_configuration_restores_names_directories_and_commands_without_replay(
         .unwrap(),
     );
     let file = root.join("configuration.json");
-    let launch = "printf restored >> launches".to_string();
+    let (done, signal) = completion_signal(&root);
+    let launch = format!("printf restored >> launches && {done}");
     ok(&pmux(
         &socket,
         &root,
@@ -637,10 +665,7 @@ fn session_configuration_restores_names_directories_and_commands_without_replay(
         &[],
         &["session-config", "restore", file.to_str().unwrap()],
     ));
-    let deadline = Instant::now() + Duration::from_secs(8);
-    while !cwd.join("launches").exists() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    await_completion(&signal, 8);
     assert_eq!(
         std::fs::read_to_string(cwd.join("launches")).unwrap(),
         "restored"
@@ -693,7 +718,8 @@ fn restore_replays_the_saved_command_into_a_pane_that_looks_busy() {
         .unwrap(),
     );
     let file = root.join("configuration.json");
-    let launch = "printf restored >> launches".to_string();
+    let (done, signal) = completion_signal(&root);
+    let launch = format!("printf restored >> launches && {done}");
     ok(&pmux(
         &socket,
         &root,
@@ -714,10 +740,7 @@ fn restore_replays_the_saved_command_into_a_pane_that_looks_busy() {
         !restored.contains("Kept the program already running"),
         "restore skipped the command in its own new pane: {restored}"
     );
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while !cwd.join("launches").exists() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    await_completion(&signal, 15);
     assert_eq!(
         std::fs::read_to_string(cwd.join("launches")).unwrap_or_default(),
         "restored",
@@ -1524,12 +1547,13 @@ fn restore_skips_a_saved_command_with_a_line_break_and_restores_the_rest() {
         dirs.push(cwd);
     }
     let file = root.join("configuration.json");
+    let (done, signal) = completion_signal(&root);
     ok(&pmux(
         &socket,
         &root,
         &[(
             prismattyc_mux::procinfo::TEST_FOREGROUND_COMMAND_ENV,
-            "printf ran >> launches",
+            &format!("printf ran >> launches && {done}"),
         )],
         &["session-config", "save", file.to_str().unwrap()],
     ));
@@ -1562,10 +1586,7 @@ fn restore_skips_a_saved_command_with_a_line_break_and_restores_the_rest() {
         listing.contains("session good") && listing.contains("session bad"),
         "{listing}"
     );
-    let deadline = Instant::now() + Duration::from_secs(8);
-    while !dirs[0].join("launches").exists() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    await_completion(&signal, 8);
     assert_eq!(
         std::fs::read_to_string(dirs[0].join("launches")).unwrap(),
         "ran"

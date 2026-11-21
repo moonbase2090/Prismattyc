@@ -125,6 +125,15 @@ def main():
     installed_host = installed_pmux.with_name('prismattyc-host' + EXE)
     again_pmux = (args.again_pmux or args.pmux).absolute()
     env = dict(os.environ)
+    # The apps this drive opens. On macOS an app that finds a newer release at
+    # launch shows a modal update prompt, which holds its main loop until
+    # answered; here a newer release always exists, so those windows start
+    # with automatic checks off. (Linux and Windows show a notice instead.)
+    host_env = env
+    if sys.platform == 'darwin':
+        host_config = out / 'host-config.toml'
+        host_config.write_text('automatic_update_checks = false\n')
+        host_env = dict(env, PRISMATTYC_CONFIG=str(host_config))
     checks, records = [], RECORDS
     relay = Keys(0, args.key_relay) if args.key_relay else None
 
@@ -233,13 +242,14 @@ def main():
             host.wait(30)
 
     if args.idle_host:
-        idle = subprocess.Popen([str(args.idle_host.resolve()), '--no-splash', '--attach-session', 'work-1'], env=env,
+        idle = subprocess.Popen([str(args.idle_host.resolve()), '--no-splash', '--attach-session', 'work-1'], env=host_env,
                                 stdout=(out / 'idle-host.log').open('w'), stderr=subprocess.STDOUT)
         try:
             await_versions(installed_pmux, lambda report: any(item.get('component') == 'host' and
                                                               item.get('pid') == idle.pid
                                                               for item in report['running']),
                            'this build\'s window registered')
+            screenshot('idle-window')
             idle_since = time.monotonic()
             while time.monotonic() - idle_since < PAST_FRESH:
                 assert any(item.get('component') == 'host' and item.get('pid') == idle.pid
@@ -252,7 +262,7 @@ def main():
 
     # The installed older app, open on a session, so the update restarts it.
     app_log = (out / 'app-host.log').open('w')
-    app_host = subprocess.Popen([str(installed_host), '--no-splash', '--attach-session', 'work-2'], env=env,
+    app_host = subprocess.Popen([str(installed_host), '--no-splash', '--attach-session', 'work-2'], env=host_env,
                                 stdout=app_log, stderr=subprocess.STDOUT)
     await_versions(installed_pmux, lambda report: any(item.get('component') == 'host' and
                                                       item.get('pid') == app_host.pid

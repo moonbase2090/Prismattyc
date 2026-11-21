@@ -48,6 +48,7 @@ pub(super) fn select(args: &[String]) -> Result<(Option<Plan>, Vec<String>)> {
         ..Plan::default()
     };
     let (mut restart, mut no_restart, mut other) = (false, false, false);
+    let mut target_error = None;
     let mut rest = Vec::new();
     let mut args = args.iter();
     while let Some(arg) = args.next() {
@@ -59,6 +60,11 @@ pub(super) fn select(args: &[String]) -> Result<(Option<Plan>, Vec<String>)> {
                     .next()
                     .with_context(|| format!("{arg} needs a value"))?;
                 plan.target.extend([arg.clone(), value.clone()]);
+            }
+            // Set by `pmux` when the daemon target given to it could not be
+            // resolved; only an update that restarts needs the target.
+            "--target-error" => {
+                target_error = Some(args.next().context("--target-error needs a value")?.clone());
             }
             _ => {
                 other |= OTHER_OPERATIONS.contains(&arg.as_str());
@@ -94,6 +100,9 @@ pub(super) fn select(args: &[String]) -> Result<(Option<Plan>, Vec<String>)> {
     }
     if plan.json && !restart && !no_restart {
         return Ok((None, rest));
+    }
+    if let Some(error) = target_error {
+        bail!("cannot tell which daemon to update: {error}. Nothing was installed or restarted");
     }
     plan.restart = !no_restart;
     Ok((Some(plan), rest))
@@ -357,7 +366,9 @@ impl Receipt {
             "incomplete"
         } else if deferred {
             "updated_with_deferrals"
-        } else if core.status == "current" && launcher.status == "current" {
+        } else if core.status == "current"
+            && matches!(launcher.status.as_str(), "current" | "in_app")
+        {
             "current"
         } else {
             "updated"
@@ -700,6 +711,54 @@ mod tests {
         assert!(select(&args(&["--check", "--restart"])).is_err());
         assert!(select(&args(&["--rollback", "--no-restart"])).is_err());
         assert!(select(&args(&["--restart", "--no-restart"])).is_err());
+    }
+
+    #[test]
+    fn an_unresolved_target_stops_the_update_before_anything_runs() {
+        let error = select(&args(&[
+            "--target-error",
+            "mux socket must be an absolute path",
+        ]))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("mux socket must be an absolute path"),
+            "{error}"
+        );
+        assert!(error.contains("Nothing was installed"), "{error}");
+        assert!(select(&args(&["--no-restart", "--target-error", "bad"])).is_err());
+        // Operations that never restart ignore it, and it never reaches them.
+        for list in [
+            &["--check", "--target-error", "bad"][..],
+            &["--json", "--target-error", "bad"],
+        ] {
+            let (complete, rest) = select(&args(list)).unwrap();
+            assert_eq!(complete, None, "{list:?}");
+            assert!(
+                !rest
+                    .iter()
+                    .any(|arg| arg.contains("target-error") || arg == "bad"),
+                "{rest:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_up_to_date_mac_reports_current_with_the_launcher_in_the_app() {
+        let core = Core {
+            status: "current",
+            version: "0.3.73".into(),
+        };
+        let launcher = Launcher {
+            status: "in_app".into(),
+            detail: None,
+        };
+        let receipt = Receipt::new("0.3.73".into(), core, launcher, Restart::NotNeeded);
+        assert_eq!(receipt.status, "current");
+        assert_eq!(
+            receipt.text().lines().next(),
+            Some("Prismattyc 0.3.73 is up to date.")
+        );
     }
 
     #[test]

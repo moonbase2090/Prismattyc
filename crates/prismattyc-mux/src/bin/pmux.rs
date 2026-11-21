@@ -113,28 +113,32 @@ mod space_commands;
 
 /// The daemon socket `pmux update` restarts components for, resolved like
 /// every other command (`--socket`, `--instance`, the `[mux]` config, the
-/// environment). `None` when it cannot be resolved; the restart then uses
-/// its own default.
-fn update_socket(instance: Option<String>, socket: Option<PathBuf>) -> Option<PathBuf> {
-    let file = load_mux_section(&prism_config_path()).unwrap_or_default();
-    let (instance, socket_override) = resolve_mux_target(instance, socket, &file).ok()?;
-    Paths::resolve(&instance, socket_override)
-        .ok()
-        .map(|paths| paths.socket)
+/// environment). An error is kept, not dropped: the complete update refuses
+/// to run with it, so an invalid target never falls back to the default
+/// daemon.
+fn update_socket(instance: Option<String>, socket: Option<PathBuf>) -> Result<PathBuf, String> {
+    let resolve = || -> Result<PathBuf> {
+        let file = load_mux_section(&prism_config_path())?;
+        let (instance, socket_override) = resolve_mux_target(instance, socket, &file)?;
+        Ok(Paths::resolve(&instance, socket_override)?.socket)
+    };
+    resolve().map_err(|error| format!("{error:#}"))
 }
 
 /// `pmux update` arguments with the daemon socket appended, so the complete
-/// update restarts that daemon's components and finds its idle windows.
-/// Source builds take no target.
-fn update_args(mut rest: Vec<String>, socket: Option<PathBuf>) -> Vec<String> {
+/// update restarts that daemon's components and finds its idle windows. A
+/// target that could not be resolved is passed as `--target-error`, which
+/// only the complete update acts on. Source builds take no target.
+fn update_args(mut rest: Vec<String>, socket: Result<PathBuf, String>) -> Vec<String> {
     if rest.iter().any(|arg| arg == "--source") {
         return rest;
     }
-    if let Some(socket) = socket {
-        rest.extend([
+    match socket {
+        Ok(socket) => rest.extend([
             "--socket".to_string(),
             socket.to_string_lossy().into_owned(),
-        ]);
+        ]),
+        Err(error) => rest.extend(["--target-error".to_string(), error]),
     }
     rest
 }
@@ -9572,18 +9576,31 @@ mod tests {
     fn update_takes_the_daemon_socket_except_for_source_builds() {
         let rest = |list: &[&str]| list.iter().map(ToString::to_string).collect::<Vec<_>>();
         assert_eq!(
-            update_args(rest(&["--json"]), Some(PathBuf::from("/run/p.sock"))),
+            update_args(rest(&["--json"]), Ok(PathBuf::from("/run/p.sock"))),
             rest(&["--json", "--socket", "/run/p.sock"])
         );
-        assert_eq!(update_args(rest(&[]), None), rest(&[]));
         assert_eq!(
-            update_args(rest(&["--source"]), Some(PathBuf::from("/run/p.sock"))),
+            update_args(rest(&["--source"]), Ok(PathBuf::from("/run/p.sock"))),
             rest(&["--source"])
         );
         assert_eq!(
             update_socket(None, Some(PathBuf::from("/run/explicit.sock"))),
-            Some(PathBuf::from("/run/explicit.sock"))
+            Ok(PathBuf::from("/run/explicit.sock"))
         );
+    }
+
+    #[test]
+    fn an_invalid_update_target_is_passed_on_not_replaced_by_the_default() {
+        let rest = |list: &[&str]| list.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let relative = update_socket(None, Some(PathBuf::from("relative.sock")));
+        let error = relative.clone().unwrap_err();
+        assert!(error.contains("absolute"), "{error}");
+        assert_eq!(
+            update_args(rest(&[]), relative),
+            rest(&["--target-error", error.as_str()])
+        );
+        let named = update_socket(Some("a/b".into()), None).unwrap_err();
+        assert!(named.contains("instance"), "{named}");
     }
 
     #[test]

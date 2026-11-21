@@ -1,0 +1,57 @@
+{
+ "daemon": {
+  "pid": 6276,
+  "version": "0.3.71"
+ },
+ "installed": [
+  {
+   "component": "pmux",
+   "path": "\\\\?\\C:\\proof\\run\\new\\pmux.exe",
+   "version": "pmux 0.3.71 (4759ffb72be2)"
+  },
+  {
+   "component": "pmuxd",
+   "path": "\\\\?\\C:\\proof\\run\\new\\pmuxd.exe",
+   "version": "pmuxd 0.3.71 (4759ffb72be2)"
+  },
+  {
+   "component": "pmux-attach",
+   "path": "\\\\?\\C:\\proof\\run\\new\\pmux-attach.exe",
+   "version": "pmux-attach 0.3.71 (4759ffb72be2)"
+  },
+  {
+   "component": "pmux-mcp",
+   "path": "\\\\?\\C:\\proof\\run\\new\\pmux-mcp.exe",
+   "version": "pmux-mcp 0.3.71 (4759ffb72be2)"
+  },
+  {
+   "component": "prismattyc",
+   "path": "\\\\?\\C:\\proof\\run\\new\\prismattyc.exe",
+   "version": "prismattyc 0.3.71 (4759ffb72be2)"
+  },
+  {
+   "component": "prismattyc-host",
+   "path": "\\\\?\\C:\\proof\\run\\new\\prismattyc-host.exe",
+   "version": "prismattyc-host 0.3.71 (4759ffb72be2)"
+  }
+ ],
+ "release_repository": "moonbase2090/Prismattyc",
+ "running": [
+  {
+   "component": "host",
+   "generation": "352-1795200029254320900",
+   "pid": 352,
+   "sampled_ms": 1795200037418,
+   "supervisor_version": "0.3.71",
+   "version": "0.3.71"
+  },
+  {
+   "component": "host",
+   "generation": "4284-1795200022199199600",
+   "pid": 4284,
+   "sampled_ms": 1795200037360,
+   "supervisor_version": "0.3.70",
+   "version": "0.3.70"
+  }
+ ]
+}

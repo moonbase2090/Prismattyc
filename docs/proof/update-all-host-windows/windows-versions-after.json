@@ -1,0 +1,57 @@
+{
+ "daemon": {
+  "pid": 4216,
+  "version": "0.3.71"
+ },
+ "installed": [
+  {
+   "component": "pmux",
+   "path": "C:\Users\<user>\\AppData\\Local\\pt196data\\prismattyc/updates\\v71\\pmux.exe",
+   "version": "pmux 0.3.71 (4759ffb72be2)"
+  },
+  {
+   "component": "pmuxd",
+   "path": "C:\Users\<user>\\AppData\\Local\\pt196data\\prismattyc/updates\\v71\\pmuxd.exe",
+   "version": "pmuxd 0.3.71 (4759ffb72be2)"
+  },
+  {
+   "component": "pmux-attach",
+   "path": "C:\Users\<user>\\AppData\\Local\\pt196data\\prismattyc/updates\\v71\\pmux-attach.exe",
+   "version": "pmux-attach 0.3.71 (4759ffb72be2)"
+  },
+  {
+   "component": "pmux-mcp",
+   "path": "C:\Users\<user>\\AppData\\Local\\pt196data\\prismattyc/updates\\v71\\pmux-mcp.exe",
+   "version": "pmux-mcp 0.3.71 (4759ffb72be2)"
+  },
+  {
+   "component": "prismattyc",
+   "path": "C:\Users\<user>\\AppData\\Local\\pt196data\\prismattyc/updates\\v71\\prismattyc.exe",
+   "version": "prismattyc 0.3.71 (4759ffb72be2)"
+  },
+  {
+   "component": "prismattyc-host",
+   "path": "C:\Users\<user>\\AppData\\Local\\pt196data\\prismattyc/updates\\v71\\prismattyc-host.exe",
+   "version": "prismattyc-host 0.3.71 (4759ffb72be2)"
+  }
+ ],
+ "release_repository": "moonbase2090/Prismattyc",
+ "running": [
+  {
+   "component": "host",
+   "generation": "1816-1795200056758406600",
+   "pid": 1816,
+   "sampled_ms": 1795200056758,
+   "supervisor_version": "0.3.71",
+   "version": "0.3.71"
+  },
+  {
+   "component": "host",
+   "generation": "6096-1795200055700274700",
+   "pid": 6096,
+   "sampled_ms": 1795200056751,
+   "supervisor_version": "0.3.71",
+   "version": "0.3.71"
+  }
+ ]
+}

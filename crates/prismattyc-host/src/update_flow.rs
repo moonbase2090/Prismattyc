@@ -521,6 +521,23 @@ fn complete_install(
     verify_installed_versions(&installed_versions, plan.target())?;
     report(Event::Doing("Checking the sessions"));
     require_same_sessions(plan, &installed)?;
+    // Every other open app process must restart too, or it keeps running the
+    // old release while this result reports success. They restart first, while
+    // their sessions still exist: a window whose sessions were already stopped
+    // cannot save its view and would defer.
+    let own = std::process::id();
+    let others_before: Value = serde_json::from_str(&run(&installed, &["versions"])?)?;
+    let others = other_host_pids(&others_before, own);
+    let host_restart = if others.is_empty() {
+        None
+    } else {
+        let own = own.to_string();
+        let args = ["restart", "--host", "--except-pid", own.as_str(), "--json"];
+        Some(
+            run(&installed, &args)
+                .context("The files are installed, but restarting the other app windows failed. No sessions were stopped")?,
+        )
+    };
     let consent = consent.to_string_lossy();
     let mut restart = vec![
         "restart".to_string(),
@@ -548,8 +565,11 @@ fn complete_install(
     // This host is replaced next; do not present its old heartbeat as the
     // final running version in the replacement's result view.
     if let Some(running) = versions["running"].as_array_mut() {
-        running.retain(|component| component["component"] != "host");
+        running.retain(|component| {
+            component["component"] != "host" || component["pid"].as_u64() != Some(u64::from(own))
+        });
     }
+    let host_lines = other_host_lines(host_restart.as_deref(), &versions, plan.target());
     let actual = versions["daemon"]["version"].as_str().with_context(|| {
         format!(
             "could not verify the restarted daemon version: {}",
@@ -566,11 +586,12 @@ fn complete_install(
     report(restart_step("Relaunching the app", steps + 2, steps));
     Ok((
         format!(
-            "Prismattyc {} is installed. The daemon restarted on {}.\n{}\n{}",
+            "Prismattyc {} is installed. The daemon restarted on {}.\n{}\n{}{}",
             plan.target(),
             actual,
             space_panel::maintenance_result(&mcp),
-            space_panel::maintenance_result(&versions.to_string())
+            space_panel::maintenance_result(&versions.to_string()),
+            host_lines
         ),
         restored,
         steps,
@@ -614,6 +635,64 @@ fn restart_daemon(pmux: &Path, args: &[&str], report: &dyn Fn(Event)) -> Result<
             Ok((run(pmux, args)?, 1))
         }
         result => result.map(|report| (report, steps.get())),
+    }
+}
+
+/// Process ids of every live app process except this one.
+fn other_host_pids(versions: &Value, own: u32) -> Vec<u64> {
+    versions["running"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|component| component["component"] == "host")
+        .filter_map(|component| component["pid"].as_u64())
+        .filter(|pid| *pid != u64::from(own))
+        .collect()
+}
+
+/// One line per other app process that is not on the new release, with the
+/// exact next action. Empty when every other app process was restarted.
+fn other_host_lines(restart: Option<&str>, versions: &Value, expected: &str) -> String {
+    let mut lines = Vec::new();
+    let results: Value = restart
+        .and_then(|text| serde_json::from_str(text).ok())
+        .unwrap_or(Value::Null);
+    for entry in results["components"].as_array().into_iter().flatten() {
+        let response = entry.get("response").unwrap_or(entry);
+        match response["status"].as_str().unwrap_or("") {
+            "restarted" => {}
+            "deferred" => lines.push(format!(
+                "Another Prismattyc app window was not restarted and still runs the previous version: {} Next: fix that, then choose Update and restart all components again, or close and reopen that window.",
+                response["detail"].as_str().unwrap_or("it asked to wait.")
+            )),
+            _ => lines.push(
+                "Another Prismattyc app window did not confirm its restart. Next: close and reopen it, then check running versions."
+                    .to_owned(),
+            ),
+        }
+    }
+    let own = u64::from(std::process::id());
+    for component in versions["running"].as_array().into_iter().flatten() {
+        if component["component"] != "host" || component["pid"].as_u64() == Some(own) {
+            continue;
+        }
+        let version = component["version"].as_str().unwrap_or("");
+        if version != expected {
+            lines.push(format!(
+                "Prismattyc app process {} still reports {}, not {expected}.",
+                component["pid"],
+                if version.is_empty() {
+                    "an unreadable version"
+                } else {
+                    version
+                }
+            ));
+        }
+    }
+    if lines.is_empty() {
+        String::new()
+    } else {
+        format!("\n{}", lines.join("\n"))
     }
 }
 
@@ -1115,6 +1194,56 @@ echo note >&2"#,
             .to_string();
         assert!(error.contains("pmuxd 0.3.38"), "{error}");
         assert!(error.contains("expected 0.3.41"), "{error}");
+    }
+    #[test]
+    fn only_other_app_processes_are_restarted_and_reported() {
+        let versions = serde_json::json!({"running": [
+            {"component":"host","pid":10,"version":"0.3.69"},
+            {"component":"host","pid":11,"version":"0.3.69"},
+            {"component":"mcp","pid":12,"version":"0.3.69"},
+            {"component":"host","pid":13,"version":"0.3.69"}
+        ]});
+        assert_eq!(other_host_pids(&versions, 10), vec![11, 13]);
+        assert!(other_host_pids(&serde_json::json!({"running": []}), 10).is_empty());
+    }
+
+    #[test]
+    fn other_windows_left_on_the_old_release_are_named_with_a_next_action() {
+        let versions = serde_json::json!({"running": [
+            {"component":"host","pid":11,"version":"0.3.70"},
+            {"component":"host","pid":13,"version":"0.3.69"}
+        ]});
+        let restart = r#"{"status":"restart_results","components":[
+            {"component":"host","response":{"status":"restarted","detail":"","version":"0.3.70"}},
+            {"component":"host","response":{"status":"deferred","detail":"Restart deferred: this window owns blank terminals; close those terminals before restarting the host","version":"0.3.69"}}
+        ]}"#;
+        let lines = other_host_lines(Some(restart), &versions, "0.3.70");
+        assert!(lines.contains("blank terminals"), "{lines}");
+        assert!(lines.contains("Next:"), "{lines}");
+        assert!(
+            lines.contains("process 13 still reports 0.3.69, not 0.3.70"),
+            "{lines}"
+        );
+        assert!(!lines.contains("process 11"), "{lines}");
+    }
+
+    #[test]
+    fn nothing_is_reported_when_every_other_window_restarted() {
+        let versions = serde_json::json!({"running": [
+            {"component":"host","pid":11,"version":"0.3.70"}
+        ]});
+        let restart = r#"{"components":[{"component":"host","response":{"status":"restarted","detail":""}}]}"#;
+        assert_eq!(other_host_lines(Some(restart), &versions, "0.3.70"), "");
+        assert_eq!(other_host_lines(None, &versions, "0.3.70"), "");
+    }
+
+    #[test]
+    fn an_unconfirmed_restart_asks_for_a_reopen() {
+        let restart =
+            r#"{"components":[{"component":"host","status":"pending","request_id":"x"}]}"#;
+        let lines = other_host_lines(Some(restart), &serde_json::json!({"running": []}), "0.3.70");
+        assert!(lines.contains("did not confirm"), "{lines}");
+        assert!(lines.contains("close and reopen"), "{lines}");
     }
 
     #[test]

@@ -255,7 +255,7 @@ fn next_action(component: &str, status: &str) -> Option<String> {
         ("plugins", "pending") => "They move to the new release when the daemon restarts.",
         ("plugins", "unconfirmed") => "Run pmux plugin list to check the official plug-ins.",
         ("host", "deferred") => "Fix what the window names, then run pmux restart --host, or close and reopen that window.",
-        ("host", "idle") => "Click or type in that window to wake it, then run pmux restart --host.",
+        ("host", "idle") => "Close and reopen that window; it opens on the new release.",
         (_, "pending") => "It did not answer within 15 seconds. Run pmux versions before restarting it again.",
         _ => return None,
     };
@@ -824,7 +824,7 @@ mod tests {
             .next
             .as_deref()
             .unwrap()
-            .contains("pmux restart --host"));
+            .contains("Close and reopen that window"));
         assert!(
             components.iter().any(|c| c.component == "mcp"),
             "other components stay"

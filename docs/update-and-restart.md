@@ -318,7 +318,7 @@ pmux restart --daemon
 
 | Component | Restart behavior |
 | --- | --- |
-| Host | Save window views, replace the host process, and reconnect to live mux sessions. Defer if a window owns blank terminals, has an unfinished Space operation, or displays an exact secondary pane that the session-based cache cannot restore. A window from 0.3.72 or earlier that has had nothing to draw for a few seconds stops answering; it is reported as `idle`, and restarts after a click or keystroke wakes it. |
+| Host | Save window views, replace the host process, and reconnect to live mux sessions. Defer if a window owns blank terminals, has an unfinished Space operation, or displays an exact secondary pane that the session-based cache cannot restore. A window from 0.3.72 or earlier that has had nothing to draw for a few seconds stops answering; it is reported as `idle`; close and reopen it to run the new release. |
 | MCP | Restart registered supervised adapters. Keep the client connection. Report interrupted requests; never replay tool calls. |
 | Daemon | Restart only when there are no sessions. Otherwise report a deferral. |
 

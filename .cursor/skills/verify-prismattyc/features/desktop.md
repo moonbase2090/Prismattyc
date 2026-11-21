@@ -196,11 +196,17 @@ python3 tests/native/one-step-update-e2e.py --pmux ~/.local/bin/pmux \
   notice in the change lines (`toasts`: kind, chip rectangle, `opens_update`),
   clicks the chip, waits for the Restart to update review, then closes it
   with Escape. Toast text never appears in change lines.
-- The receipt must name the core and launcher on the new release, the app
-  window restarted, and the daemon deferred with its next step; `pmux
-  versions` must then show every installed component and the window on the
-  new release while the sessions keep running. A second run must find the
-  core and launcher current.
+- The receipt must name the core and launcher on the new release and the
+  daemon deferred with its next step. The open older window must be either
+  restarted (then `pmux versions` shows it on the new release) or, when that
+  release's app stopped renewing its registration while idle, named `idle`
+  with "Close and reopen that window". Its session prints steadily so it
+  usually stays registered. Every installed component must be on the new
+  release and the sessions keep running. A second run must find the core and
+  launcher current.
+- `--idle-host` (macOS; Linux and Windows use the `--notice` window) runs this
+  build's app on an idle session and checks that it stays registered past
+  the five seconds a registration lasts.
 - `--screenshots` captures `screen-notice`, `screen-notice-review`,
   `screen-before-update` and `screen-after-update`; on a macOS guest without
   screen recording, `--key-relay DIR` asks the VM console's controller for

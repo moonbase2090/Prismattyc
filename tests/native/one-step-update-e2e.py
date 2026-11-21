@@ -114,6 +114,8 @@ def main():
                         help='a pmux with this change for the second update (default: --pmux)')
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--notice', action='store_true', help='also click the update notice (Linux, Windows)')
+    parser.add_argument('--idle-host', type=Path,
+                        help='this build\'s prismattyc-host, checked to stay registered while idle (without --notice)')
     parser.add_argument('--screenshots', action='store_true')
     parser.add_argument('--key-relay', type=Path, help='relay directory for screenshots taken outside (macOS)')
     args = parser.parse_args()
@@ -230,6 +232,24 @@ def main():
             host.terminate()
             host.wait(30)
 
+    if args.idle_host:
+        idle = subprocess.Popen([str(args.idle_host.resolve()), '--no-splash', '--attach-session', 'work-1'], env=env,
+                                stdout=(out / 'idle-host.log').open('w'), stderr=subprocess.STDOUT)
+        try:
+            await_versions(installed_pmux, lambda report: any(item.get('component') == 'host' and
+                                                              item.get('pid') == idle.pid
+                                                              for item in report['running']),
+                           'this build\'s window registered')
+            idle_since = time.monotonic()
+            while time.monotonic() - idle_since < PAST_FRESH:
+                assert any(item.get('component') == 'host' and item.get('pid') == idle.pid
+                           for item in versions(installed_pmux)['running']), 'the idle window dropped out'
+                time.sleep(0.5)
+            passed(f'an idle window from this build stays registered past {PAST_FRESH} s')
+        finally:
+            idle.terminate()
+            idle.wait(30)
+
     # The installed older app, open on a session, so the update restarts it.
     app_log = (out / 'app-host.log').open('w')
     app_host = subprocess.Popen([str(installed_host), '--no-splash', '--attach-session', 'work-2'], env=env,
@@ -253,27 +273,40 @@ def main():
     assert f'  Core: installed {latest}' in lines, lines
     launcher = 'included in Prismattyc.app' if sys.platform == 'darwin' else f'installed {latest}'
     assert f'  Monitor launcher: {launcher}' in lines, lines
-    assert any(line.startswith('  App window ') and line.endswith(': restarted') for line in lines), lines
     assert any(line.startswith('  Daemon: deferred') for line in lines), lines
     nexts = lines[lines.index('Next:') + 1:]
     assert any(line.startswith('  - Daemon: ') and '--stop-sessions' in line for line in nexts), lines
-    passed('one receipt: core installed, launcher included, app window restarted, daemon deferred with its next step')
+    # The older app renews its registration only while it draws. The receipt
+    # either restarted the window or names it idle with what to do.
+    window = [line for line in lines if line.startswith(f'  App window {app_host.pid}: ')]
+    assert len(window) == 1, lines
+    window_restarted = window[0].endswith(': restarted')
+    if not window_restarted:
+        assert window[0].startswith(f'  App window {app_host.pid}: idle ('), lines
+        assert any(line.startswith('  - App window: Close and reopen') for line in nexts), lines
+        assert app_host.poll() is None, 'the idle window keeps running'
+    how = 'restarted' if window_restarted else 'named idle with its next step'
+    passed(f'one receipt: core installed, launcher included, the open window {how}, daemon deferred with its next step')
 
     # The installed CLI is now the new release's.
     new_pmux = installed_pmux
-    after = await_versions(new_pmux, lambda report: any(
-        item.get('component') == 'host' and version_in(item.get('version') or '0') == latest
-        for item in report['running']), 'the app window back on the new release')
+    if window_restarted:
+        after = await_versions(new_pmux, lambda report: any(
+            item.get('component') == 'host' and version_in(item.get('version') or '0') == latest
+            for item in report['running']), 'the app window back on the new release')
+        stale_hosts = [item for item in after['running']
+                       if item.get('component') == 'host' and version_in(item.get('version') or '0') != latest]
+        assert not stale_hosts, after
+    else:
+        after = versions(new_pmux)
     assert {version_in(item['version'] or '') for item in after['installed']} == {latest}, after
-    stale_hosts = [item for item in after['running']
-                   if item.get('component') == 'host' and version_in(item.get('version') or '0') != latest]
-    assert not stale_hosts, after
     assert version_in(after['daemon'].get('version') or '') == old, 'the daemon keeps the sessions on its release'
     assert {'work-1', 'work-2'} <= set(run(new_pmux, 'ls').stdout.split()), 'sessions keep running'
     if sys.platform != 'darwin':
         monitor = installed_pmux.with_name('pmux-activity-monitor' + EXE)
         assert version_in(run(monitor, '--version').stdout) == latest, 'the launcher matches the new core'
-    passed(f'every installed component and the open app window run {latest}; the sessions keep running')
+    passed(f'every installed component runs {latest}' + (' and so does the open window' if window_restarted else '')
+           + '; the sessions keep running')
     screenshot('after-update')
 
     # The installed pmux is now the newest public release's; a release that

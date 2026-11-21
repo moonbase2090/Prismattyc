@@ -179,7 +179,7 @@ def main():
                         help='the system accessibility setting in force; the drive checks its effect')
     parser.add_argument('--handover-system', choices=['none', 'reduce-motion', 'reduce-transparency', 'both'],
                         help='change the system setting to this just before the update panel hands over to the '
-                             'restart confirmation (Linux and macOS); the confirmation must follow the new setting')
+                             'restart confirmation (Linux only); the confirmation must follow the new setting')
     args = parser.parse_args()
     expect_still = args.system in ('reduce-motion', 'both')
     expect_flat = args.system in ('reduce-transparency', 'both')

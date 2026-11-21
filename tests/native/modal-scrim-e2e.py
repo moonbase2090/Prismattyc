@@ -44,7 +44,7 @@ reduce transparency the scrim dims only: blur false and edge contrast kept.
 Reduce motion alone must still blur. The first change line's state is recorded
 as `settled_at_once`.
 
---handover-system MODE (Linux and macOS) changes the setting while the update panel is open, just before
+--handover-system MODE (Linux only) changes the setting while the update panel is open, just before
 it hands over to the restart confirmation; the confirmation, a dialog that took the panel's place with no frame
 between, must follow the new setting (settled at once or fading, blurred or dimmed only).
 
@@ -340,14 +340,8 @@ def main():
                 f'enable-animations={"false" if motion else "true"}\n'
                 '[org/gnome/desktop/a11y/interface]\n'
                 f'high-contrast={"true" if transparency else "false"}\n')
-        elif sys.platform == 'darwin':
-            for domain in ('com.apple.universalaccess', 'com.apple.Accessibility'):
-                for key, value in (('reduceMotion', motion), ('reduceTransparency', transparency),
-                                   ('ReduceMotionEnabled', motion), ('EnhancedBackgroundContrastEnabled', transparency)):
-                    subprocess.check_call(['defaults', 'write', domain, key, '-bool', 'true' if value else 'false'])
-            subprocess.call(['killall', 'cfprefsd'])
         else:
-            raise AssertionError('--handover-system needs Linux or macOS')
+            raise AssertionError('--handover-system needs Linux: a running macOS app does not see `defaults write` changes, only the Accessibility settings pane')
 
     def close_all(label):
         while True:

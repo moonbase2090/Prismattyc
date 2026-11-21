@@ -249,7 +249,7 @@ without the blur when the system asks for reduced transparency (read when the
 modal opens or one dialog replaces another, menus included;
 `--system reduce-motion|reduce-transparency|both` tells the drive
 which setting the operator turned on first and what to require, and on Linux
-or macOS `--handover-system MODE` changes it just before the update panel
+`--handover-system MODE` changes it just before the update panel
 hands over to the restart confirmation, which must follow the new setting). `python3 tests/native/modal-scrim-e2e.py --bins
 "$verify_bins" --out "$verify_evidence/scrim" --screenshots` opens eight of
 them in a real window over a session showing text. It keeps `before.png`,

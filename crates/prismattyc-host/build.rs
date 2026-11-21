@@ -1,5 +1,8 @@
 //! Embed walkthrough clips listed in assets/walkthrough/manifest.json.
 
+#[path = "src/native_platform.rs"]
+mod native_platform;
+
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -19,6 +22,24 @@ struct Clip {
 }
 
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(native_transport)");
+    println!("cargo:rerun-if-changed=src/native_platform.rs");
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let target = native_platform::TargetPlatform {
+        os: &target_os,
+        arch: &target_arch,
+        pointer_width: env::var("CARGO_CFG_TARGET_POINTER_WIDTH")
+            .ok()
+            .and_then(|width| width.parse().ok())
+            .unwrap_or(0),
+        little_endian: env::var("CARGO_CFG_TARGET_ENDIAN").is_ok_and(|endian| endian == "little"),
+        atomic64: env::var("CARGO_CFG_TARGET_HAS_ATOMIC")
+            .is_ok_and(|widths| widths.split(',').any(|width| width == "64")),
+    };
+    if target.supports_native() {
+        println!("cargo:rustc-cfg=native_transport");
+    }
     let manifest = Path::new("assets/walkthrough/manifest.json");
     println!("cargo:rerun-if-changed={}", manifest.display());
     let text = fs::read_to_string(manifest).unwrap_or_else(|_| {

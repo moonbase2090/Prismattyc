@@ -34,7 +34,14 @@ pub(crate) struct ChildWrite {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CapabilityGrant {
+pub(crate) enum CapabilityGrant {
+    Rich(RichGrant),
+    #[cfg(native_transport)]
+    Native(crate::native::authority::OfferReceipt),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RichGrant {
     pub features: BTreeSet<Feature>,
     pub region_limit: usize,
 }
@@ -56,7 +63,7 @@ impl ChildWrite {
         }
     }
 
-    fn capability(bytes: Vec<u8>, grant: CapabilityGrant) -> Self {
+    pub(crate) fn capability(bytes: Vec<u8>, grant: CapabilityGrant) -> Self {
         Self {
             bytes,
             capability_grant: Some(grant),
@@ -117,7 +124,7 @@ pub(crate) struct WorkspaceHit {
 }
 
 impl RichSession {
-    pub(crate) fn apply_grant(&mut self, grant: CapabilityGrant) {
+    pub(crate) fn apply_grant(&mut self, grant: RichGrant) {
         self.granted = grant.features;
         self.region_limit = grant.region_limit;
         if !self.granted.contains(&Feature::InputRichFocus) {
@@ -617,6 +624,34 @@ pub(crate) fn drain_emulator_replies(
 
 /// Feed child output, preserving scroll-vs-APC order inside one PTY chunk.
 ///
+/// Hooks run in collector order, before byte parsing and after query decoding.
+pub(crate) trait RichHost {
+    fn before_bytes(&mut self, emulator: &Emulator) -> bool;
+    fn capability_reply(
+        &mut self,
+        query: prismattyc_protocol::CapabilityQuery,
+        emulator: &mut Emulator,
+        rich: &mut RichSession,
+        to_child: &mpsc::SyncSender<ChildWrite>,
+    ) -> bool;
+}
+
+impl RichHost for () {
+    fn before_bytes(&mut self, _emulator: &Emulator) -> bool {
+        false
+    }
+
+    fn capability_reply(
+        &mut self,
+        _query: prismattyc_protocol::CapabilityQuery,
+        _emulator: &mut Emulator,
+        _rich: &mut RichSession,
+        _to_child: &mpsc::SyncSender<ChildWrite>,
+    ) -> bool {
+        false
+    }
+}
+
 /// Plain-text floods (no ESC, collector idle) are fed as a single slice so
 /// `--experimental-rich` cannot stall the event loop. Control-bearing
 /// slices still split on ESC so a completed APC and a grid scroll cannot share
@@ -626,8 +661,10 @@ pub(crate) fn process_rich_chunk(
     rich: &mut RichSession,
     to_child: &mpsc::SyncSender<ChildWrite>,
     bytes: &[u8],
-) {
+    host: &mut impl RichHost,
+) -> bool {
     let mut index = 0;
+    let mut revoked = false;
     while index < bytes.len() {
         let end = if emulator.apc_pending() || bytes[index] == 0x1b {
             index + 1
@@ -637,9 +674,11 @@ pub(crate) fn process_rich_chunk(
                 .position(|&b| b == 0x1b)
                 .map_or(bytes.len(), |rel| index + rel)
         };
-        feed_rich_slice(emulator, rich, to_child, &bytes[index..end]);
+        revoked |= host.before_bytes(emulator);
+        feed_rich_slice(emulator, rich, to_child, &bytes[index..end], host);
         index = end;
     }
+    revoked
 }
 
 fn feed_rich_slice(
@@ -647,6 +686,7 @@ fn feed_rich_slice(
     rich: &mut RichSession,
     to_child: &mpsc::SyncSender<ChildWrite>,
     slice: &[u8],
+    host: &mut impl RichHost,
 ) {
     if slice.is_empty() {
         return;
@@ -661,14 +701,16 @@ fn feed_rich_slice(
         }
     }
     if !events.is_empty() {
-        handle_control_events(&events, rich, to_child);
+        handle_control_events(&events, emulator, rich, to_child, host);
     }
 }
 
 fn handle_control_events(
     events: &[CollectedApc],
+    emulator: &mut Emulator,
     rich: &mut RichSession,
     to_child: &mpsc::SyncSender<ChildWrite>,
+    host: &mut impl RichHost,
 ) {
     for event in events {
         match event {
@@ -676,6 +718,9 @@ fn handle_control_events(
             CollectedApc::Body(body) => {
                 match decode_body(body) {
                     Ok(ControlMessage::CapabilityQuery(query)) => {
+                        if host.capability_reply(query, emulator, rich, to_child) {
+                            continue;
+                        }
                         if let Some(reply) = CapabilityReply::for_surface_query(query) {
                             if let Ok(bytes) = encode_capability_reply(&reply) {
                                 let region_limit = if reply.limits.is_empty() {
@@ -688,10 +733,10 @@ fn handle_control_events(
                                         .unwrap_or(DEFAULT_LIMIT_REGIONS)
                                         as usize
                                 };
-                                let grant = CapabilityGrant {
+                                let grant = CapabilityGrant::Rich(RichGrant {
                                     features: reply.features.clone(),
                                     region_limit,
-                                };
+                                });
                                 let _ = to_child.try_send(ChildWrite::capability(bytes, grant));
                             }
                         }
@@ -1044,7 +1089,7 @@ mod tests {
 
     fn apply_queued_grants(rx: &mpsc::Receiver<ChildWrite>, rich: &mut RichSession) {
         while let Ok(msg) = rx.try_recv() {
-            if let Some(grant) = msg.capability_grant {
+            if let Some(CapabilityGrant::Rich(grant)) = msg.capability_grant {
                 rich.apply_grant(grant);
             }
         }
@@ -1060,7 +1105,7 @@ mod tests {
             max_version: ProtocolVersion::new(0, 2),
         })
         .unwrap();
-        process_rich_chunk(emulator, rich, tx, &query);
+        process_rich_chunk(emulator, rich, tx, &query, &mut ());
     }
 
     fn negotiate_surface(
@@ -1074,7 +1119,7 @@ mod tests {
             max_version: ProtocolVersion::new(0, 3),
         })
         .unwrap();
-        process_rich_chunk(emulator, rich, tx, &query);
+        process_rich_chunk(emulator, rich, tx, &query, &mut ());
         apply_queued_grants(rx, rich);
     }
 
@@ -1103,23 +1148,74 @@ mod tests {
     }
 
     #[test]
+    fn owner_observes_bytes_after_a_query_in_the_same_chunk_before_the_parser() {
+        #[derive(Default)]
+        struct ObservedHost(Vec<(&'static str, u32, char)>);
+        impl RichHost for ObservedHost {
+            fn before_bytes(&mut self, emulator: &Emulator) -> bool {
+                self.0
+                    .push(("before", 0, emulator.screen().view_cell(0, 0, 0).character));
+                false
+            }
+
+            fn capability_reply(
+                &mut self,
+                query: CapabilityQuery,
+                emulator: &mut Emulator,
+                _rich: &mut RichSession,
+                _to_child: &mpsc::SyncSender<ChildWrite>,
+            ) -> bool {
+                self.0.push((
+                    "query",
+                    query.request_id.get(),
+                    emulator.screen().view_cell(0, 0, 0).character,
+                ));
+                false
+            }
+        }
+        let mut emulator = Emulator::new_experimental(8, 2, 0);
+        let mut rich = RichSession::default();
+        let (tx, rx) = mpsc::sync_channel(4);
+        let mut bytes = encode_capability_query(CapabilityQuery {
+            request_id: RequestId::new(77).unwrap(),
+            max_version: ProtocolVersion::new(0, 4),
+        })
+        .unwrap();
+        bytes.push(b'x');
+        let mut host = ObservedHost::default();
+        process_rich_chunk(&mut emulator, &mut rich, &tx, &bytes, &mut host);
+        assert!(
+            host.0
+                .ends_with(&[("before", 0, ' '), ("query", 77, ' '), ("before", 0, ' ')]),
+            "{:?}",
+            host.0
+        );
+        assert_eq!(emulator.screen().view_cell(0, 0, 0).character, 'x');
+        assert!(rich.granted.is_empty());
+        assert!(matches!(
+            rx.try_recv().unwrap().capability_grant,
+            Some(CapabilityGrant::Rich(_))
+        ));
+    }
+
+    #[test]
     fn workspace_is_grant_gated_ordered_and_malformed_drops_only_surface() {
         let mut emulator = Emulator::new_experimental(80, 24, 10);
         let mut rich = RichSession::default();
         let (tx, rx) = mpsc::sync_channel(8);
         let frame = encode_workspace_snapshot(&workspace(1)).unwrap();
-        process_rich_chunk(&mut emulator, &mut rich, &tx, &frame);
+        process_rich_chunk(&mut emulator, &mut rich, &tx, &frame, &mut ());
         assert!(rich.workspace_layout(24, 80).unwrap().is_none());
 
         negotiate_surface(&mut emulator, &mut rich, &tx, &rx);
-        process_rich_chunk(&mut emulator, &mut rich, &tx, &frame);
+        process_rich_chunk(&mut emulator, &mut rich, &tx, &frame, &mut ());
         assert_eq!(rich.workspace_layout(24, 80).unwrap().unwrap().rows, 8);
         process_rich_chunk(
             &mut emulator,
             &mut rich,
             &tx,
             b"\x1b_Prismattyc;workspace;snapshot;generation=1;rev=2;min=5;preferred=8;max=12;nodes=1,0,future,5,8,1,0,0,x\x1b\\",
-        );
+         &mut ());
         assert!(rich.workspace_layout(24, 80).unwrap().is_none());
         let _ = emulator.feed(b"classic-still-live");
         assert!(emulator.screen().content_epoch() > 0);
@@ -1136,6 +1232,7 @@ mod tests {
             &mut rich,
             &tx,
             &encode_workspace_snapshot(&workspace(1)).unwrap(),
+            &mut (),
         );
         let status = StatusSnapshot {
             surface_generation: 1,
@@ -1152,6 +1249,7 @@ mod tests {
             &mut rich,
             &tx,
             &encode_status_snapshot(&status).unwrap(),
+            &mut (),
         );
         let layout = rich.workspace_layout(24, 80).unwrap().unwrap();
         assert!(layout.lines[0].starts_with("[Runbook]"));
@@ -1165,6 +1263,7 @@ mod tests {
             &mut rich,
             &tx,
             &encode_status_snapshot(&invalid_ref).unwrap(),
+            &mut (),
         );
         let layout = rich.workspace_layout(24, 80).unwrap().unwrap();
         assert!(layout.status_runs.is_empty());
@@ -1174,6 +1273,7 @@ mod tests {
             &mut rich,
             &tx,
             &encode_status_snapshot(&status).unwrap(),
+            &mut (),
         );
         assert!(rich
             .workspace_layout(24, 80)
@@ -1187,7 +1287,7 @@ mod tests {
             &mut rich,
             &tx,
             b"\x1b_Prismattyc;status;snapshot;generation=1;scene=1;rev=3;items=1,meter,info,6,5\x1b\\",
-        );
+         &mut ());
         let layout = rich.workspace_layout(24, 80).unwrap().unwrap();
         assert!(layout.status_runs.is_empty());
         assert!(layout.lines[0].starts_with("Runbook"));
@@ -1197,6 +1297,7 @@ mod tests {
             &mut rich,
             &tx,
             &encode_workspace_snapshot(&workspace(2)).unwrap(),
+            &mut (),
         );
         assert!(rich
             .workspace_layout(24, 80)
@@ -1217,6 +1318,7 @@ mod tests {
             &mut rich,
             &tx,
             &encode_workspace_snapshot(&workspace(1)).unwrap(),
+            &mut (),
         );
         let viewer = ViewerId::from_bytes([0x44; 16]);
         let other = ViewerId::from_bytes([0x55; 16]);
@@ -1284,6 +1386,7 @@ mod tests {
             &mut rich,
             &tx,
             &encode_workspace_snapshot(&two_action_workspace()).unwrap(),
+            &mut (),
         );
         let layout = rich.workspace_layout(24, 80).unwrap().unwrap();
         let first = *layout.placements.get(&2).expect("first action");
@@ -1374,7 +1477,7 @@ mod tests {
             }],
         })
         .unwrap();
-        process_rich_chunk(&mut emulator, &mut rich, &tx, &snapshot);
+        process_rich_chunk(&mut emulator, &mut rich, &tx, &snapshot, &mut ());
         assert_eq!(rich.collections.get("diag").map(|c| c.rev), Some(1));
         let gap = encode_collection_patch(&CollectionPatch {
             surface_generation: 1,
@@ -1389,7 +1492,7 @@ mod tests {
             }],
         })
         .unwrap();
-        process_rich_chunk(&mut emulator, &mut rich, &tx, &gap);
+        process_rich_chunk(&mut emulator, &mut rich, &tx, &gap, &mut ());
         assert!(!rich.collections.contains_key("diag"));
         let replies: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
             .map(|msg| String::from_utf8_lossy(&msg.bytes).into_owned())
@@ -1416,6 +1519,7 @@ mod tests {
             &mut rich,
             &tx,
             &encode_workspace_snapshot(&workspace(1)).unwrap(),
+            &mut (),
         );
         process_rich_chunk(
             &mut emulator,
@@ -1432,6 +1536,7 @@ mod tests {
                 }],
             })
             .unwrap(),
+            &mut (),
         );
         assert_eq!(
             rich.collections
@@ -1461,6 +1566,7 @@ mod tests {
             &mut rich,
             &tx,
             &encode_workspace_snapshot(&workspace(1)).unwrap(),
+            &mut (),
         );
         process_rich_chunk(
             &mut emulator,
@@ -1483,6 +1589,7 @@ mod tests {
                 }),
             })
             .unwrap(),
+            &mut (),
         );
         process_rich_chunk(
             &mut emulator,
@@ -1496,6 +1603,7 @@ mod tests {
                 end: 24,
             })
             .unwrap(),
+            &mut (),
         );
         assert_eq!(
             rich.take_semantic_copy().as_deref(),
@@ -1513,6 +1621,7 @@ mod tests {
                 end: 24,
             })
             .unwrap(),
+            &mut (),
         );
         assert!(rich.take_semantic_copy().is_none());
         assert_eq!(
@@ -1536,7 +1645,7 @@ mod tests {
             max_version: ProtocolVersion::new(0, 1),
         })
         .unwrap();
-        process_rich_chunk(emulator, rich, tx, &query);
+        process_rich_chunk(emulator, rich, tx, &query, &mut ());
     }
 
     fn attach_stat(
@@ -1553,7 +1662,7 @@ mod tests {
             text: "STAT".into(),
         })
         .unwrap();
-        process_rich_chunk(emulator, rich, tx, &attach);
+        process_rich_chunk(emulator, rich, tx, &attach, &mut ());
     }
 
     #[test]
@@ -1601,7 +1710,13 @@ mod tests {
         attach_stat(&mut emulator, &mut rich, &tx);
         assert_eq!(rich.attachments.get(&1).map(|a| a.row), Some(0));
 
-        process_rich_chunk(&mut emulator, &mut rich, &tx, b"aaaaaaaa\r\nbbbbbbbb\r\n");
+        process_rich_chunk(
+            &mut emulator,
+            &mut rich,
+            &tx,
+            b"aaaaaaaa\r\nbbbbbbbb\r\n",
+            &mut (),
+        );
         assert!(
             rich.attachments.is_empty(),
             "fully scrolled-off attachment must detach"
@@ -1617,7 +1732,7 @@ mod tests {
         apply_queued_grants(&rx, &mut rich);
         attach_stat(&mut emulator, &mut rich, &tx);
         let detach = encode_detach(1).unwrap();
-        process_rich_chunk(&mut emulator, &mut rich, &tx, &detach);
+        process_rich_chunk(&mut emulator, &mut rich, &tx, &detach, &mut ());
         assert!(rich.attachments.is_empty());
     }
 
@@ -1628,7 +1743,7 @@ mod tests {
         let (tx, _rx) = mpsc::sync_channel(8);
         let flood = "y\n".repeat(32 * 1024);
         let start = std::time::Instant::now();
-        process_rich_chunk(&mut emulator, &mut rich, &tx, flood.as_bytes());
+        process_rich_chunk(&mut emulator, &mut rich, &tx, flood.as_bytes(), &mut ());
         let elapsed = start.elapsed();
         // Original freeze was indefinite; 1s still catches a hang.
         // 250ms was runner-noise-sensitive (264ms on a loaded CI box).
@@ -1690,7 +1805,7 @@ mod tests {
             runs: Vec::new(),
         })
         .unwrap();
-        process_rich_chunk(&mut emulator, &mut rich, &tx, &update);
+        process_rich_chunk(&mut emulator, &mut rich, &tx, &update, &mut ());
         let attach = rich.attachments.get(&1).unwrap();
         assert_eq!(attach.text, "NEXT");
         assert_eq!(attach.row, 0);
@@ -1715,8 +1830,14 @@ mod tests {
             runs: Vec::new(),
         })
         .unwrap();
-        process_rich_chunk(&mut emulator, &mut rich, &tx, &viewport);
-        process_rich_chunk(&mut emulator, &mut rich, &tx, b"aaaaaaaa\r\nbbbbbbbb\r\n");
+        process_rich_chunk(&mut emulator, &mut rich, &tx, &viewport, &mut ());
+        process_rich_chunk(
+            &mut emulator,
+            &mut rich,
+            &tx,
+            b"aaaaaaaa\r\nbbbbbbbb\r\n",
+            &mut (),
+        );
         assert!(!rich.attachments.contains_key(&1));
         let hud = rich.attachments.get(&2).unwrap();
         assert_eq!(hud.kind, AttachKind::Viewport);
@@ -1731,7 +1852,7 @@ mod tests {
         id: u32,
     ) {
         let bytes = encode_focus_query(id).unwrap();
-        process_rich_chunk(emulator, rich, tx, &bytes);
+        process_rich_chunk(emulator, rich, tx, &bytes, &mut ());
     }
 
     #[test]
@@ -1774,7 +1895,7 @@ mod tests {
         let grant = rich.toggle_focus().expect("re-grant");
         let _ = grant;
         let detach = encode_detach(1).unwrap();
-        process_rich_chunk(&mut emulator, &mut rich, &tx, &detach);
+        process_rich_chunk(&mut emulator, &mut rich, &tx, &detach, &mut ());
         assert_eq!(rich.focus_id(), None);
         let mut saw_revoked = false;
         while let Ok(msg) = rx.try_recv() {
@@ -1810,7 +1931,7 @@ mod tests {
     fn limit_regions_enforced_for_v1() {
         let mut emulator = Emulator::new_experimental(20, 4, 0);
         let mut rich = RichSession::default();
-        rich.apply_grant(CapabilityGrant {
+        rich.apply_grant(RichGrant {
             features: Feature::V1.into_iter().collect(),
             region_limit: 2,
         });
@@ -1825,7 +1946,7 @@ mod tests {
                 text: "X".into(),
             })
             .unwrap();
-            process_rich_chunk(&mut emulator, &mut rich, &tx, &attach);
+            process_rich_chunk(&mut emulator, &mut rich, &tx, &attach, &mut ());
         }
         assert_eq!(rich.attachments.len(), 2);
         assert!(rich.attachments.contains_key(&1));
@@ -1851,7 +1972,7 @@ mod tests {
             runs: Vec::new(),
         })
         .unwrap();
-        process_rich_chunk(&mut emulator, &mut rich, &tx, &viewport);
+        process_rich_chunk(&mut emulator, &mut rich, &tx, &viewport, &mut ());
 
         let live = overlays_for_scroll(visible_overlays(&emulator, &rich), 0);
         assert_eq!(live.cell_rect.len(), 1, "live tail paints cell_rect");
@@ -1887,7 +2008,7 @@ mod tests {
             runs: Vec::new(),
         })
         .unwrap();
-        process_rich_chunk(&mut emulator, &mut rich, &tx, &viewport);
+        process_rich_chunk(&mut emulator, &mut rich, &tx, &viewport, &mut ());
         let vis = visible_overlays(&emulator, &rich);
         assert_eq!(vis.cell_rect.len(), 1);
         assert_eq!(vis.viewport.len(), 1);
@@ -1900,7 +2021,7 @@ mod tests {
             runs: Vec::new(),
         })
         .unwrap();
-        process_rich_chunk(&mut emulator, &mut rich, &tx, &update);
+        process_rich_chunk(&mut emulator, &mut rich, &tx, &update, &mut ());
         let vis = visible_overlays(&emulator, &rich);
         assert_eq!(vis.cell_rect[0].text, "NEXT");
         assert_eq!(
@@ -1925,7 +2046,7 @@ mod tests {
             text: "STAT".into(),
         })
         .unwrap();
-        process_rich_chunk(&mut emulator, &mut rich, &tx, &attach);
+        process_rich_chunk(&mut emulator, &mut rich, &tx, &attach, &mut ());
         assert_eq!(visible_overlays(&emulator, &rich).cell_rect.len(), 1);
         emulator.resize(8, 2);
         assert!(
@@ -1960,7 +2081,7 @@ mod tests {
         // Grid traffic without enough newlines to scroll the region off.
         flood.extend_from_slice(b"yyyy");
         let start = std::time::Instant::now();
-        process_rich_chunk(&mut emulator, &mut rich, &tx, &flood);
+        process_rich_chunk(&mut emulator, &mut rich, &tx, &flood, &mut ());
         let elapsed = start.elapsed();
         assert!(
             elapsed < test_time_budget(std::time::Duration::from_secs(1)),

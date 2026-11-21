@@ -1,6 +1,7 @@
 //! User-facing restart coordinator. Live PTY owners are deferred by default.
 use super::*;
 use prismattyc_mux::component_restart as components;
+use prismattyc_mux::release_update::progress::{self, Progress};
 use serde_json::json;
 
 #[derive(Default, Debug)]
@@ -14,6 +15,8 @@ struct Options {
     consent_config: Option<PathBuf>,
     delete_consent_config: bool,
     except_pids: Vec<u32>,
+    /// Report each daemon restart step as a progress line on stderr.
+    progress: bool,
 }
 fn parse(args: &[String]) -> Result<Options> {
     let mut opts = Options::default();
@@ -40,6 +43,7 @@ fn parse(args: &[String]) -> Result<Options> {
                     .push(pid.parse().context("--except-pid requires a process id")?);
             }
             "--json" => {}
+            "--progress" => opts.progress = true,
             other => bail!("unknown restart option {other:?}; use pmux restart --help"),
         }
     }
@@ -138,10 +142,13 @@ fn running_sessions(paths: &Paths) -> Result<Vec<(u64, String)>> {
 
 pub(super) fn restart(paths: &Paths, args: Vec<String>) -> Result<()> {
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("pmux restart [--all|--host|--daemon|--mcp] [--except-pid PID]... [--plan] [--json]\n\nRestart cooperative components. Default: all safe components.\nHost: restore windows and reconnect mux sessions; defer if blank terminals exist.\n--except-pid PID leaves that host alone; the caller restarts itself last.\nMCP: restart supervised adapters without replaying pending operations.\nDaemon: restart only when no sessions exist. --stop-sessions explicitly permits\nstopping every session; the restart then runs from a detached helper.\n--consented-config FILE limits an update restart to the unchanged saved session list.\nUse --plan to inspect the impact before changing anything.");
+        println!("pmux restart [--all|--host|--daemon|--mcp] [--except-pid PID]... [--plan] [--json] [--progress]\n\nRestart cooperative components. Default: all safe components.\nHost: restore windows and reconnect mux sessions; defer if blank terminals exist.\n--except-pid PID leaves that host alone; the caller restarts itself last.\nMCP: restart supervised adapters without replaying pending operations.\nDaemon: restart only when no sessions exist. --stop-sessions explicitly permits\nstopping every session; the restart then runs from a detached helper.\n--consented-config FILE limits an update restart to the unchanged saved session list.\nUse --plan to inspect the impact before changing anything.\n--progress reports each daemon restart step as a progress line on stderr.");
         return Ok(());
     }
     let opts = parse(&args)?;
+    if opts.progress {
+        progress::enable();
+    }
     let sessions = running_sessions(paths)?;
     let mut hosts = components::live_components(&paths.socket, "host");
     hosts.retain(|pid| !opts.except_pids.contains(pid));
@@ -187,10 +194,16 @@ pub(super) fn restart(paths: &Paths, args: Vec<String>) -> Result<()> {
             // A kept consent file means the user chose to save the sessions:
             // the new daemon restores them with their layouts and scrollback.
             let mut kept = None;
+            let mut steps = Steps::new(&opts);
             if let Some(file) = &opts.consent_config {
                 let (mut client, client_id, session_ids) =
                     session_config::check_for_restart(paths, file)
                         .context("session consent check failed; no sessions were stopped")?;
+                if opts.delete_consent_config {
+                    steps.start("Stopping the sessions");
+                } else {
+                    steps.start("Saving the sessions");
+                }
                 let snapshot = take_snapshot(&mut client)?;
                 if opts.delete_consent_config {
                     session_config::hold_spaces(
@@ -216,6 +229,7 @@ pub(super) fn restart(paths: &Paths, args: Vec<String>) -> Result<()> {
                             "could not record the sessions to restore; no sessions were stopped",
                         )?;
                     drop(client);
+                    steps.start("Stopping the old daemon");
                     // An orderly stop writes every pane's scrollback for the
                     // next daemon. Write the workspace after the old daemon
                     // exits so its last checkpoint cannot replace it.
@@ -226,10 +240,13 @@ pub(super) fn restart(paths: &Paths, args: Vec<String>) -> Result<()> {
                     kept = Some(workspace.session_names());
                 }
             } else if opts.stop_sessions {
+                steps.start("Stopping the old daemon");
                 stop_daemon(&executable, paths)?;
             } else {
+                steps.start("Stopping the old daemon");
                 stop_idle(paths)?;
             }
+            steps.start("Starting the new daemon");
             let mut up = Command::new(&executable);
             up.arg("--socket").arg(&paths.socket).arg("up");
             if kept.is_some() {
@@ -245,8 +262,10 @@ pub(super) fn restart(paths: &Paths, args: Vec<String>) -> Result<()> {
             );
             results.push(json!({"component":"daemon","status":"restarted"}));
             if let Some(names) = kept {
+                steps.start("Checking the restored sessions");
                 results.push(restored_sessions(paths, names));
             }
+            steps.start("Reconciling the official plug-ins");
             results.push(reconciled_plugins(paths));
         } else {
             results.push(json!({"component":"daemon","status":"deferred","detail":"sessions are running; use --stop-sessions only when ready to end them","sessions":sessions}));
@@ -259,6 +278,36 @@ pub(super) fn restart(paths: &Paths, args: Vec<String>) -> Result<()> {
         json!({"status":"restart_results","components":results})
     );
     Ok(())
+}
+
+/// Reports each step of a daemon restart as it starts, as a progress line
+/// with `--progress` and as text otherwise.
+struct Steps {
+    index: usize,
+    count: usize,
+}
+
+impl Steps {
+    /// The steps the daemon restart in `opts` takes, in order.
+    fn new(opts: &Options) -> Self {
+        let count = match &opts.consent_config {
+            // Save the sessions, stop, start, check the sessions, plug-ins.
+            Some(_) if !opts.delete_consent_config => 5,
+            // Stop the sessions (and with them the daemon), or stop the
+            // daemon; start; plug-ins.
+            _ => 3,
+        };
+        Steps { index: 0, count }
+    }
+
+    fn start(&mut self, item: &str) {
+        self.index += 1;
+        progress::emit(&Progress::Restart {
+            item: item.into(),
+            index: self.index,
+            count: self.count,
+        });
+    }
 }
 
 /// Stop the daemon in order (its sessions end; their scrollback is written).

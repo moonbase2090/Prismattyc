@@ -1,5 +1,9 @@
 //! Software cell-grid rasterizer for the windowed host.
 
+#[cfg(native_transport)]
+#[path = "native_raster.rs"]
+pub(crate) mod native_raster;
+
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -16,6 +20,7 @@ use prismattyc_render::CellRectOverlay;
 use ttf_parser::GlyphId;
 
 use crate::config::PaneTitlesMode;
+use crate::font_file::Bytes as FontBytes;
 use crate::glyph_cache::{GlyphCacheStats, LruCache};
 #[cfg(test)]
 use crate::theme::default_theme;
@@ -326,7 +331,7 @@ enum FallbackFace {
     /// The fallback worker is still looking. The character paints blank.
     Pending,
     /// `None` when no system face covers the character.
-    Ready(Option<Arc<Font>>),
+    Ready(Option<Arc<crate::font_fallback::Face>>),
 }
 
 /// Probe order from. A candidate is accepted only when its
@@ -382,6 +387,8 @@ pub struct FontMetrics {
     glyph_cache: RefCell<LruCache<GlyphKey, Arc<GlyphPaint>>>,
     /// Shaped emoji clusters; `None` records a cluster no emoji font shapes.
     cluster_cache: RefCell<LruCache<Box<str>, Option<Arc<ColorGlyph>>>>,
+    #[cfg(native_transport)]
+    native_ink: [RefCell<LruCache<Box<str>, Arc<native_raster::Ink>>>; 2],
     pub px: f32,
     pub cell_w: usize,
     pub cell_h: usize,
@@ -402,7 +409,7 @@ impl FontMetrics {
     }
 
     #[cfg(test)]
-    fn load_baked(px: f32) -> anyhow::Result<Self> {
+    pub(crate) fn load_baked(px: f32) -> anyhow::Result<Self> {
         let font = Font::from_bytes(BAKED_MONO, FontSettings::default())
             .map_err(|error| anyhow::anyhow!("parse bundled test font: {error}"))?;
         let (metrics, _) = font.rasterize('M', px);
@@ -426,6 +433,8 @@ impl FontMetrics {
             painted_pending: Cell::new(false),
             glyph_cache: RefCell::new(LruCache::new(GLYPH_CACHE_CAPACITY)),
             cluster_cache: RefCell::new(LruCache::new(CLUSTER_CACHE_CAPACITY)),
+            #[cfg(native_transport)]
+            native_ink: std::array::from_fn(|_| RefCell::new(LruCache::new(512))),
             px,
             cell_w,
             cell_h,
@@ -539,6 +548,8 @@ impl FontMetrics {
             painted_pending: Cell::new(false),
             glyph_cache: RefCell::new(LruCache::new(GLYPH_CACHE_CAPACITY)),
             cluster_cache: RefCell::new(LruCache::new(CLUSTER_CACHE_CAPACITY)),
+            #[cfg(native_transport)]
+            native_ink: std::array::from_fn(|_| RefCell::new(LruCache::new(512))),
             px,
             cell_w,
             cell_h,
@@ -650,7 +661,8 @@ impl FontMetrics {
         if ch.is_whitespace() {
             return None;
         }
-        let font = self.fallback_face(ch)?;
+        let face = self.fallback_face(ch)?;
+        let font = &face.font;
         let gid = font.lookup_glyph_index(ch);
         if gid == 0 {
             return None;
@@ -705,7 +717,7 @@ impl FontMetrics {
 
     /// The system face for `ch`. With a fallback worker, a first lookup is
     /// queued and returns `None` until [`Self::drain_fallbacks`] stores it.
-    fn fallback_face(&self, ch: char) -> Option<Arc<Font>> {
+    fn fallback_face(&self, ch: char) -> Option<Arc<crate::font_fallback::Face>> {
         let mut faces = self.fallback_faces.borrow_mut();
         match faces.get(&ch) {
             Some(FallbackFace::Ready(font)) => return font.clone(),
@@ -797,10 +809,17 @@ impl FontMetrics {
 
     /// Glyph and cluster cache counters for this font.
     pub(crate) fn glyph_cache_stats(&self) -> GlyphCacheStats {
-        self.glyph_cache
+        let stats = self
+            .glyph_cache
             .borrow()
             .stats()
-            .add(self.cluster_cache.borrow().stats())
+            .add(self.cluster_cache.borrow().stats());
+        #[cfg(native_transport)]
+        let stats = self
+            .native_ink
+            .iter()
+            .fold(stats, |stats, cache| stats.add(cache.borrow().stats()));
+        stats
     }
 
     /// CBDT/CBLC PNG strikes (fontdue cannot outline these).
@@ -1016,21 +1035,6 @@ impl FontSource {
                 Self::PreparedPath { path, bytes }
             }
             source => source,
-        }
-    }
-}
-
-#[derive(Clone)]
-enum FontBytes {
-    Mapped(Arc<memmap2::Mmap>),
-    Baked(&'static [u8]),
-}
-
-impl AsRef<[u8]> for FontBytes {
-    fn as_ref(&self) -> &[u8] {
-        match self {
-            Self::Mapped(data) => data,
-            Self::Baked(data) => data,
         }
     }
 }
@@ -10953,8 +10957,13 @@ mod tests {
         let (expected, bitmap) = font.fonts[0].rasterize('H', font.px);
         // Pin discovery to the bundled face so no installed system font is
         // needed. Loading from disk is covered in font_fallback.
-        let face =
-            Arc::new(Font::from_bytes(BAKED_MONO, FontSettings::default()).expect("bundled font"));
+        let face = Arc::new(crate::font_fallback::Face {
+            font: Font::from_bytes(BAKED_MONO, FontSettings::default()).expect("bundled font"),
+            #[cfg(native_transport)]
+            bytes: FontBytes::Baked(BAKED_MONO),
+            #[cfg(native_transport)]
+            index: 0,
+        });
         for ch in ['H', '\u{2800}', '\u{10ffff}'] {
             font.fallback_faces
                 .borrow_mut()

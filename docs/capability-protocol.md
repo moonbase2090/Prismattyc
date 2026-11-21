@@ -94,10 +94,16 @@ harnesses have no line discipline and do not need it.
 | `hybrid.attach.cell_rect` | Rich content anchored to a cell rectangle |
 | `hybrid.overlay.viewport` | Viewport-local overlay/HUD |
 | `input.rich_focus` | Explicit keyboard-focus handoff to a rich target (0.2, `--experimental-rich`; host chord grants, never automatic) |
+| `native.grid.v1` | Live native grid minor 0 on eligible direct local Linux PTYs with `--experimental-rich` |
+| `native.images.v1` | Native image minor 2 on eligible direct local Linux and Apple Silicon macOS PTYs with `--experimental-rich` |
 
 Unknown identifiers are ignored by older applications. Advertising a feature
 means the host can safely parse that feature's messages; it does not grant a
 child process additional OS permissions.
+
+The native tokens are independent. An images-only host supports minor 2 and
+does not promise minor 0. See [native sessions and images](native-lunatui-backend.md)
+for platform support, ownership and fallback behavior.
 
 Future numeric limits use additional reply keys rather than overloaded feature
 names, for example `limit.regions=64`. No limit key is frozen in this cut.

@@ -60,6 +60,27 @@ choose **Update and restart all components** again, or close and reopen that
 window. The update is never reported as complete while another app process
 is still running the old release. A missing MCP server is reported as having nothing to restart.
 
+While it runs, the dialog shows each step: the session check, the download,
+verification, installation, and each step of the restart. With **Save and
+restart** the restart steps are Saving the sessions, Stopping the old daemon,
+Starting the new daemon, Checking the restored sessions, Reconciling the
+official plug-ins, Restarting the MCP adapter, Relaunching the app and
+Opening the windows; **Restart without saving** stops the sessions instead
+of saving them and has no check. The relaunched app continues the same
+meter, takes the last step, and shows **Update finished** (or **Restart
+finished**) with one line for each step's outcome. Enter or Esc closes it;
+the result panel stays open beside it. If a step fails, the dialog stays on
+that step, names it, lists which steps finished and which did not start,
+and shows the error with **Check again** or **Close**. A session started
+while the dialog is open fails the first step, Checking the sessions, and
+nothing is stopped.
+
+`pmux restart` prints the same restart steps as lines on stderr, for example
+`Starting the new daemon (3 of 5)`; `pmux restart --progress` reports them as
+`pmux-progress` JSON lines instead, as `pmux update --progress` does for the
+download, verify and install stages. `pmux update` without `--progress` also
+prints its verify and install steps.
+
 If the daemon still owns its instance lock but does not answer, the session
 check retries before reporting an error with its command and PID. It does not
 show an empty session list or stop sessions on that failure. Update, restart,

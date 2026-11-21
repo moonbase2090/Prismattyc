@@ -29,6 +29,8 @@ const FAILED_OPTIONS: [(&str, &str); 2] = [
     ("Close", "Keep the installed version"),
 ];
 const WORKING: &str = "Please wait. The app restarts when the update finishes.";
+const DONE_OPTIONS: [(&str, &str); 1] = [("Close", "Back to your sessions")];
+const DONE_KEYS: &str = "Enter or Esc close";
 
 /// The update running in the dialog after a restart choice.
 struct Running {
@@ -76,11 +78,25 @@ impl RestartModal {
         self.running.as_ref()?.failure.as_deref()
     }
 
+    /// The update finished; the dialog shows its receipt until closed.
+    fn finished(&self) -> bool {
+        self.running
+            .as_ref()
+            .is_some_and(|running| running.meter.finished())
+    }
+
     fn title(&self) -> &'static str {
         match &self.running {
             Some(Running {
                 failure: Some(_), ..
             }) => return "Update did not finish",
+            Some(running) if running.meter.finished() => {
+                return if self.available.is_some() {
+                    "Update finished"
+                } else {
+                    "Restart finished"
+                }
+            }
             Some(_) if self.available.is_some() => return "Updating",
             Some(_) => return "Restarting components",
             None => {}
@@ -128,10 +144,12 @@ impl RestartModal {
     /// Act on the selected row: choose an option or fold the session list.
     fn activate(&mut self, index: usize) {
         if self.running.is_some() {
-            // Only the choices after a failure act; a running update has none.
+            // Only the choices after a failure or the finished update's
+            // Close act; a running update has none.
             match (self.failure().is_some(), index) {
                 (true, 0) => self.chosen = Some(update_flow::Action::Start),
                 (true, 1) => self.dismissed = true,
+                (false, 0) if self.finished() => self.dismissed = true,
                 _ => {}
             }
             return;
@@ -144,6 +162,12 @@ impl RestartModal {
     }
 
     fn key(&mut self, key: &Key) {
+        if self.finished() {
+            if let Key::Named(NamedKey::Enter | NamedKey::Space | NamedKey::Escape) = key {
+                self.dismissed = true;
+            }
+            return;
+        }
         if self.running.is_some() {
             if self.failure().is_none() {
                 return;
@@ -195,8 +219,18 @@ impl RestartModal {
         if let Some(running) = &self.running {
             let mut rows = running.meter.lines();
             rows.push(running.meter.bar().1);
+            if running.meter.finished() {
+                rows.extend(running.meter.receipt());
+                rows.extend(
+                    DONE_OPTIONS
+                        .iter()
+                        .map(|(label, hint)| format!("{label}: {hint}")),
+                );
+                return rows;
+            }
             match &running.failure {
                 Some(error) => {
+                    rows.extend(running.meter.receipt());
                     rows.extend(error.lines().map(str::to_string));
                     rows.extend(
                         FAILED_OPTIONS
@@ -229,6 +263,8 @@ impl RestartModal {
             Some(running) => (
                 if running.failure.is_some() {
                     "failed"
+                } else if running.meter.finished() {
+                    "finished"
                 } else {
                     "running"
                 },
@@ -255,6 +291,8 @@ impl RestartModal {
                 "meter": running.meter.lines(),
                 "bar": running.meter.bar().1,
                 "failed": running.failure.is_some(),
+                "finished": running.meter.finished(),
+                "receipt": running.meter.receipt(),
                 "error": running.failure,
             })),
             // Physical pixels of the last frame, for pointer drivers.
@@ -310,6 +348,28 @@ pub(super) fn fail(app: &mut App, meter: &update_meter::Meter, error: &str) {
             host.dirty = true;
             host.window.request_redraw();
         }
+    }
+}
+
+/// Show the update's receipt in every window after the relaunch: the meter
+/// as the previous app left it, finished by this one.
+pub(super) fn show_finished(
+    app: &mut App,
+    installed: &str,
+    available: Option<&str>,
+    meter: &update_meter::Meter,
+) {
+    // The notice beside it keeps the details: versions, sessions, windows.
+    for host in app.windows.values_mut() {
+        host.context_menu = None;
+        let mut modal = RestartModal::new(installed, available, Vec::new());
+        modal.running = Some(Running {
+            meter: meter.clone(),
+            failure: None,
+        });
+        host.restart_modal = Some(modal);
+        host.dirty = true;
+        host.window.request_redraw();
     }
 }
 
@@ -750,12 +810,27 @@ fn paint_progress(host: &mut HostState, buffer: &mut [u32], width: usize, height
         })
         .unwrap_or_default();
     let failed = running.failure.is_some();
-    // Title, step, detail, bar, note or error, choices, key hints.
-    let mut panel_h = pad + s(26.0) + s(14.0) + 3 * line_h + s(10.0);
-    panel_h += if failed {
-        error.len() * line_h + s(16.0) + FAILED_OPTIONS.len() * (row_h + s(2.0)) + s(8.0)
+    let finished = running.meter.finished();
+    // A finished or failed update lists every step's outcome.
+    let receipt = if failed || finished {
+        running.meter.receipt()
     } else {
+        Vec::new()
+    };
+    let options: &[(&str, &str)] = if failed {
+        &FAILED_OPTIONS
+    } else if finished {
+        &DONE_OPTIONS
+    } else {
+        &[]
+    };
+    // Title, step, detail, bar, receipt, note or error, choices, key hints.
+    let mut panel_h = pad + s(26.0) + s(14.0) + 3 * line_h + s(10.0);
+    panel_h += receipt.len() * line_h;
+    panel_h += if options.is_empty() {
         note.len() * line_h
+    } else {
+        error.len() * line_h + s(16.0) + options.len() * (row_h + s(2.0)) + s(8.0)
     };
     panel_h += s(14.0) + line_h + s(16.0);
     let panel_h = panel_h.min(height.saturating_sub(2 * margin));
@@ -850,8 +925,22 @@ fn paint_progress(host: &mut HostState, buffer: &mut [u32], width: usize, height
         );
     }
     cy += line_h + s(10.0);
+    for line in &receipt {
+        text(
+            buffer,
+            width,
+            x + pad,
+            cy,
+            Face::Regular,
+            body_px,
+            line,
+            tok.text,
+            clip,
+        );
+        cy += line_h;
+    }
     let mut hits = Hits::default();
-    if failed {
+    if !options.is_empty() {
         for line in &error {
             text(
                 buffer,
@@ -880,7 +969,7 @@ fn paint_progress(host: &mut HostState, buffer: &mut [u32], width: usize, height
             tok.hairline,
             255,
         );
-        for (index, (option, hint)) in FAILED_OPTIONS.iter().enumerate() {
+        for (index, (option, hint)) in options.iter().enumerate() {
             let row = Rect::new(x + s(8.0), ry, panel_w.saturating_sub(s(16.0)), row_h);
             if ry + row_h > bottom {
                 break;
@@ -940,7 +1029,13 @@ fn paint_progress(host: &mut HostState, buffer: &mut [u32], width: usize, height
         }
     }
     let ky = bottom.saturating_sub(s(16.0) + line_h / 2);
-    let keys = if failed { KEYS } else { WORKING };
+    let keys = if failed {
+        KEYS
+    } else if finished {
+        DONE_KEYS
+    } else {
+        WORKING
+    };
     text(
         buffer,
         width,
@@ -981,6 +1076,53 @@ mod tests {
                 "Show: 44 sessions · names, directories, launch commands, pane layouts",
             ]
         );
+    }
+
+    #[test]
+    fn the_relaunched_app_shows_the_receipt_until_closed() {
+        let mut meter = update_meter::Meter::new(true);
+        meter.apply(
+            &prismattyc_mux::release_update::progress::Progress::Restart {
+                item: "Opening the windows".into(),
+                index: 8,
+                count: 8,
+            },
+        );
+        meter.finish();
+        let mut m = RestartModal::new("0.3.71", Some("0.3.72"), Vec::new());
+        m.running = Some(Running {
+            meter: meter.clone(),
+            failure: None,
+        });
+        assert_eq!(m.title(), "Update finished");
+        assert_eq!(m.state()["state"], "finished");
+        assert_eq!(
+            m.rows(),
+            [
+                "Finished step 4 of 4: Restart",
+                "Opening the windows (8 of 8)",
+                "100%",
+                "Download: done",
+                "Verify: done",
+                "Install: done",
+                "Restart: done",
+                "Close: Back to your sessions",
+            ]
+        );
+        m.key(&Key::Named(NamedKey::ArrowDown));
+        assert!(!m.dismissed, "only Enter, Space or Esc close it");
+        m.key(&Key::Named(NamedKey::Escape));
+        assert!(m.dismissed);
+        assert!(m.chosen.is_none(), "closing the receipt starts nothing");
+
+        let mut restart_only = RestartModal::new("0.3.72", None, Vec::new());
+        let mut meter = update_meter::Meter::new(false);
+        meter.finish();
+        restart_only.running = Some(Running {
+            meter,
+            failure: None,
+        });
+        assert_eq!(restart_only.title(), "Restart finished");
     }
 
     #[test]

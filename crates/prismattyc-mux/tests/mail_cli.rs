@@ -458,6 +458,7 @@ fn mail_watch_reports_when_the_daemon_exits() {
 
 /// True once `pid` has a socket open. `pmux mail watch` opens the control
 /// socket and nothing else, so this is the connected daemon peer.
+#[cfg(not(target_os = "macos"))]
 fn process_has_unix_socket(pid: u32) -> bool {
     let Ok(entries) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
         return false;
@@ -467,4 +468,39 @@ fn process_has_unix_socket(pid: u32) -> bool {
             .ok()
             .is_some_and(|link| link.to_string_lossy().starts_with("socket:["))
     })
+}
+
+#[cfg(target_os = "macos")]
+fn process_has_unix_socket(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    let needed =
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
+    if needed <= 0 {
+        return false;
+    }
+    let entry_size = std::mem::size_of::<libc::proc_fdinfo>();
+    let mut descriptors = vec![
+        libc::proc_fdinfo {
+            proc_fd: 0,
+            proc_fdtype: 0,
+        };
+        needed as usize / entry_size
+    ];
+    let received = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDLISTFDS,
+            0,
+            descriptors.as_mut_ptr().cast(),
+            (descriptors.len() * entry_size) as libc::c_int,
+        )
+    };
+    if received <= 0 || received as usize > descriptors.len() * entry_size {
+        return false;
+    }
+    descriptors[..received as usize / entry_size]
+        .iter()
+        .any(|descriptor| descriptor.proc_fdtype == libc::PROX_FDTYPE_SOCKET as u32)
 }

@@ -49,7 +49,24 @@ For short-lived CLI drives, the helper below starts a fresh private `pmuxd` for 
 
 Each `--out` must be new. A successful drive prints `"status": "PASS"`. For desktop UI, use the native fixture in [desktop](features/desktop.md); it owns separate host and daemon processes. For Windows use [Windows](features/windows.md), not this Unix launch recipe.
 
+For direct local native grids, image uploads or displayed-source changes, run
+the [native terminal session drive](features/native.md):
+
+```sh
+python3 .cursor/skills/verify-prismattyc/scripts/verify-native.py \
+  --bins "$verify_bins" --out "$verify_evidence/native" --case all
+```
+
+It builds the pinned test producer and owns one isolated window session per
+case. Its fixture crates have separate lockfiles and require their own test
+and formatting commands from that feature page.
+
 ## CI and test portability
+
+Run Unix permission-failure tests as an ordinary user. Root bypasses the file
+mode restrictions those fixtures exercise. A fresh VM must also fetch enough
+history for `git merge-base HEAD origin/main` before running the workspace
+version check; fetching two unrelated shallow tips does not provide that base.
 
 Full workspace tests build real version-matched component fixtures. Install the
 Wasm standard library for the test toolchain first:
@@ -61,6 +78,10 @@ rustup target add wasm32-unknown-unknown --toolchain 1.90.0
 A native-only toolchain otherwise reports missing `core` from fixture builds.
 Using prebuilt production guests does not require rebuilding them for native
 package runtime proof.
+
+Host test fixtures use `CARGO_TARGET_DIR` when a build directory was created
+before Cargo and has no `CACHEDIR.TAG`. Keep that variable absolute when running
+tests through tools that prepare their own target directory.
 
 The `check` job runs `scripts/check-test-rules.py` (with its
 `scripts/check-test-rules_test.py`) against `.config/test-rules-baseline.toml`.

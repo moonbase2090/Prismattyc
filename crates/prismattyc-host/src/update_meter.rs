@@ -6,6 +6,7 @@
 //! items. Installing has no measurable fraction, so its bar moves without a
 //! percentage instead of showing a made-up one.
 use prismattyc_mux::release_update::progress::Progress;
+use serde::{Deserialize, Serialize};
 
 /// A progress bar: filled to a fraction, or a block that sweeps across it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,7 +41,7 @@ pub(super) fn meter_fill(width: usize, bar: MeterBar) -> (usize, usize) {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) enum Step {
     Download,
     Verify,
@@ -59,21 +60,27 @@ impl Step {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum Amount {
     Bytes { received: u64, total: u64 },
     Items { index: usize, count: usize },
     Unknown,
 }
 
-#[derive(Clone, Debug)]
+/// The meter's state travels with the relaunch, so the new app continues
+/// the same steps and ends on the same receipt.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct Meter {
     steps: Vec<Step>,
     step: usize,
     detail: String,
     amount: Amount,
     failed: bool,
+    /// Every step has finished.
+    #[serde(default)]
+    finished: bool,
     /// Moves the bar of a step without a fraction.
+    #[serde(skip)]
     frame: usize,
 }
 
@@ -98,6 +105,7 @@ impl Meter {
             detail: detail.into(),
             amount: Amount::Unknown,
             failed: false,
+            finished: false,
             frame: 0,
         }
     }
@@ -118,7 +126,7 @@ impl Meter {
     }
 
     pub(super) fn apply(&mut self, progress: &Progress) {
-        if self.failed {
+        if self.failed || self.finished {
             return;
         }
         // The command line prints the same words for each event.
@@ -159,9 +167,41 @@ impl Meter {
         self.failed = true;
     }
 
+    /// Every step has finished: the bar is full.
+    pub(super) fn finish(&mut self) {
+        if !self.failed {
+            self.finished = true;
+        }
+    }
+
+    pub(super) fn finished(&self) -> bool {
+        self.finished
+    }
+
+    /// One line for each step: done, failed with what it was doing, under
+    /// way, or not started.
+    pub(super) fn receipt(&self) -> Vec<String> {
+        self.steps
+            .iter()
+            .enumerate()
+            .map(|(index, step)| {
+                let state = if index < self.step || (index == self.step && self.finished) {
+                    "done".to_string()
+                } else if index > self.step {
+                    "not started".to_string()
+                } else if self.failed {
+                    format!("failed at {}", self.detail)
+                } else {
+                    format!("under way: {}", self.detail)
+                };
+                format!("{}: {state}", step.name())
+            })
+            .collect()
+    }
+
     /// Advance the moving bar; true when the meter has one to move.
     pub(super) fn tick(&mut self) -> bool {
-        if self.failed || self.amount != Amount::Unknown {
+        if self.failed || self.finished || self.amount != Amount::Unknown {
             return false;
         }
         self.frame = self.frame.wrapping_add(1);
@@ -188,6 +228,8 @@ impl Meter {
             "{} {} of {}: {}",
             if self.failed {
                 "Failed at step"
+            } else if self.finished {
+                "Finished step"
             } else {
                 "Step"
             },
@@ -211,6 +253,7 @@ impl Meter {
     /// fraction, nothing when it does not.
     pub(super) fn bar(&self) -> (MeterBar, String) {
         let fraction = match self.amount {
+            _ if self.finished => Some(1.0),
             Amount::Bytes { received, total } if total > 0 => {
                 Some(received.min(total) as f64 / total as f64)
             }
@@ -320,6 +363,51 @@ mod tests {
             ["Failed at step 2 of 4: Verify", "Verifying 2 of 6: pmuxd"]
         );
         assert_eq!(meter.bar(), (MeterBar::Fraction(166), "16%".into()));
+    }
+
+    #[test]
+    fn the_receipt_names_each_steps_outcome() {
+        let mut meter = Meter::new(true);
+        meter.apply(&Progress::Verify {
+            item: "pmuxd".into(),
+            index: 2,
+            count: 6,
+        });
+        assert_eq!(
+            meter.receipt(),
+            [
+                "Download: done",
+                "Verify: under way: Verifying 2 of 6: pmuxd",
+                "Install: not started",
+                "Restart: not started"
+            ]
+        );
+        meter.fail();
+        meter.finish();
+        assert!(!meter.finished(), "a failed update cannot finish");
+        assert_eq!(
+            meter.receipt()[1],
+            "Verify: failed at Verifying 2 of 6: pmuxd"
+        );
+    }
+
+    #[test]
+    fn a_finished_meter_is_full_and_still() {
+        let mut meter = Meter::new(false);
+        meter.apply(&restart(3, 6, "Starting the new daemon"));
+        meter.finish();
+        assert_eq!(meter.bar(), (MeterBar::Fraction(1000), "100%".into()));
+        assert!(!meter.tick());
+        meter.apply(&restart(4, 6, "Reconciling the official plug-ins"));
+        assert_eq!(
+            meter.lines(),
+            [
+                "Finished step 1 of 1: Restart",
+                "Starting the new daemon (3 of 6)"
+            ],
+            "events after the finish do not move it"
+        );
+        assert_eq!(meter.receipt(), ["Restart: done"]);
     }
 
     #[test]

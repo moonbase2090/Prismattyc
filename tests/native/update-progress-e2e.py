@@ -20,8 +20,14 @@ the update it opens two tabs: a plain session and one whose window is split in
 two panes, and prints a one-time marker into every pane. After the relaunch the
 sessions must have the same session and pane IDs, every marker must be in its
 pane's scrollback, and the app must show the same tabs. It writes before/after
-state (before.json, after.json) and captures (before.png, after-notice.png,
-after.png). The restart code runs from the installed release, so to test a
+state (before.json, after.json) and captures (before.png, after-notice.png
+once the receipt is closed, after.png).
+
+Every successful run also checks the progress across the relaunch: the
+restart's steps (from `pmux restart --progress` and the app's own) appear in
+order in the step lines of both apps, and the relaunched app finishes the
+meter on "Opening the windows" and shows a receipt with every step done
+(after-receipt.png), which Escape closes before the notice. The restart code runs from the installed release, so to test a
 branch's restart, build it as the newest version: the flow is then Restart
 components (no download), which runs the same save and restore.
 
@@ -460,12 +466,33 @@ exec {real} "$@"
             result['after'] = json.loads(cli('versions'))
             record('update finished and the app relaunched on daemon '
                    + str(result['after'].get('daemon', {}).get('version')))
+            # The relaunched app shows the result notice and, over it, the
+            # meter it carried, finished, with the receipt.
+            notice = change(lambda ui: dialog_state(ui) == 'finished'
+                            and (ui.get('panel') or {}).get('page') in ('update', 'result'),
+                            'receipt and result', 120)
+            shutil.copy(frames / f"frame-{notice['seq']:06d}.png", out / 'after-receipt.png')
+            receipt = window()['restart_modal']
+            result['receipt_rows'] = receipt['rows']
+            result['notice_rows'] = (window().get('space_details') or {}).get('rows', [])
+            count = 4 if result['update_check'].get('update_available') else 1
+            assert receipt['rows'][0] == f'Finished step {count} of {count}: Restart', receipt['rows']
+            assert receipt['rows'][1].startswith('Opening the windows ('), receipt['rows']
+            done = receipt['running']['receipt']
+            assert len(done) == count and all(line.endswith(': done') for line in done), done
+            record(f'the relaunched app finished the meter on Opening the windows; receipt: {"; ".join(done)}')
+            # On Windows the relaunched app is a new process; elsewhere it
+            # replaced itself and the same key sender (and relay) still
+            # reaches it.
+            pid = json.loads(cli('render-status', '--json')).get('host_pid')
+            if pid != host.pid:
+                keys.close()
+                keys = Keys(pid, args.key_relay)
+            keys.press('Escape')
+            closed = change(lambda ui: ui.get('dialog') is None and ui.get('panel') is not None,
+                            'receipt closed')
             if args.save:
-                # The result notice is shown after the windows reopened.
-                notice = change(lambda ui: (ui.get('panel') or {}).get('page') in ('update', 'result'),
-                                'restore result', 120)
-                shutil.copy(frames / f"frame-{notice['seq']:06d}.png", out / 'after-notice.png')
-                result['notice_rows'] = (window().get('space_details') or {}).get('rows', [])
+                shutil.copy(frames / f"frame-{closed['seq']:06d}.png", out / 'after-notice.png')
                 after = host_state()
                 result['after_state'] = after
                 (out / 'after.json').write_text(json.dumps(after, indent=2))
@@ -483,13 +510,6 @@ exec {real} "$@"
                                   for view in manifest.get('views', []) for tab in view.get('tabs', []))
                 assert titles(before) and titles(after) == titles(before), (before['tabs'], after['tabs'])
                 record('the app reopened the same tabs without asking')
-                # On Windows the relaunched app is a new process; elsewhere it
-                # replaced itself and the same key sender (and relay) still
-                # reaches it.
-                pid = json.loads(cli('render-status', '--json')).get('host_pid')
-                if pid != host.pid:
-                    keys.close()
-                    keys = Keys(pid, args.key_relay)
                 keys.press('Escape')
                 closed = change(lambda ui: ui.get('panel') is None, 'panel closed')
                 shutil.copy(frames / f"frame-{closed['seq']:06d}.png", out / 'after.png')
@@ -502,8 +522,10 @@ exec {real} "$@"
         steps = [line[len(STEP):].strip() for line in (app.kept if app else []) if line.startswith(STEP)]
         result['step_log'] = steps
         stages = []
+        def stage_of(line):
+            return line.split(' | ', 1)[0].split(': ', 1)[1]
         for line in steps:
-            stage = line.split(' | ', 1)[0].split(': ', 1)[1]
+            stage = stage_of(line)
             if not stages or stages[-1] != stage:
                 stages.append(stage)
         result['stages'] = stages
@@ -529,10 +551,26 @@ exec {real} "$@"
                         ['Download', 'Verify', 'Install', 'Restart'] if update else ['Restart'])
             downloads = [line for line in steps if line.startswith('Step 1 of 4: Download')]
             failed = [line for line in steps if line.startswith(FAILED)]
+            # The restart's steps, from both apps, each once and in order.
+            restart = [] if args.fail_download else (
+                ['Saving the sessions', 'Stopping the old daemon', 'Starting the new daemon',
+                 'Checking the restored sessions'] if args.save else
+                ['Stopping the sessions', 'Starting the new daemon']) + [
+                'Reconciling the official plug-ins', 'Restarting the MCP adapter',
+                'Relaunching the app', 'Opening the windows']
+            details = []
+            for line in steps:
+                detail = line.split(' | ', 1)[1] if ' | ' in line else ''
+                if ' (' in detail and stage_of(line) == 'Restart' and detail not in details:
+                    details.append(detail)
+            wanted = [f'{item} ({index} of {len(restart)})' for index, item in enumerate(restart, 1)]
+            result['restart_steps'] = details
             if (stages == expected and (len(downloads) >= 2 or not update)
-                    and bool(failed) == bool(args.fail_download)):
+                    and bool(failed) == bool(args.fail_download) and details == wanted):
                 result['status'] = 'PASS'
                 record('stages in order: ' + ' > '.join(stages))
+                if restart:
+                    record('restart steps in order across the relaunch: ' + ' > '.join(details))
         # A relaunched app and a restarted daemon are new processes; look each
         # up on its own so one failed lookup cannot skip the other.
         for lookup in (lambda: json.loads(cli('render-status', '--json')).get('host_pid'),

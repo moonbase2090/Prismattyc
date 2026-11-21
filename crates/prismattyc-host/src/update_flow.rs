@@ -38,7 +38,7 @@ pub(super) enum Event {
     Progress(Progress),
     /// Move the bar of a step that has no fraction.
     Tick,
-    Installed(Result<Resume, String>),
+    Installed(Result<Box<Resume>, String>),
     Restored(Result<String, String>),
 }
 
@@ -54,6 +54,33 @@ pub(super) struct Resume {
     /// restart. Used only when the sessions came back with their IDs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     views: Vec<restart::WindowState>,
+    /// The update's meter, which the relaunched app finishes. An app from
+    /// before this field relaunches without it and shows only the notice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    progress: Option<Carried>,
+}
+
+/// The progress an update carries into the relaunched app.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub(super) struct Carried {
+    installed: String,
+    available: Option<String>,
+    /// The meter as the app left it, at the relaunch step.
+    meter: Option<Meter>,
+    /// The last step, which the relaunched app takes: opening its windows.
+    open_windows: Progress,
+}
+
+impl Carried {
+    /// Take the last step and finish the meter; `None` without a meter.
+    fn finish(&self) -> Option<Meter> {
+        let mut meter = self.meter.clone()?;
+        meter.apply(&self.open_windows);
+        eprintln!("prismattyc-host: update progress: {}", meter.step_line());
+        meter.finish();
+        eprintln!("prismattyc-host: update progress: {}", meter.step_line());
+        Some(meter)
+    }
 }
 
 /// Which saved sessions the restarted daemon brought back, by name.
@@ -129,7 +156,7 @@ pub(super) enum Flow {
     Confirm(Plan),
     /// Installing and restarting; the flag stops the meter's ticker.
     Installing(Meter, Arc<AtomicBool>),
-    Restore(Resume),
+    Restore(Box<Resume>),
 }
 
 fn show(app: &mut App, text: &str, actions: &[(&str, Action)]) {
@@ -229,7 +256,7 @@ pub(super) fn action(app: &mut App, action: Action) {
                     let _ = proxy.send_event(UserAction::FullUpdate(event));
                 };
                 let result = install(plan, save, views, &report).map_err(|e| format!("{e:#}"));
-                report(Event::Installed(result));
+                report(Event::Installed(result.map(Box::new)));
             });
         }
         Action::Restore => {
@@ -310,9 +337,12 @@ pub(super) fn event(app: &mut App, event: Event) {
                 _ => show(app, &text, &actions),
             }
         }
-        Event::Installed(Ok(resume)) => {
-            if let Flow::Installing(_, stop) = &app.full_update {
+        Event::Installed(Ok(mut resume)) => {
+            if let Flow::Installing(meter, stop) = &app.full_update {
                 stop.store(true, Ordering::Relaxed);
+                if let Some(carried) = resume.progress.as_mut() {
+                    carried.meter = Some(meter.clone());
+                }
             }
             if let Err(error) = relaunch(&resume) {
                 app.full_update = Flow::Restore(resume.clone());
@@ -414,7 +444,7 @@ fn install(
     let backup = save.then_some(file.clone());
     let result = complete_install(&plan, &pmux, &file, !save, report);
     match result {
-        Ok((notice, restored)) => Ok(Resume {
+        Ok((notice, restored, steps)) => Ok(Resume {
             notice,
             backup,
             views: if restored.is_some() {
@@ -423,6 +453,12 @@ fn install(
                 Vec::new()
             },
             restored,
+            progress: Some(Carried {
+                installed: plan.installed.clone(),
+                available: plan.update_available.then(|| plan.available.clone()),
+                meter: None,
+                open_windows: restart_progress("Opening the windows", steps + 3, steps),
+            }),
         }),
         Err(error) => {
             if !save {
@@ -446,7 +482,7 @@ fn complete_install(
     consent: &Path,
     delete_consent: bool,
     report: &dyn Fn(Event),
-) -> Result<(String, Option<Restored>)> {
+) -> Result<(String, Option<Restored>, usize)> {
     if plan.update_available {
         let installed: Value = serde_json::from_str(&update_with_progress(pmux, report)?)?;
         anyhow::ensure!(
@@ -514,21 +550,26 @@ fn complete_install(
             space_panel::maintenance_result(&versions.to_string())
         ),
         restored,
+        steps,
     ))
 }
 
 /// Steps the app takes itself after the daemon restart: the MCP adapter,
-/// then the app.
-const AFTER_DAEMON: usize = 2;
+/// the relaunch, then (in the relaunched app) opening the windows.
+const AFTER_DAEMON: usize = 3;
 
 /// Restart step `index`, counted with the app's own steps after the
 /// daemon's `daemon_steps`.
-fn restart_step(item: &str, index: usize, daemon_steps: usize) -> Event {
-    Event::Progress(Progress::Restart {
+fn restart_progress(item: &str, index: usize, daemon_steps: usize) -> Progress {
+    Progress::Restart {
         item: item.into(),
         index,
         count: daemon_steps + AFTER_DAEMON,
-    })
+    }
+}
+
+fn restart_step(item: &str, index: usize, daemon_steps: usize) -> Event {
+    Event::Progress(restart_progress(item, index, daemon_steps))
 }
 
 /// Run the daemon restart and report each of its steps; returns its report
@@ -773,6 +814,17 @@ pub(super) fn resume(app: &mut App, unopened: &[String]) {
     for host in app.windows.values_mut() {
         host.restore_prompt = None;
     }
+    // The previous app's meter ends here, on its receipt.
+    if let Some(carried) = &resume.progress {
+        if let Some(meter) = carried.finish() {
+            restart_modal::show_finished(
+                app,
+                &carried.installed,
+                carried.available.as_deref(),
+                &meter,
+            );
+        }
+    }
     if let Some(restored) = &resume.restored {
         // The restarted daemon already brought the sessions back with their
         // IDs, so the saved tabs open on them directly. The user agreed to
@@ -798,7 +850,7 @@ pub(super) fn resume(app: &mut App, unopened: &[String]) {
     }
     if let Some(path) = &resume.backup {
         let text = format!("{}\nSession configuration saved at {}. Restore these sessions and relaunch their saved commands?", resume.notice, path.display());
-        app.full_update = Flow::Restore(resume);
+        app.full_update = Flow::Restore(Box::new(resume));
         show(
             app,
             &text,
@@ -815,6 +867,15 @@ pub(super) fn resume(app: &mut App, unopened: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    /// Tests that run commands through [`run`] hold this, so the check that
+    /// a failed command leaves no output directory sees only its own.
+    fn run_lock() -> std::sync::MutexGuard<'static, ()> {
+        static RUN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        RUN.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     #[cfg(unix)]
     fn fake_pmux(name: &str, body: &str) -> PathBuf {
@@ -834,6 +895,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_child_left_holding_the_output_does_not_block_the_result() {
+        let _run = run_lock();
         // The command starts a background process that keeps its standard
         // output open, as a started daemon could. Its pid is kept to end it.
         let pmux = fake_pmux(
@@ -859,6 +921,7 @@ echo note >&2"#,
     #[cfg(unix)]
     #[test]
     fn a_failed_command_reports_both_outputs_and_leaves_no_files() {
+        let _run = run_lock();
         let pmux = fake_pmux("fails", "echo out; echo err >&2; exit 3");
         let before: std::collections::BTreeSet<_> = std::fs::read_dir(std::env::temp_dir())
             .unwrap()
@@ -921,6 +984,7 @@ echo note >&2"#,
             serde_json::from_str(r#"{"notice":"done","backup":"/tmp/saved.json"}"#).unwrap();
         assert!(older.restored.is_none());
         assert!(older.backup.is_some());
+        assert!(older.progress.is_none(), "no meter to finish");
         let newer = Resume {
             notice: "done".into(),
             backup: None,
@@ -929,9 +993,58 @@ echo note >&2"#,
                 lost: Vec::new(),
             }),
             views: Vec::new(),
+            progress: None,
         };
         let round: Resume = serde_json::from_str(&serde_json::to_string(&newer).unwrap()).unwrap();
         assert_eq!(round.restored, newer.restored);
+    }
+
+    #[test]
+    fn the_relaunched_app_finishes_the_meter_the_update_carried() {
+        let mut meter = Meter::new(true);
+        meter.apply(&Progress::Install {
+            item: "core binaries".into(),
+        });
+        meter.apply(&restart_progress("Relaunching the app", 7, 5));
+        let resume = Resume {
+            notice: "done".into(),
+            backup: None,
+            restored: None,
+            views: Vec::new(),
+            progress: Some(Carried {
+                installed: "0.3.71".into(),
+                available: Some("0.3.72".into()),
+                meter: Some(meter),
+                open_windows: restart_progress("Opening the windows", 8, 5),
+            }),
+        };
+        // The meter crosses the relaunch in the environment, as text.
+        let relaunched: Resume =
+            serde_json::from_str(&serde_json::to_string(&resume).unwrap()).unwrap();
+        let carried = relaunched.progress.unwrap();
+        let finished = carried.finish().unwrap();
+        assert_eq!(
+            finished.lines(),
+            [
+                "Finished step 4 of 4: Restart",
+                "Opening the windows (8 of 8)"
+            ]
+        );
+        assert_eq!(finished.bar().1, "100%");
+        assert_eq!(
+            finished.receipt(),
+            [
+                "Download: done",
+                "Verify: done",
+                "Install: done",
+                "Restart: done"
+            ]
+        );
+        let without_meter = Carried {
+            meter: None,
+            ..carried
+        };
+        assert!(without_meter.finish().is_none(), "nothing to finish");
     }
 
     #[test]
@@ -1029,6 +1142,7 @@ echo note >&2"#,
     #[cfg(unix)]
     #[test]
     fn an_older_cli_without_progress_still_updates() {
+        let _run = run_lock();
         // The release CLI's wording for an option it does not know.
         let pmux = fake_pmux(
             "older",
@@ -1079,10 +1193,10 @@ echo '{"status":"installed"}'"#,
         assert_eq!(
             restarts(seen.into_inner()),
             [
-                ("Saving the sessions".into(), 1, 7),
-                ("Stopping the old daemon".into(), 2, 7)
+                ("Saving the sessions".into(), 1, 8),
+                ("Stopping the old daemon".into(), 2, 8)
             ],
-            "the app's MCP adapter and relaunch steps follow the daemon's five"
+            "the app's MCP adapter, relaunch and window steps follow the daemon's five"
         );
         std::fs::remove_dir_all(pmux.parent().unwrap()).unwrap();
     }
@@ -1090,6 +1204,7 @@ echo '{"status":"installed"}'"#,
     #[cfg(unix)]
     #[test]
     fn an_older_cli_restarts_the_daemon_as_one_step() {
+        let _run = run_lock();
         // The restart command's wording for an option it does not know.
         let pmux = fake_pmux(
             "restart-older",
@@ -1108,7 +1223,7 @@ echo '{"status":"restart_results"}'"#,
         assert_eq!(steps, 1);
         assert_eq!(
             restarts(seen.into_inner()),
-            [("Restarting the daemon and sessions".into(), 1, 3)]
+            [("Restarting the daemon and sessions".into(), 1, 4)]
         );
         std::fs::remove_dir_all(pmux.parent().unwrap()).unwrap();
     }

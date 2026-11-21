@@ -20,6 +20,7 @@ pmux plugin install org.moonbase.activity-monitor@1.1.0
 pmux plugin inspect org.moonbase.activity-monitor
 pmux plugin enable org.moonbase.activity-monitor --allow activity.read:local
 pmux plugin run org.moonbase.activity-monitor:main
+pmux plugin update org.moonbase.activity-monitor
 pmux plugin disable org.moonbase.activity-monitor
 ```
 
@@ -28,6 +29,22 @@ the selected version and approved endpoint scope for the daemon selected by
 normal [pmux target resolution](mux-cli.md). Run opens a view. Disable closes
 that instance's plug-in views and revokes its tool calls. Other instances and
 user sessions continue running.
+
+`pmux plugin update [ID]` installs the newest compatible catalog version of one
+plug-in (or of every plug-in the daemon knows) and applies it with the
+permissions already granted. A plug-in that is off stays off: the update
+installs the version and says so. Each plug-in gets its own result (`updated`,
+`installed_stays_off`, `current` or `failed` with the reason), and one failure
+does not stop the others. `enable` without `--allow` grants the permissions the
+package's manifest requires. A refused scope lists the valid ones.
+
+Settings has the same on the **Plug-ins** page: each plug-in shows its
+installed version and its state, one row per permission in plain words (the
+manifest's required ones are pre-selected the first time), **Update to** and
+**Update to ... and enable** for a plug-in that is off. The command palette has
+**plugins_check** (check for plug-in updates) and **plugins_update** (update and
+enable plug-ins); both open the page and show the result there. They are on by
+default and bound to no key.
 
 The official Activity Monitor and activity connector start enabled. On startup,
 pmuxd installs the newest compatible version in its verified bundle when a

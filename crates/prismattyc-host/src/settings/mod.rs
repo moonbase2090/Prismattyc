@@ -1509,6 +1509,16 @@ pub(super) fn open(host: &mut crate::HostState) {
     host.window.request_redraw();
 }
 
+pub(super) use plugins::Command as PluginsCommand;
+
+/// A palette command for the Plugins page: open it and run the command.
+pub(super) fn plugins_command(host: &mut crate::HostState, command: PluginsCommand) {
+    open_plugins(host);
+    if let Some(panel) = host.settings.as_mut() {
+        panel.plugins.command(command);
+    }
+}
+
 pub(super) fn open_plugins(host: &mut crate::HostState) {
     open(host);
     if let Some(panel) = host.settings.as_mut() {

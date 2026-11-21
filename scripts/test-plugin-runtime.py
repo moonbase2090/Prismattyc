@@ -1389,6 +1389,13 @@ else:
         cli("enable", PLUGIN, "--allow", "activity.read:local")
         assert cli("inspect", PLUGIN)["state"]["selected"]["version"] == "1.0.0"
         assert tool("counter") == {"counter": 5}
+        # One-step update: 1.0.1 is installed but does not fit this release, so
+        # the update says so by name and leaves the running version alone.
+        outcome = next(item for item in cli("update", PLUGIN) if item["id"] == PLUGIN)
+        assert outcome["from"] == "1.0.0" and outcome["to"] == "1.0.1", outcome
+        assert outcome["result"]["status"] == "failed" and "does not fit this release" in outcome["result"]["detail"], outcome
+        assert cli("inspect", PLUGIN)["state"]["selected"]["version"] == "1.0.0"
+        assert "valid scopes: activity.read:local, activity.manage:local" in cli("enable", PLUGIN, "--allow", "activity.read:nowhere", succeeds=False)
         assert daemon.poll() is None and daemon.pid == pid
         assert connection.request("snapshot")["response"]["snapshot"]["sessions"] == baseline
         tail_argv, tail_pid = remote_proof()

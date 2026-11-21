@@ -67,6 +67,9 @@ pub(crate) struct Scrim {
     /// The open modal's scrim blurs. Chosen when it opens, from `slow`, and
     /// kept until it closes, so a dialog never changes look while it is up.
     blur: bool,
+    /// The blur was affordable when the scrim opened. A dialog handed over to
+    /// keeps this, so only the system's choice can change its look.
+    blur_fits: bool,
     /// What the last frame painted.
     painted: Option<Painted>,
     /// The system's reduce-motion and reduce-transparency choices, read when
@@ -99,7 +102,7 @@ impl Scrim {
         self.modal = modal;
         self.system = system;
         if self.opened_at.is_some() {
-            self.blur = !self.slow && !self.system.reduce_transparency;
+            self.blur = self.blur_fits && !self.system.reduce_transparency;
         }
     }
 
@@ -112,7 +115,8 @@ impl Scrim {
             return None;
         }
         let opened = *self.opened_at.get_or_insert_with(|| {
-            self.blur = !self.slow && !self.system.reduce_transparency;
+            self.blur_fits = !self.slow;
+            self.blur = self.blur_fits && !self.system.reduce_transparency;
             now
         });
         if reduced_motion || self.system.reduce_motion {
@@ -606,5 +610,24 @@ mod tests {
             Some(false),
             "and the new reduce-transparency choice"
         );
+    }
+
+    #[test]
+    fn a_handover_keeps_the_blur_chosen_when_the_scrim_opened() {
+        let look = Look::new(ThemeVariant::Dark, 1.0);
+        let mut scrim = Scrim::default();
+        let t0 = Instant::now();
+        scrim.follow_system(Some("restore prompt"), Preferences::default());
+        scrim.level(true, t0, true);
+        let mut frame = vec![pack_argb(255, [100; 3]); 32 * 8];
+        // A slow blur while the first dialog is up must not strip the blur
+        // from the dialog that takes over, nor from the one that returns.
+        scrim.slow = true;
+        for modal in ["session prompt", "restore prompt"] {
+            scrim.follow_system(Some(modal), Preferences::default());
+            scrim.paint(&mut frame, 32, 8, look, 1.0);
+            assert_eq!(scrim.painted().map(|p| p.blur), Some(true), "{modal}");
+            scrim.slow = true;
+        }
     }
 }

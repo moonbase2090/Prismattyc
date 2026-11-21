@@ -245,7 +245,9 @@ impl ImageRegistry {
 
     #[cfg(test)]
     pub(super) fn finish_for_test(&mut self) -> Result<(), RegistryError> {
-        let mut job = self.running.take().unwrap();
+        let Some(mut job) = self.running.take() else {
+            return Ok(());
+        };
         let completed = job.worker.wait_for_test();
         self.complete(job, completed)
     }

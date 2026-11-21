@@ -46,6 +46,7 @@ mod macos_menu;
 mod macos_update;
 #[cfg(target_os = "macos")]
 mod macos_window;
+mod modal_scrim;
 mod move_target;
 mod mux;
 mod notify;
@@ -1150,6 +1151,8 @@ struct HostState {
     /// Whether a transient overlay was visible in the previous raster pass.
     /// A closed overlay needs one full frame to clear its old pixels.
     last_transient_overlay_visible: bool,
+    /// The dimmed, blurred layer under every open modal, and its fade.
+    modal_scrim: modal_scrim::Scrim,
     last_frame_size: Option<(u32, u32)>,
     last_render_log: Option<Instant>,
     mux: mux::MuxRuntime,
@@ -4604,6 +4607,7 @@ impl App {
                 last_layout_snapshot: None,
                 last_chrome_snapshot: None,
                 last_transient_overlay_visible: false,
+                modal_scrim: modal_scrim::Scrim::default(),
                 last_frame_size: None,
                 last_render_log: None,
                 mux,
@@ -6057,6 +6061,37 @@ fn transient_overlay_visible(state: TransientOverlayState) -> bool {
 /// The rail's `+` chip stays a compact glyph. Chrome snapshots therefore do
 /// not see the typed name. Partial raster must treat this modal like the
 /// command palette: force a full frame while it is visible.
+/// A dialog, picker or modal menu is open over the panes. Each one paints
+/// over [`modal_scrim`]; inline prompts (find, tab rename), toasts, the
+/// walkthrough and the splash do not.
+fn modal_open(host: &HostState) -> bool {
+    host.theme_picker.is_some()
+        || host.palette.is_some()
+        || host.space_picker.is_some()
+        || host.context_menu.is_some()
+        || save_space_modal_open(host.space_rail.edit.as_ref())
+        || host.restore_prompt.is_some()
+        || host.restart_modal.is_some()
+        || host.session_prompt.is_some()
+        || host.transparency.is_some()
+}
+
+/// Paint the modal scrim when a modal is open, and keep frames coming while
+/// it fades in.
+fn paint_modal_scrim(host: &mut HostState, buffer: &mut [u32], width: usize, height: usize) {
+    let open = modal_open(host);
+    let Some(level) = host
+        .modal_scrim
+        .level(open, Instant::now(), host.reduced_motion)
+    else {
+        return;
+    };
+    let look = modal_scrim::Look::new(host.theme.variant, host.window.scale_factor());
+    if host.modal_scrim.paint(buffer, width, height, look, level) {
+        host.window.request_redraw();
+    }
+}
+
 fn save_space_modal_open(edit: Option<&space_rail::RailEdit>) -> bool {
     edit.is_some_and(|edit| edit.target.is_none())
 }
@@ -7879,6 +7914,8 @@ fn rasterize_frame(
             );
         }
     }
+    // Everything above sits behind a modal; everything below is one.
+    paint_modal_scrim(host, buffer, width as usize, height as usize);
     if let Some(picker) = host.theme_picker.as_ref() {
         let items = picker_items(picker.family.as_deref());
         let rows: Vec<ThemePickerRow<'_>> = items

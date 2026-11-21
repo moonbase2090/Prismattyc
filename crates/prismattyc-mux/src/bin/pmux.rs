@@ -4,7 +4,7 @@
 //! control protocol control plane behind tmux-shaped verbs:
 //!
 //! ```text
-//! pmux up [PROGRAM ARGS...]     start the server detached
+//! pmux up [--restore-workspace] [PROGRAM ARGS...]   start the server detached
 //! pmux attach [SESSION]         attach (auto-starts a missing server)
 //! pmux attach --all             open prismattyc-host; sessions as panes in tabs
 //! pmux ls                       sessions -> windows -> panes
@@ -125,7 +125,9 @@ USAGE:
          [--session NAME] <COMMAND> [ARGS]
 
 session
-    up [--] [PROGRAM ARGS...]     start the server (default: $SHELL -l)
+    up [--restore-workspace] [--] [PROGRAM ARGS...]
+                                  start the server (default: $SHELL -l); with
+                                  --restore-workspace, recreate the saved workspace
     attach [SESSION] [--watch] [--write TEXT] [--pane ID]
                      [--json|--styled-json] [--read-only] [--fit]
                                   attach (TTY: interactive; else JSON dump);
@@ -572,7 +574,12 @@ fn main() -> Result<()> {
         }
         Verb::Up => {
             reject_session_flag(cli_session.as_deref(), "up")?;
-            cmd_up(&paths, program_from(rest))
+            let mut rest = rest;
+            let restore = rest.first().is_some_and(|arg| arg == "--restore-workspace");
+            if restore {
+                rest.remove(0);
+            }
+            cmd_up(&paths, program_from(rest), restore)
         }
         Verb::Attach => {
             reject_session_flag(cli_session.as_deref(), "attach")?;
@@ -1055,7 +1062,9 @@ fn find_bin(keys: &[&str], names: &[&str]) -> PathBuf {
     prismattyc_mux::executable::app_companion(names).unwrap_or_else(|| PathBuf::from(names[0]))
 }
 
-fn cmd_up(paths: &Paths, program: Vec<String>) -> Result<()> {
+/// Start the server detached. With `restore`, the server recreates the saved
+/// workspace (sessions, layouts and scrollback) instead of starting one shell.
+fn cmd_up(paths: &Paths, program: Vec<String>, restore: bool) -> Result<()> {
     let deadline = Instant::now() + UP_WAIT;
     while prismattyc_mux::daemon_lock::DaemonLock::is_held(&paths.socket)? {
         if probe_socket_liveness(&paths.socket) == SocketLiveness::Live {
@@ -1094,9 +1103,11 @@ fn cmd_up(paths: &Paths, program: Vec<String>) -> Result<()> {
         .with_context(|| format!("open {}", paths.logfile.display()))?;
     let server = find_bin(&["PMUX_SERVER"], &["pmuxd"]);
     let mut command = Command::new(&server);
+    command.arg("--socket").arg(&paths.socket);
+    if restore {
+        command.arg("--restore-workspace");
+    }
     command
-        .arg("--socket")
-        .arg(&paths.socket)
         .arg("--")
         .args(&program)
         .stdin(Stdio::null())
@@ -1169,7 +1180,7 @@ fn ensure_live_server(paths: &Paths) -> Result<()> {
                 }
             }
             eprintln!("pmux: no live server; starting one");
-            cmd_up(paths, program_from(Vec::new()))
+            cmd_up(paths, program_from(Vec::new()), false)
         }
     }
 }

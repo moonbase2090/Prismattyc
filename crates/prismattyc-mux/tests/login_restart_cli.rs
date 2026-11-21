@@ -1274,6 +1274,7 @@ fn session_configuration_restart_stops_only_consented_sessions() {
             "--stop-sessions",
             "--consented-config",
             file.to_str().unwrap(),
+            "--delete-consented-config",
             "--worker",
             "--json",
         ],
@@ -1282,10 +1283,147 @@ fn session_configuration_restart_stops_only_consented_sessions() {
         restarted.contains("\"status\":\"restarted\""),
         "{restarted}"
     );
+    assert!(
+        !file.exists(),
+        "restart without saving keeps no configuration"
+    );
     let sessions = ok(&pmux(&socket, &root, &[], &["restart", "--plan", "--json"]));
     assert!(!sessions.contains("\"work\""), "{sessions}");
     ok(&pmux(&socket, &root, &[], &["stop"]));
     drop(server);
+}
+
+/// Save and restart: the restarted daemon brings the sessions back by itself,
+/// with their IDs and the scrollback they had, and relaunches their commands.
+#[test]
+fn saved_restart_restores_sessions_with_their_ids_and_scrollback() {
+    let root = temp_root("cfg-keep");
+    let socket = socket_path(&root);
+    let pane_log = root.join("pane-log.json");
+    let env = [("PMUX_PANE_LOG", pane_log.to_str().unwrap())];
+    let server = start_server_with_env(&socket, &root, &env);
+    let pmux = |args: &[&str]| pmux(&socket, &root, &env, args);
+    let created = ok(&pmux(&[
+        "new",
+        "--no-attach",
+        "work",
+        "/bin/sh",
+        "-c",
+        "printf 'BEFORE-%s\\n' $$; exec sleep 999",
+    ]));
+    // Each run prints its own process id, so the old line can only come
+    // back from the saved scrollback, not from the relaunched command.
+    let before = first_watched_match(&socket, &root, &env, "work", "BEFORE-", None);
+    let file = root.join("configuration.json");
+    ok(&pmux(&["session-config", "save", file.to_str().unwrap()]));
+
+    let restarted = ok(&pmux(&[
+        "restart",
+        "--daemon",
+        "--stop-sessions",
+        "--consented-config",
+        file.to_str().unwrap(),
+        "--worker",
+        "--json",
+    ]));
+    let report: serde_json::Value = serde_json::from_str(restarted.trim()).unwrap();
+    let sessions = report["components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|component| component["component"] == "sessions")
+        .unwrap_or_else(|| panic!("no sessions result: {restarted}"));
+    assert_eq!(sessions["status"], "restored", "{restarted}");
+    assert!(
+        sessions["restored"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|name| name == "work"),
+        "{restarted}"
+    );
+    assert!(file.exists(), "the saved configuration stays available");
+
+    let listed = ok(&pmux(&["ls"]));
+    let id = created
+        .split("(id ")
+        .nth(1)
+        .and_then(|rest| rest.split(',').next())
+        .unwrap_or_else(|| panic!("no session id in {created}"));
+    assert!(
+        listed.contains(&format!("session work (id {id})")),
+        "the session keeps its id {id}: {listed}"
+    );
+    // The relaunched command prints a new line next to the restored one.
+    first_watched_match(&socket, &root, &env, "work", "BEFORE-", Some(&before));
+    let history = ok(&pmux(&["save-buffer", "work", "-", "--history"]));
+    assert!(
+        history.contains(&before),
+        "the old output {before} must come back: {history}"
+    );
+    ok(&pmux(&["stop"]));
+    drop(server);
+}
+
+/// The first `PREFIX…` word, other than `except`, that a watching attach
+/// shows for SESSION. The attach prints one line per screen revision; this
+/// waits for those lines, bounded by one deadline, and never polls.
+fn first_watched_match(
+    socket: &Path,
+    root: &Path,
+    env: &[(&str, &str)],
+    session: &str,
+    prefix: &str,
+    except: Option<&str>,
+) -> String {
+    use std::io::BufRead;
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pmux"));
+    clear_command_env(&mut command);
+    apply_isolation(&mut command, root);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let mut watcher = prismattyc_process::spawn(
+        command
+            .arg("--socket")
+            .arg(socket)
+            .args(["attach", session, "--watch", "--json"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .expect("spawn watching attach");
+    let stdout = watcher.stdout.take().unwrap();
+    let (lines, received) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if lines.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let found = loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let Ok(line) = received.recv_timeout(remaining) else {
+            break None;
+        };
+        let word = line.match_indices(prefix).find_map(|(start, _)| {
+            let word: String = line[start..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .collect();
+            (word.len() > prefix.len() && Some(word.as_str()) != except).then_some(word)
+        });
+        if word.is_some() {
+            break word;
+        }
+    };
+    let _ = watcher.kill();
+    let _ = watcher.wait();
+    let _ = reader.join();
+    found.unwrap_or_else(|| panic!("{session} never showed {prefix}"))
 }
 
 #[test]

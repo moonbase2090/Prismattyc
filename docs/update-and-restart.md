@@ -41,11 +41,12 @@ it and press Enter) to list their names, and **Hide** to fold the list again.
 
 Choose one of these actions:
 
-- **Save and restart** saves session names, working directories, foreground
-  commands, agent bindings, pane layouts, and Space ownership, so you can
-  recreate the sessions afterwards.
-- **Restart without saving** updates and restarts without saving a session
-  configuration. The sessions are discarded.
+- **Save and restart** keeps your sessions. After the restart they come back
+  by themselves, with their names, split panes, working directories, Space
+  ownership, agent bindings, and scrollback, and their programs start again.
+  A session configuration file is also saved.
+- **Restart without saving** updates and restarts without keeping the
+  sessions. They are discarded.
 - **Cancel** (or Esc) leaves the sessions and running components alone.
 
 The updater downloads and verifies the release before stopping sessions.
@@ -61,12 +62,21 @@ On macOS, the updater keeps a displaced app bundle while a process still maps
 its executables. The result names the retained bundle and the processes using it.
 Restart those components before removing the retained bundle.
 
-If you saved a configuration, the relaunched app offers **Restore sessions**
-or **Keep configuration for later**. Restoration recreates missing sessions
-in their saved directories and relaunches their commands. It leaves existing
-sessions alone, so retrying does not replay a command into a running session.
-Session configuration does not save terminal output or unsaved program state.
-The configuration file stays available after restoration.
+With **Save and restart**, the updater records the sessions before stopping
+the daemon, stops it in order so every pane's scrollback is written, and
+starts the new daemon with that workspace. Sessions keep their IDs, so the
+relaunched app reopens your tabs on them without asking again. Each pane
+starts in its saved directory and runs what it was running: the foreground
+command of an interactive shell, or the pane's own launch command. Programs
+start fresh; unsaved program state is not kept. The result names the sessions
+that came back and any that did not.
+
+The session configuration file stays available. If the relaunched app comes
+from a release that cannot restore sessions by itself, it offers **Restore
+sessions** or **Keep configuration for later** instead. That restoration
+recreates missing sessions in their saved directories and relaunches their
+commands, without their scrollback. It leaves existing sessions alone, so
+retrying does not replay a command into a running session.
 
 For a program launched directly in a pane, saving preserves its original
 command and arguments. For an interactive shell, it captures the current

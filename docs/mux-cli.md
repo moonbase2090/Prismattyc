@@ -55,6 +55,7 @@ Commands:
 ```bash
 pmux up                  # start the server detached ($SHELL -l)
 pmux up -- /bin/bash -l  # ... with an explicit program
+pmux up --restore-workspace  # ... recreating the saved workspace (sessions, layouts, scrollback)
 pmux attach              # attach; TTY = interactive, else JSON dump
 pmux attach work         # attach to a named session
 pmux attach work --json # force the JSON ReadPane dump

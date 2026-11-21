@@ -33,10 +33,9 @@ pub(super) struct Plan {
 #[derive(Debug)]
 pub(super) enum Event {
     Prepared(Result<Plan, String>),
-    /// A stage reported by `pmux update --progress`.
+    /// A stage reported by `pmux update --progress` or `pmux restart
+    /// --progress`, or a restart step the app takes itself.
     Progress(Progress),
-    /// The app is restarting component `index` of `count`.
-    Restart(usize, usize, &'static str),
     /// Move the bar of a step that has no fraction.
     Tick,
     Installed(Result<Resume, String>),
@@ -293,10 +292,6 @@ pub(super) fn event(app: &mut App, event: Event) {
             meter.apply(&progress);
             true
         }),
-        Event::Restart(index, count, item) => refresh_meter(app, |meter| {
-            meter.restart(index, count, item);
-            true
-        }),
         Event::Tick => refresh_meter(app, Meter::tick),
         Event::Installed(Err(error)) => {
             let text = format!("The operation could not finish.\n{error}");
@@ -481,13 +476,12 @@ fn complete_install(
     }
     restart.extend(["--worker".to_string(), "--json".to_string()]);
     let restart_args = restart.iter().map(String::as_str).collect::<Vec<_>>();
-    report(Event::Restart(1, RESTARTS, "daemon and sessions"));
-    let restarted = run(&installed, &restart_args)
+    let (restarted, steps) = restart_daemon(&installed, &restart_args, report)
         .context("The files are installed, but the daemon restart failed")?;
     let restored = (!delete_consent)
         .then(|| Restored::from_report(&restarted))
         .flatten();
-    report(Event::Restart(2, RESTARTS, "MCP adapter"));
+    report(restart_step("Restarting the MCP adapter", steps + 1, steps));
     let mcp = run(&installed, &["restart", "--mcp", "--json"])
         .context("The daemon restarted, but the MCP restart failed")?;
     let mut versions: Value = serde_json::from_str(&run(&installed, &["versions"])?)?;
@@ -510,7 +504,7 @@ fn complete_install(
         "The running daemon is {actual}; expected {}. The app has not restarted.",
         plan.available
     );
-    report(Event::Restart(3, RESTARTS, "app"));
+    report(restart_step("Relaunching the app", steps + 2, steps));
     Ok((
         format!(
             "Prismattyc {} is installed. The daemon restarted on {}.\n{}\n{}",
@@ -523,9 +517,41 @@ fn complete_install(
     ))
 }
 
-/// Components the app restarts after installing: the daemon with its
-/// sessions, the MCP adapter, then the app itself.
-const RESTARTS: usize = 3;
+/// Steps the app takes itself after the daemon restart: the MCP adapter,
+/// then the app.
+const AFTER_DAEMON: usize = 2;
+
+/// Restart step `index`, counted with the app's own steps after the
+/// daemon's `daemon_steps`.
+fn restart_step(item: &str, index: usize, daemon_steps: usize) -> Event {
+    Event::Progress(Progress::Restart {
+        item: item.into(),
+        index,
+        count: daemon_steps + AFTER_DAEMON,
+    })
+}
+
+/// Run the daemon restart and report each of its steps; returns its report
+/// and how many steps it took. A command-line tool from before restart
+/// progress rejects the option before it stops anything, so the restart
+/// then runs without it, as one step.
+fn restart_daemon(pmux: &Path, args: &[&str], report: &dyn Fn(Event)) -> Result<(String, usize)> {
+    let steps = std::cell::Cell::new(0);
+    let mut forward = |progress| {
+        if let Progress::Restart { item, index, count } = progress {
+            steps.set(count);
+            report(restart_step(&item, index, count));
+        }
+    };
+    let with_progress = [args, &["--progress"]].concat();
+    match run_with_progress(pmux, &with_progress, &mut forward) {
+        Err(error) if format!("{error:#}").contains(r#"option "--progress""#) => {
+            report(restart_step("Restarting the daemon and sessions", 1, 1));
+            Ok((run(pmux, args)?, 1))
+        }
+        result => result.map(|report| (report, steps.get())),
+    }
+}
 
 fn verify_installed_versions(value: &Value, expected: &str) -> Result<()> {
     let installed = value["installed"]
@@ -1016,6 +1042,74 @@ echo '{"status":"installed"}'"#,
         );
         let output = update_with_progress(&pmux, &|_| {}).unwrap();
         assert_eq!(output, r#"{"status":"installed"}"#);
+        std::fs::remove_dir_all(pmux.parent().unwrap()).unwrap();
+    }
+    fn restarts(seen: Vec<Event>) -> Vec<(String, usize, usize)> {
+        seen.into_iter()
+            .map(|event| match event {
+                Event::Progress(Progress::Restart { item, index, count }) => (item, index, count),
+                other => panic!("not a restart step: {other:?}"),
+            })
+            .collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_daemon_restart_steps_count_the_apps_own_steps() {
+        let step = |item: &str, index| {
+            progress::line(&Progress::Restart {
+                item: item.into(),
+                index,
+                count: 5,
+            })
+        };
+        let pmux = fake_pmux(
+            "restart-steps",
+            &format!(
+                "echo '{}' >&2\necho 'a plain message' >&2\necho '{}' >&2\necho '{{\"status\":\"restart_results\"}}'",
+                step("Saving the sessions", 1),
+                step("Stopping the old daemon", 2)
+            ),
+        );
+        let seen = std::cell::RefCell::new(Vec::new());
+        let report = |event| seen.borrow_mut().push(event);
+        let (output, steps) = restart_daemon(&pmux, &["restart", "--json"], &report).unwrap();
+        assert_eq!(output, r#"{"status":"restart_results"}"#);
+        assert_eq!(steps, 5);
+        assert_eq!(
+            restarts(seen.into_inner()),
+            [
+                ("Saving the sessions".into(), 1, 7),
+                ("Stopping the old daemon".into(), 2, 7)
+            ],
+            "the app's MCP adapter and relaunch steps follow the daemon's five"
+        );
+        std::fs::remove_dir_all(pmux.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_older_cli_restarts_the_daemon_as_one_step() {
+        // The restart command's wording for an option it does not know.
+        let pmux = fake_pmux(
+            "restart-older",
+            r#"for arg in "$@"; do
+  if [ "$arg" = --progress ]; then
+    echo 'Error: unknown restart option "--progress"; use pmux restart --help' >&2
+    exit 1
+  fi
+done
+echo '{"status":"restart_results"}'"#,
+        );
+        let seen = std::cell::RefCell::new(Vec::new());
+        let report = |event| seen.borrow_mut().push(event);
+        let (output, steps) = restart_daemon(&pmux, &["restart", "--json"], &report).unwrap();
+        assert_eq!(output, r#"{"status":"restart_results"}"#);
+        assert_eq!(steps, 1);
+        assert_eq!(
+            restarts(seen.into_inner()),
+            [("Restarting the daemon and sessions".into(), 1, 3)]
+        );
         std::fs::remove_dir_all(pmux.parent().unwrap()).unwrap();
     }
 }

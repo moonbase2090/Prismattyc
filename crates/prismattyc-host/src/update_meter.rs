@@ -121,43 +121,37 @@ impl Meter {
         if self.failed {
             return;
         }
+        // The command line prints the same words for each event.
+        self.detail = progress.describe();
         match progress {
             Progress::Download {
-                item,
-                received,
-                total,
+                received, total, ..
             } => {
                 self.enter(Step::Download);
-                self.detail = format!("Downloading {item}");
                 self.amount = Amount::Bytes {
                     received: *received,
                     total: *total,
                 };
             }
-            Progress::Verify { item, index, count } => {
+            Progress::Verify { index, count, .. } => {
                 self.enter(Step::Verify);
-                self.detail = format!("Verifying {index} of {count}: {item}");
                 self.amount = Amount::Items {
                     index: *index,
                     count: *count,
                 };
             }
-            Progress::Install { item } => {
+            Progress::Install { .. } => {
                 self.enter(Step::Install);
-                self.detail = format!("Installing {item}");
                 self.amount = Amount::Unknown;
             }
+            Progress::Restart { index, count, .. } => {
+                self.enter(Step::Restart);
+                self.amount = Amount::Items {
+                    index: *index,
+                    count: *count,
+                };
+            }
         }
-    }
-
-    /// A restart of one component, reported by the app itself.
-    pub(super) fn restart(&mut self, index: usize, count: usize, item: &str) {
-        if self.failed {
-            return;
-        }
-        self.enter(Step::Restart);
-        self.detail = format!("Restarting {index} of {count}: {item}");
-        self.amount = Amount::Items { index, count };
     }
 
     /// Keep the bar at the step that failed.
@@ -287,13 +281,24 @@ mod tests {
         assert_ne!(meter.bar().0, first, "the bar moves on each tick");
     }
 
+    fn restart(index: usize, count: usize, item: &str) -> Progress {
+        Progress::Restart {
+            item: item.into(),
+            index,
+            count,
+        }
+    }
+
     #[test]
     fn restart_only_has_a_single_step() {
         let mut meter = Meter::new(false);
-        meter.restart(2, 3, "MCP adapter");
+        meter.apply(&restart(2, 3, "Restarting the MCP adapter"));
         assert_eq!(
             meter.lines(),
-            ["Step 1 of 1: Restart", "Restarting 2 of 3: MCP adapter"]
+            [
+                "Step 1 of 1: Restart",
+                "Restarting the MCP adapter (2 of 3)"
+            ]
         );
         assert_eq!(meter.bar(), (MeterBar::Fraction(333), "33%".into()));
     }
@@ -308,7 +313,7 @@ mod tests {
         });
         meter.fail();
         meter.apply(&Progress::Install { item: "x".into() });
-        meter.restart(1, 3, "daemon");
+        meter.apply(&restart(1, 3, "Stopping the old daemon"));
         assert!(!meter.tick());
         assert_eq!(
             meter.lines(),
@@ -324,7 +329,7 @@ mod tests {
             meter.note(),
             "Your sessions keep running until the restart step."
         );
-        meter.restart(1, 3, "daemon and sessions");
+        meter.apply(&restart(1, 3, "Saving the sessions"));
         assert_eq!(
             meter.note(),
             "Stopping the running sessions and restarting each component."

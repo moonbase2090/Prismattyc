@@ -3173,6 +3173,9 @@ impl App {
         startup_config_error: Option<String>,
         proxy: EventLoopProxy<UserAction>,
     ) -> Result<Self> {
+        if file_config.chrome_style() == config::ChromeStyle::Graphite {
+            graphite::preload_chrome_font();
+        }
         let wake_pending = Arc::new(AtomicBool::new(false));
         let pending = wake_pending.clone();
         let event_proxy = proxy.clone();

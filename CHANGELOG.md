@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.3.73] - 2026-11-21
+
+### Added
+
+- Experimental native terminal grids and uploaded images for direct local PTY applications on supported Linux and Apple Silicon macOS hosts, enabled with `--experimental-rich`. Native content supplies rendering and text readers; release, resize or lease expiry restores the retained ANSI terminal. The feature remains off by default.
+
 ### Changed
 
 - **Update and restart** shows each step of the restart (saving or stopping the sessions, stopping the old daemon, starting the new one, checking the restored sessions, reconciling the official plug-ins, the MCP adapter and the relaunch), and the relaunched app continues the same progress: it opens the windows, then shows **Update finished** with each step's outcome until you close it. A failed update shows the same list with the step that failed. A session started while the dialog is open now fails on **Checking the sessions** by name. `pmux restart` prints the same steps on stderr, and `pmux restart --progress` reports them as progress lines; `pmux update` also prints its verify and install steps.
@@ -16,7 +22,6 @@
 ### Added
 
 - **Update and restart** shows the update's progress in the Restart to update dialog: bytes downloaded of the whole release, each component as it is verified, the install step, and each component as it restarts, with what happens to your sessions. If the update fails, the dialog keeps the failed step and its error and offers **Check again** or **Close**. `pmux update --progress` reports the same stages on stderr for other tools.
-- Experimental native terminal grids and uploaded images for direct local PTY applications on supported Linux and Apple Silicon macOS hosts, enabled with `--experimental-rich`. Native content supplies rendering and text readers; release, resize or lease expiry restores the retained ANSI terminal. The feature remains off by default.
 
 ### Changed
 

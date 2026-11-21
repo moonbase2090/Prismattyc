@@ -86,6 +86,7 @@ pmux session clear [--all] [--keep NAME]
                          # stop sessions except the caller
 pmux restart             # restart safe components; defer active PTY owners
 pmux restart --plan      # inspect restart impact
+pmux restart --daemon --progress  # each restart step as a pmux-progress line on stderr
 pmux versions            # installed and running component versions
 pmux update              # verified GitHub release; macOS keeps the previous signed app for rollback
 pmux update --source --host       # host only (macOS: also rebuild Prismattyc.app)

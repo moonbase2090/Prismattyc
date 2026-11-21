@@ -15,6 +15,12 @@ older version) placed there, so the app updates itself as a user's would.
 download of the release file for component NAME short. The dialog must then
 hold step 1 with the error and offer Check again or Close.
 
+--fail-changed-sessions (every platform) starts one more session while the
+consent dialog is open, then chooses. The app must refuse to stop a list of
+sessions the user did not agree to: the dialog holds "Failed at step 1" on
+"Checking the sessions", its receipt names that step, and every session is
+still running with its ID.
+
 --save chooses Save and restart and checks that the sessions come back. Before
 the update it opens two tabs: a plain session and one whose window is split in
 two panes, and prints a one-time marker into every pane. After the relaunch the
@@ -53,6 +59,7 @@ read-write and non-blocking and waits for each ack with select, so an absent,
 stalled or closed relay fails at the per-key bound and cleanup never blocks.
 
   update-progress-e2e.py --bins target/release --out DIR [--fail-download pmux-attach]
+      [--fail-changed-sessions] [--save]
 """
 import argparse
 import json
@@ -235,6 +242,7 @@ def main():
     parser.add_argument('--bins', type=Path, required=True)
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--fail-download', choices=BINARIES)
+    parser.add_argument('--fail-changed-sessions', action='store_true')
     parser.add_argument('--timeout', type=int, default=600)
     parser.add_argument('--key-relay', type=Path)
     parser.add_argument('--save', action='store_true', help='choose Save and restart and check the sessions return')
@@ -296,7 +304,9 @@ exec {real} "$@"
         (shim / 'curl').chmod(0o755)
         env['PATH'] = str(shim) + os.pathsep + env['PATH']
 
-    result = {'status': 'FAIL', 'mode': 'fail-download' if args.fail_download else 'update',
+    mode = ('fail-download' if args.fail_download else 'fail-changed-sessions' if args.fail_changed_sessions
+            else 'save' if args.save else 'update')
+    result = {'status': 'FAIL', 'mode': mode,
               'platform': sys.platform, 'checks': []}
     keys = app = None
     owned, readers, events = [], [], []
@@ -444,10 +454,32 @@ exec {real} "$@"
             result['before'] = before
             (out / 'before.json').write_text(json.dumps(before, indent=2))
             assert any(view.get('tabs') for manifest in before['tabs'] for view in manifest.get('views', [])), before
+        if args.fail_changed_sessions:
+            # A session the user did not see in the dialog.
+            agreed = pane_ids()
+            cli('new', '--no-attach', 'late')
         select(window()['restart_modal']['rows'], dialog_selected(consent['ui']),
                'Save and restart' if args.save else 'Restart without saving', dialog_selected)
         change(lambda ui: dialog_state(ui) == 'running', 'progress view')
-        if args.fail_download:
+        if args.fail_changed_sessions:
+            failed = change(lambda ui: dialog_state(ui) == 'failed', 'held failure', args.timeout)
+            shutil.copy(frames / f"frame-{failed['seq']:06d}.png", out / 'failed.png')
+            modal = window()['restart_modal']
+            final = modal['rows']
+            result['final_rows'] = final
+            result['failure_frame'] = failed['seq']
+            count = 4 if result['update_check'].get('update_available') else 1
+            stage = 'Download' if count == 4 else 'Restart'
+            assert final[0] == f'Failed at step 1 of {count}: {stage}', final
+            assert final[1] == 'Checking the sessions', final
+            assert modal['running']['receipt'][0] == f'{stage}: failed at Checking the sessions', modal
+            assert 'The running sessions changed since confirmation. No sessions were stopped.' in ' '.join(final), final
+            assert final[-2].startswith('Check again') and final[-1].startswith('Close'), final
+            record(f'the dialog held step 1 of {count} on Checking the sessions, with the receipt and the error')
+            now = pane_ids()
+            assert all(now.get(name) == ids for name, ids in agreed.items()) and 'late' in now, (agreed, now)
+            record('no session was stopped: every session kept its IDs')
+        elif args.fail_download:
             failed = change(lambda ui: dialog_state(ui) == 'failed', 'held failure', args.timeout)
             final = window()['restart_modal']['rows']
             result['final_rows'] = final
@@ -547,12 +579,14 @@ exec {real} "$@"
         result['captures'] = captures
         if 'error' not in result:
             update = result.get('update_check', {}).get('update_available')
-            expected = (['Download'] if args.fail_download else
+            failing = args.fail_download or args.fail_changed_sessions
+            expected = ((['Download'] if update else ['Restart']) if args.fail_changed_sessions else
+                        ['Download'] if args.fail_download else
                         ['Download', 'Verify', 'Install', 'Restart'] if update else ['Restart'])
             downloads = [line for line in steps if line.startswith('Step 1 of 4: Download')]
             failed = [line for line in steps if line.startswith(FAILED)]
             # The restart's steps, from both apps, each once and in order.
-            restart = [] if args.fail_download else (
+            restart = [] if failing else (
                 ['Saving the sessions', 'Stopping the old daemon', 'Starting the new daemon',
                  'Checking the restored sessions'] if args.save else
                 ['Stopping the sessions', 'Starting the new daemon']) + [
@@ -565,8 +599,8 @@ exec {real} "$@"
                     details.append(detail)
             wanted = [f'{item} ({index} of {len(restart)})' for index, item in enumerate(restart, 1)]
             result['restart_steps'] = details
-            if (stages == expected and (len(downloads) >= 2 or not update)
-                    and bool(failed) == bool(args.fail_download) and details == wanted):
+            if (stages == expected and (len(downloads) >= 2 or not update or args.fail_changed_sessions)
+                    and bool(failed) == bool(failing) and details == wanted):
                 result['status'] = 'PASS'
                 record('stages in order: ' + ' > '.join(stages))
                 if restart:

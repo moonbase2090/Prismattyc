@@ -94,11 +94,9 @@ impl Meter {
         } else {
             vec![Step::Restart]
         };
-        let detail = if update_available {
-            "Starting the download"
-        } else {
-            "Preparing to restart"
-        };
+        // The update first checks that the sessions are the ones the user
+        // agreed to restart.
+        let detail = "Checking the sessions";
         Meter {
             steps,
             step: 0,
@@ -388,6 +386,20 @@ mod tests {
         assert_eq!(
             meter.receipt()[1],
             "Verify: failed at Verifying 2 of 6: pmuxd"
+        );
+    }
+
+    #[test]
+    fn a_failure_before_any_stage_names_the_session_check() {
+        let mut meter = Meter::new(false);
+        meter.fail();
+        assert_eq!(
+            meter.lines(),
+            ["Failed at step 1 of 1: Restart", "Checking the sessions"]
+        );
+        assert_eq!(
+            meter.receipt(),
+            ["Restart: failed at Checking the sessions"]
         );
     }
 

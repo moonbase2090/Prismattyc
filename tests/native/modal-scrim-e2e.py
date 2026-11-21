@@ -255,10 +255,12 @@ def main():
             watch.wait(10)
             reader.thread.join(10)
 
-    def open_modal(name, key, kind, before_seq):
+    def open_modal(name, key, kind):
         keys.press(key, ctrl=True, shift=True)
         opened = change(lambda ui: ui.get('modal') == kind, f'{name} open')
-        return settle(name, kind, before_seq, opened)
+        # The frame presented just before the modal's first one.
+        before_seq = opened['seq'] - 1
+        return before_seq, settle(name, kind, before_seq, opened)
 
     def settle(name, kind, before_seq, opened):
         settled = opened if (opened['ui'].get('scrim') or {}).get('settled') else change(
@@ -317,18 +319,16 @@ def main():
         first = change(lambda ui: True, 'first presented frame')
         assert first['ui'].get('modal') is None and first['ui'].get('scrim') is None, first
         keys = Keys(host.pid, args.key_relay)
-        # Open and close the palette once, so the frames after it show the
-        # attached text.
+        # Open and close the palette once, so the window has settled on the
+        # attached session before the first modal is measured.
         keys.press('p', ctrl=True, shift=True)
         change(lambda ui: ui.get('modal') == 'palette', 'warm-up palette')
         last = close_all('warm-up palette')
-        shutil.copy(frame(last['seq']), out / 'before.png')
         screenshot('before')
-        base_rows = png_rgb(frame(last['seq']))
-        everything = range(len(base_rows[0]))
-        base = band_metrics(base_rows, everything)
         for name, key, kind in MODALS:
-            settled = open_modal(name, key, kind, last['seq'])
+            before_seq, settled = open_modal(name, key, kind)
+            if name == MODALS[0][0]:
+                shutil.copy(frame(before_seq), out / 'before.png')
             if name == 'update-panel':
                 # The confirmation: Update and restart from the panel's rows.
                 rows = [row.removesuffix(': ') for row in
@@ -342,10 +342,13 @@ def main():
                                        'panel selection')['ui'].get('panel') or {}).get('selected')
                 keys.press('Return')
                 confirm = change(lambda ui: ui.get('modal') == 'restart', 'restart confirmation', 120)
-                settle('restart-confirmation', 'restart', last['seq'], confirm)
+                settle('restart-confirmation', 'restart', before_seq, confirm)
             last = close_all(name)
+            was_rows = png_rgb(frame(before_seq))
+            everything = range(len(was_rows[0]))
+            was = band_metrics(was_rows, everything)
             now = band_metrics(png_rgb(frame(last['seq'])), everything)
-            assert abs(now[0] / base[0] - 1) < 0.06, f'{name}: closed, the window is {now[0] / base[0]:.2f} as bright as before'
+            assert abs(now[0] / was[0] - 1) < 0.06, f'{name}: closed, the window is {now[0] / was[0]:.2f} as bright as before'
         shutil.copy(frame(last['seq']), out / 'after.png')
         screenshot('after')
         record(f'every modal closed with Escape and left no scrim ({len(result["modals"])} modals)')

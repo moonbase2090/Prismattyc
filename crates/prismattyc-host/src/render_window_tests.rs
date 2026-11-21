@@ -2280,7 +2280,16 @@ pub(super) fn session_naming_in_private_window() {
             assert!(show_tab_strip(host), "single-pane launch must show the tab");
             assert!(host.mux.geom().top_chrome_px > 0);
             let before = attach_log::live_snapshot().unwrap().sessions.len();
+            // The window opens with the restore prompt, a modal, so its
+            // scrim fades in. Settle it at once so frames compare by content.
+            host.reduced_motion = true;
             let plain = frame(host);
+            assert!(
+                host.modal_scrim
+                    .painted()
+                    .is_some_and(|scrim| scrim.settled),
+                "the restore prompt sits on a settled scrim"
+            );
             handle_mux_command(
                 host,
                 MuxCommand::NewTab,

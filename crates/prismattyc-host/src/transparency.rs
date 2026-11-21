@@ -902,7 +902,7 @@ pub(crate) fn paint(
     if stride == 0 || height == 0 || buffer.len() < stride * height {
         return;
     }
-    dim(buffer, stride, height);
+    // The frame behind is already under the shared modal scrim.
     let card = tok.panel;
     graphite::fill_round_rect(
         buffer,
@@ -930,18 +930,6 @@ pub(crate) fn paint(
     paint_list(buffer, stride, height, tok, accent, dialog, layout, card);
     paint_preview(buffer, stride, height, tok, accent, dialog, layout);
     paint_footer(buffer, stride, tok, dialog, layout);
-}
-
-fn dim(buffer: &mut [u32], stride: usize, height: usize) {
-    for y in 0..height {
-        for x in 0..stride {
-            let idx = y * stride + x;
-            let px = buffer[idx];
-            let rgb = unpack_rgb(px);
-            let scale = |channel: u8| (f32::from(channel) * 0.45).round() as u8;
-            buffer[idx] = pack_argb(alpha_of(px), [scale(rgb[0]), scale(rgb[1]), scale(rgb[2])]);
-        }
-    }
 }
 
 fn mid_y(rect: Rect) -> f32 {

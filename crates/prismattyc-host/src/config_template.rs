@@ -135,7 +135,7 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
     ConfigKey {
         name: "reduced_motion",
         group: ConfigGroup::Appearance,
-        doc: "Skip focus-change animation; the focus ring appears instantly",
+        doc: "Skip motion; the focus ring and dialog backdrops appear instantly",
         range: "true|false",
         value: ConfigValue::Bool(false),
     },

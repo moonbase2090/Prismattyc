@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! Staged progress for `pmux update --progress`.
+//! Staged progress for `pmux update --progress` and `pmux restart --progress`.
 //!
 //! Each event is one JSON object on its own stderr line, after [`PREFIX`], so
 //! a reader can tell progress from ordinary messages. Stdout keeps the final
@@ -33,11 +33,32 @@ pub enum Progress {
     },
     /// Putting the verified release in place. It has no measurable fraction.
     Install { item: String },
+    /// One step of a daemon restart. `index` counts from 1.
+    Restart {
+        item: String,
+        index: usize,
+        count: usize,
+    },
+}
+
+impl Progress {
+    /// The event as one line of text. The app's meter and the command line
+    /// show the same words.
+    pub fn describe(&self) -> String {
+        match self {
+            Progress::Download { item, .. } => format!("Downloading {item}"),
+            Progress::Verify { item, index, count } => {
+                format!("Verifying {index} of {count}: {item}")
+            }
+            Progress::Install { item } => format!("Installing {item}"),
+            Progress::Restart { item, index, count } => format!("{item} ({index} of {count})"),
+        }
+    }
 }
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
-pub(crate) fn enable() {
+pub fn enable() {
     ENABLED.store(true, Ordering::Relaxed);
 }
 
@@ -55,9 +76,14 @@ pub(crate) fn enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
 }
 
-pub(crate) fn emit(progress: &Progress) {
+/// Report one event: as a progress line when enabled, otherwise as its
+/// description. A download reports its size many times a second, so its
+/// human line is printed once per file by the caller instead.
+pub fn emit(progress: &Progress) {
     if enabled() {
         eprintln!("{}", line(progress));
+    } else if !matches!(progress, Progress::Download { .. }) {
+        eprintln!("{}", progress.describe());
     }
 }
 
@@ -141,6 +167,11 @@ mod tests {
             },
             Progress::Install {
                 item: "core binaries".into(),
+            },
+            Progress::Restart {
+                item: "Starting the new daemon".into(),
+                index: 3,
+                count: 5,
             },
         ];
         for event in events {

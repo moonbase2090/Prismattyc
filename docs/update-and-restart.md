@@ -51,8 +51,14 @@ Choose one of these actions:
 
 The updater downloads and verifies the release before stopping sessions.
 It installs the release, restarts the daemon and supervised MCP adapters,
-and relaunches the app. The result panel reports versions and failures in
-full-width text. A missing MCP server is reported as having nothing to restart.
+asks every other open Prismattyc app process to restart, and relaunches the
+app you used. The result panel reports versions and failures in
+full-width text. An app window that cannot restart yet (for example one that
+owns blank terminals) keeps its current version. The panel then names it, shows
+the version it still reports, and gives the next action: fix what it names and
+choose **Update and restart all components** again, or close and reopen that
+window. The update is never reported as complete while another app process
+is still running the old release. A missing MCP server is reported as having nothing to restart.
 
 While it runs, the dialog shows each step: the session check, the download,
 verification, installation, and each step of the restart. With **Save and

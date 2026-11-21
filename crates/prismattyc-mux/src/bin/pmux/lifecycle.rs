@@ -14,6 +14,7 @@ struct Options {
     worker: bool,
     consent_config: Option<PathBuf>,
     delete_consent_config: bool,
+    except_pids: Vec<u32>,
     /// Report each daemon restart step as a progress line on stderr.
     progress: bool,
 }
@@ -36,6 +37,11 @@ fn parse(args: &[String]) -> Result<Options> {
                 ));
             }
             "--delete-consented-config" => opts.delete_consent_config = true,
+            "--except-pid" => {
+                let pid = args.next().context("--except-pid requires a process id")?;
+                opts.except_pids
+                    .push(pid.parse().context("--except-pid requires a process id")?);
+            }
             "--json" => {}
             "--progress" => opts.progress = true,
             other => bail!("unknown restart option {other:?}; use pmux restart --help"),
@@ -136,7 +142,7 @@ fn running_sessions(paths: &Paths) -> Result<Vec<(u64, String)>> {
 
 pub(super) fn restart(paths: &Paths, args: Vec<String>) -> Result<()> {
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("pmux restart [--all|--host|--daemon|--mcp] [--plan] [--json] [--progress]\n\nRestart cooperative components. Default: all safe components.\nHost: restore windows and reconnect mux sessions; defer if blank terminals exist.\nMCP: restart supervised adapters without replaying pending operations.\nDaemon: restart only when no sessions exist. --stop-sessions explicitly permits\nstopping every session; the restart then runs from a detached helper.\n--consented-config FILE limits an update restart to the unchanged saved session list.\nUse --plan to inspect the impact before changing anything.\n--progress reports each daemon restart step as a progress line on stderr.");
+        println!("pmux restart [--all|--host|--daemon|--mcp] [--except-pid PID]... [--plan] [--json] [--progress]\n\nRestart cooperative components. Default: all safe components.\nHost: restore windows and reconnect mux sessions; defer if blank terminals exist.\n--except-pid PID leaves that host alone; the caller restarts itself last.\nMCP: restart supervised adapters without replaying pending operations.\nDaemon: restart only when no sessions exist. --stop-sessions explicitly permits\nstopping every session; the restart then runs from a detached helper.\n--consented-config FILE limits an update restart to the unchanged saved session list.\nUse --plan to inspect the impact before changing anything.\n--progress reports each daemon restart step as a progress line on stderr.");
         return Ok(());
     }
     let opts = parse(&args)?;
@@ -144,7 +150,8 @@ pub(super) fn restart(paths: &Paths, args: Vec<String>) -> Result<()> {
         progress::enable();
     }
     let sessions = running_sessions(paths)?;
-    let hosts = components::live_components(&paths.socket, "host");
+    let mut hosts = components::live_components(&paths.socket, "host");
+    hosts.retain(|pid| !opts.except_pids.contains(pid));
     let adapters = components::live_components(&paths.socket, "mcp");
     if opts.plan {
         println!(
@@ -481,6 +488,15 @@ pub(super) fn versions(paths: &Paths) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn except_pid_is_collected_and_must_be_a_process_id() {
+        let args = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let opts = parse(&args(&["--host", "--except-pid", "7", "--except-pid", "9"])).unwrap();
+        assert_eq!(opts.except_pids, vec![7, 9]);
+        assert!(parse(&args(&["--host", "--except-pid", "x"])).is_err());
+        assert!(parse(&args(&["--host", "--except-pid"])).is_err());
+    }
 
     #[test]
     fn restart_selection_requires_explicit_permission_to_stop_sessions() {

@@ -13,15 +13,15 @@ text, opens the app on it, and then opens, one at a time:
 - the update panel;
 - the Restart to update confirmation, opened from the update panel.
 
-For each one it waits until the scrim has finished fading in, then checks a
-strip at an edge of the window that the modal does not cover: 4% of the
-width at the left or the right edge (a docked menu covers one of them), over
-the whole height. Modals keep a wider margin; the window opens 112 cells
-wide. Against the frame
-just before the modal opened, the strip must be dimmed (its mean brightness
-down to between 45% and 85%) and blurred (its edge contrast down well beyond
-the dimming alone). Escape then closes every modal; the first frame without
-one must have no scrim, and the strip must be back to its old brightness.
+For each one it waits until the scrim has finished fading in, then finds the
+margin the modal leaves at the window's left or right edge: blocks of
+columns, from the edge inward, whose brightness fell to 40-85% of the frame
+before the modal opened (only the scrim does that), less the last block, which
+may reach the modal. The window opens 112 cells wide. In that
+margin, which must be at least 8 pixels and hold text, the mean brightness
+must be 45-85% of before (dimmed) and the edge contrast well below the
+dimming alone (blurred). Escape then closes every modal; the first frame
+without one must have no scrim and the window's old brightness.
 
 Captures go to OUT: before.png (no modal), one PNG per modal, after.png
 (all closed), and with --screenshots the whole screen at each of those
@@ -114,21 +114,46 @@ def png_rgb(path):
     return rows
 
 
-def strip_metrics(rows, side='left'):
-    """Mean brightness and mean horizontal edge contrast of a strip at the
-    window's left or right edge: 4% of its width (narrower than any modal's
-    margin), over its whole height, where the chrome's and the pane's text
-    give it edges."""
-    height, width = len(rows), len(rows[0])
-    x1 = max(8, width * 4 // 100)
-    span = slice(0, x1) if side == 'left' else slice(width - x1, width)
+def band_metrics(rows, columns):
+    """Mean brightness and mean horizontal edge contrast over `columns` (a
+    range of x) for the whole height."""
     total = edges = count = 0
     for row in rows:
-        values = [sum(px) / 3 for px in row[span]]
+        values = [sum(row[x]) / 3 for x in columns]
         total += sum(values)
         edges += sum(abs(b - a) for a, b in zip(values, values[1:]))
         count += len(values)
     return total / count, edges / count
+
+
+def free_margin(before, after):
+    """The widest band at the window's left or right edge that the modal
+    leaves uncovered. From the edge inward, in blocks of 1/128 of the width
+    (wider than the blur spreads a thin line), take the blocks whose mean
+    brightness fell to between 40% and 85% of before, as only the scrim makes
+    it, and leave out the last one, which may reach the modal."""
+    width = len(before[0])
+    step = max(4, width // 128)
+
+    def mean(rows, columns):
+        return sum(sum(row[x]) for row in rows for x in columns) / (3 * len(rows) * len(columns))
+
+    best = range(0)
+    for side in ('left', 'right'):
+        taken = 0
+        while (taken + 1) * step <= width // 4:
+            block = range(taken * step, (taken + 1) * step)
+            if side == 'right':
+                block = range(width - (taken + 1) * step, width - taken * step)
+            was = mean(before, block)
+            if not (was > 0 and 0.40 <= mean(after, block) / was <= 0.85):
+                break
+            taken += 1
+        taken = max(0, taken - 1)
+        band = range(0, taken * step) if side == 'left' else range(width - taken * step, width)
+        if len(band) > len(best):
+            best = band
+    return best
 
 
 def main():
@@ -157,7 +182,7 @@ def main():
         socket_path.parent.mkdir(mode=0o700)
     env.update(PMUX=str(bins / ('pmux' + EXE)), PRISMATTYC_CONFIG=str(config), PRISMATTYC_NO_AGENT_SKILLS='1',
                PRISMATTYC_UI_EVENTS='1', PRISMATTYC_DUMP_PRESENT=str(frames / 'frame-{seq}.png'),
-               # Wider than the widest modal, so the strip stays outside it.
+               # Wide enough that every modal leaves a margin beside it.
                PRISMATTYC_E2E_WINDOW_CELLS=WINDOW_CELLS)
     if socket_path:
         env['PMUX_SOCKET'] = str(socket_path)
@@ -241,22 +266,20 @@ def main():
         shutil.copy(frame(settled['seq']), out / f'{name}.png')
         screenshot(name)
         before_rows, after_rows = png_rgb(frame(before_seq)), png_rgb(frame(settled['seq']))
-        # A modal docked at one edge covers that strip; measure the other.
-        ratios = {}
-        for side in ('left', 'right'):
-            before, after = strip_metrics(before_rows, side), strip_metrics(after_rows, side)
-            ratios[side] = (after[0] / before[0], after[1] / max(before[1], 1e-6))
-        side = min(ratios, key=lambda key: ratios[key][0])
-        dim, edge = ratios[side]
-        assert strip_metrics(before_rows, side)[1] > 0.3, f'{name}: the {side} strip has no text to blur'
+        band = free_margin(before_rows, after_rows)
+        assert len(band) >= 8, f'{name}: no dimmed margin beside the modal ({len(band)} columns)'
+        before, after = band_metrics(before_rows, band), band_metrics(after_rows, band)
+        assert before[1] > 0.3, f'{name}: the margin has no text to blur ({before[1]:.2f})'
+        dim, edge = after[0] / before[0], after[1] / before[1]
+        side = 'left' if band.start == 0 else 'right'
         blur = settled['ui']['scrim']['blur']
-        result['modals'][name] = {'modal': kind, 'strip': side, 'brightness': round(dim, 3),
+        result['modals'][name] = {'modal': kind, 'margin': [band.start, band.stop], 'brightness': round(dim, 3),
                                   'edges': round(edge, 3), 'blur': blur, 'before_seq': before_seq,
                                   'seq': settled['seq']}
-        assert 0.45 <= dim <= 0.85, f'{name}: strip brightness went to {dim:.2f} of before'
+        assert 0.45 <= dim <= 0.85, f'{name}: margin brightness went to {dim:.2f} of before'
         assert blur, f'{name}: the scrim fell back to dim only'
         assert edge < dim * 0.8, f'{name}: edges kept {edge:.2f} against brightness {dim:.2f}; no blur'
-        record(f'{name}: {side} strip dimmed to {dim:.2f} and blurred (edges {edge:.2f}) behind the {kind}')
+        record(f'{name}: {side} margin ({len(band)} px) dimmed to {dim:.2f} and blurred (edges {edge:.2f}) behind the {kind}')
         return settled
 
     def close_all(label):
@@ -277,7 +300,7 @@ def main():
         daemon_out.await_line(lambda line: line.strip().endswith('pmux.sock'), 'daemon socket line', 60)
         cli('new', '--no-attach', 'work')
         pane = next(line.split()[1] for line in cli('ls').splitlines() if line.split()[:1] == ['pane'])
-        # Eight lines of text for the strip to dim and blur, then a marker the
+        # Eight lines of text for the scrim to dim and blur, then a marker the
         # typed command does not contain.
         if os.name == 'nt':
             typed = f'for /L %i in (1,1,8) do @echo line %i {TEXT} & echo {DONE}-^7'
@@ -301,8 +324,9 @@ def main():
         last = close_all('warm-up palette')
         shutil.copy(frame(last['seq']), out / 'before.png')
         screenshot('before')
-        base = strip_metrics(png_rgb(frame(last['seq'])))
-        assert base[1] > 0.3, f'the strip has no text to blur: {base}'
+        base_rows = png_rgb(frame(last['seq']))
+        everything = range(len(base_rows[0]))
+        base = band_metrics(base_rows, everything)
         for name, key, kind in MODALS:
             settled = open_modal(name, key, kind, last['seq'])
             if name == 'update-panel':
@@ -320,8 +344,8 @@ def main():
                 confirm = change(lambda ui: ui.get('modal') == 'restart', 'restart confirmation', 120)
                 settle('restart-confirmation', 'restart', last['seq'], confirm)
             last = close_all(name)
-            now = strip_metrics(png_rgb(frame(last['seq'])))
-            assert abs(now[0] / base[0] - 1) < 0.06, f'{name}: closed, the strip is {now[0] / base[0]:.2f} of before'
+            now = band_metrics(png_rgb(frame(last['seq'])), everything)
+            assert abs(now[0] / base[0] - 1) < 0.06, f'{name}: closed, the window is {now[0] / base[0]:.2f} as bright as before'
         shutil.copy(frame(last['seq']), out / 'after.png')
         screenshot('after')
         record(f'every modal closed with Escape and left no scrim ({len(result["modals"])} modals)')

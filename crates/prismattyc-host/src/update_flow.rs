@@ -1183,6 +1183,8 @@ echo note >&2"#,
         assert!(without_meter.finish().is_none(), "nothing to finish");
     }
 
+    // The launcher-step tests that use it run on Linux and macOS only.
+    #[cfg(unix)]
     fn update_plan(installed: &str, available: &str) -> Plan {
         Plan {
             installed: installed.into(),

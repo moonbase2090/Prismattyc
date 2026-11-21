@@ -85,6 +85,7 @@ mod sidebar_width;
 mod snapshot_client;
 #[cfg(any(target_os = "macos", test))]
 mod surface_damage;
+mod system_accessibility;
 mod terminal_switcher;
 #[cfg(test)]
 mod test_support;
@@ -6156,6 +6157,9 @@ fn open_modal(host: &HostState) -> Option<&'static str> {
 /// it fades in.
 fn paint_modal_scrim(host: &mut HostState, buffer: &mut [u32], width: usize, height: usize) {
     let open = open_modal(host).is_some();
+    if host.modal_scrim.opens_with(open) {
+        host.modal_scrim.follow_system(system_accessibility::read());
+    }
     let Some(level) = host
         .modal_scrim
         .level(open, Instant::now(), host.reduced_motion)

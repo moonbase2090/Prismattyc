@@ -7,7 +7,9 @@ newest public release, exactly as a user's update would.
 
 Linux and Windows: the binaries in --bins are first copied into OUT/install,
 because the updater refuses to replace a build tree, and the host runs from
-there. Their version must be older than the newest release. macOS: pass the
+there. For an update their version must be older than the newest release; a
+build at or above it runs Restart components (no download), which is what a
+branch's own restart code needs. macOS: pass the
 installed app's Contents/MacOS as --bins, with the branch binaries (built as an
 older version) placed there, so the app updates itself as a user's would.
 
@@ -392,7 +394,9 @@ exec {real} "$@"
             [str(bins / ('pmux' + EXE)), 'update', '--check', '--json'], env=env, capture_output=True,
             text=True, timeout=120).stdout or '{}')
         update = bool(result['update_check'].get('update_available'))
-        assert update or args.save, result['update_check']
+        # Only a download failure needs a release to download; a build that
+        # is the newest release, or newer, runs Restart components.
+        assert update or not args.fail_download, result['update_check']
         socket = ['--socket', str(socket_path)] if socket_path else []
         daemon = subprocess.Popen([str(bins / ('pmuxd' + EXE)), *socket], env=env, cwd=out / 'project',
                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace')

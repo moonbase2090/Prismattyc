@@ -160,6 +160,15 @@ impl Meter {
         }
     }
 
+    /// A check the app makes within the current step, without a fraction.
+    pub(super) fn doing(&mut self, detail: &str) {
+        if self.failed || self.finished {
+            return;
+        }
+        self.detail = detail.into();
+        self.amount = Amount::Unknown;
+    }
+
     /// Keep the bar at the step that failed.
     pub(super) fn fail(&mut self) {
         self.failed = true;
@@ -400,6 +409,23 @@ mod tests {
         assert_eq!(
             meter.receipt(),
             ["Restart: failed at Checking the sessions"]
+        );
+    }
+
+    #[test]
+    fn a_failed_check_is_named_under_its_step() {
+        let mut meter = Meter::new(false);
+        meter.doing("Checking the installed versions");
+        assert_eq!(
+            meter.lines(),
+            ["Step 1 of 1: Restart", "Checking the installed versions"]
+        );
+        assert!(meter.tick(), "a check has no fraction; its bar moves");
+        meter.fail();
+        meter.doing("Checking the sessions");
+        assert_eq!(
+            meter.receipt(),
+            ["Restart: failed at Checking the installed versions"]
         );
     }
 

@@ -109,9 +109,11 @@ hung run. `PRISMATTYC_DUMP_PRESENT` with `{seq}` in the path writes each frame
 to its own file.
 
 - On Linux and Windows the fixture copies `--bins` into `OUT/install/bin` (the
-  updater refuses a build tree). Those binaries must report a version older
-  than the newest release; a proof build may lower the workspace version and
-  must say so.
+  updater refuses a build tree). For an update those binaries must report a
+  version older than the newest release; a proof build may lower the
+  workspace version and must say so. A build at or above the newest release
+  runs Restart components, which exercises the branch's own restart code;
+  only `--fail-download` requires an older build.
 - On macOS the updater replaces the installed `Prismattyc.app`, which must be
   older than the newest release. Put the branch binaries (built as that older
   version) inside the installed app's `Contents/MacOS` and pass that folder as

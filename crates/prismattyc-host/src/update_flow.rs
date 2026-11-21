@@ -30,12 +30,27 @@ pub(super) struct Plan {
     sessions: Vec<(u64, String)>,
 }
 
+impl Plan {
+    /// The version every component runs afterwards: the new release, or the
+    /// installed one when there is nothing newer to install. A build newer
+    /// than the newest release restarts on itself.
+    fn target(&self) -> &str {
+        if self.update_available {
+            &self.available
+        } else {
+            &self.installed
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(super) enum Event {
     Prepared(Result<Plan, String>),
     /// A stage reported by `pmux update --progress` or `pmux restart
     /// --progress`, or a restart step the app takes itself.
     Progress(Progress),
+    /// A check the app makes itself within the current step.
+    Doing(&'static str),
     /// Move the bar of a step that has no fraction.
     Tick,
     Installed(Result<Box<Resume>, String>),
@@ -319,6 +334,10 @@ pub(super) fn event(app: &mut App, event: Event) {
             meter.apply(&progress);
             true
         }),
+        Event::Doing(text) => refresh_meter(app, |meter| {
+            meter.doing(text);
+            true
+        }),
         Event::Tick => refresh_meter(app, Meter::tick),
         Event::Installed(Err(error)) => {
             let text = format!("The operation could not finish.\n{error}");
@@ -440,6 +459,7 @@ fn install(
     let pmux = find_mux_bin();
     require_same_sessions(&plan, &pmux)?;
     let file = snapshot_path("update")?;
+    report(Event::Doing("Saving the session configuration"));
     run(&pmux, &["session-config", "save", &file.to_string_lossy()])?;
     let backup = save.then_some(file.clone());
     let result = complete_install(&plan, &pmux, &file, !save, report);
@@ -496,8 +516,10 @@ fn complete_install(
     // MCP supervisor all use the same activated release.
     let installed = prismattyc_mux::release_update::installed_binary("pmux")
         .unwrap_or_else(|| pmux.to_path_buf());
+    report(Event::Doing("Checking the installed versions"));
     let installed_versions: Value = serde_json::from_str(&run(&installed, &["versions"])?)?;
-    verify_installed_versions(&installed_versions, &plan.available)?;
+    verify_installed_versions(&installed_versions, plan.target())?;
+    report(Event::Doing("Checking the sessions"));
     require_same_sessions(plan, &installed)?;
     let consent = consent.to_string_lossy();
     let mut restart = vec![
@@ -520,8 +542,9 @@ fn complete_install(
     report(restart_step("Restarting the MCP adapter", steps + 1, steps));
     let mcp = run(&installed, &["restart", "--mcp", "--json"])
         .context("The daemon restarted, but the MCP restart failed")?;
+    report(Event::Doing("Checking the running versions"));
     let mut versions: Value = serde_json::from_str(&run(&installed, &["versions"])?)?;
-    verify_installed_versions(&versions, &plan.available)?;
+    verify_installed_versions(&versions, plan.target())?;
     // This host is replaced next; do not present its old heartbeat as the
     // final running version in the replacement's result view.
     if let Some(running) = versions["running"].as_array_mut() {
@@ -536,15 +559,15 @@ fn complete_install(
         )
     })?;
     anyhow::ensure!(
-        actual == plan.available,
+        actual == plan.target(),
         "The running daemon is {actual}; expected {}. The app has not restarted.",
-        plan.available
+        plan.target()
     );
     report(restart_step("Relaunching the app", steps + 2, steps));
     Ok((
         format!(
             "Prismattyc {} is installed. The daemon restarted on {}.\n{}\n{}",
-            plan.available,
+            plan.target(),
             actual,
             space_panel::maintenance_result(&mcp),
             space_panel::maintenance_result(&versions.to_string())
@@ -1045,6 +1068,21 @@ echo note >&2"#,
             ..carried
         };
         assert!(without_meter.finish().is_none(), "nothing to finish");
+    }
+
+    #[test]
+    fn a_restart_without_a_new_release_expects_the_installed_version() {
+        let plan = |installed: &str, available: &str, update_available| Plan {
+            installed: installed.into(),
+            available: available.into(),
+            update_available,
+            sessions: Vec::new(),
+        };
+        // A build newer than the newest release restarts on itself, not on
+        // the older release it would never install.
+        assert_eq!(plan("0.3.72", "0.3.71", false).target(), "0.3.72");
+        assert_eq!(plan("0.3.71", "0.3.71", false).target(), "0.3.71");
+        assert_eq!(plan("0.3.70", "0.3.71", true).target(), "0.3.71");
     }
 
     #[test]

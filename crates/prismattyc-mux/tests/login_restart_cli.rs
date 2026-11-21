@@ -1642,3 +1642,593 @@ fn restore_skips_a_saved_command_with_a_line_break_and_restores_the_rest() {
     drop(server);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn mkfifo(path: &Path) {
+    let status = prismattyc_process::status(Command::new("mkfifo").arg(path)).unwrap();
+    assert!(status.success(), "mkfifo {} failed", path.display());
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn wait_fifo_line(path: &Path, label: &str) -> String {
+    use std::io::{BufRead, BufReader};
+    let reader_path = path.to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        if let Ok(file) = std::fs::File::open(&reader_path) {
+            let mut line = String::new();
+            let _ = BufReader::new(file).read_line(&mut line);
+            let _ = tx.send(line);
+        }
+    });
+    let line = rx
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap_or_else(|_| panic!("timed out waiting for FIFO {label}"));
+    let _ = handle.join();
+    line
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn write_executable(path: &Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, body).unwrap();
+    let mut perms = std::fs::metadata(path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(path, perms).unwrap();
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn write_pane_command_line(socket: &Path, session_name: &str, command_line: &str) {
+    use prismattyc_mux::{
+        ControlRequest, ControlResponse, ControlResponseBody, ControlResponseData, PROTOCOL_VERSION,
+    };
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(socket).expect("connect control socket");
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut resp_line = String::new();
+
+    let reg_req = serde_json::to_string(&ControlRequest::RegisterClient {
+        version: PROTOCOL_VERSION,
+        request_id: 1,
+    })
+    .unwrap();
+    writeln!(stream, "{reg_req}").unwrap();
+    stream.flush().unwrap();
+    reader.read_line(&mut resp_line).unwrap();
+    let reg_resp: ControlResponse = serde_json::from_str(&resp_line).unwrap();
+    let ControlResponseBody::Ok {
+        response: ControlResponseData::ClientRegistered { client_id },
+    } = reg_resp.body
+    else {
+        panic!("unexpected register response: {resp_line}");
+    };
+    resp_line.clear();
+
+    let snap_req = serde_json::to_string(&ControlRequest::Snapshot {
+        version: PROTOCOL_VERSION,
+        request_id: 2,
+    })
+    .unwrap();
+    writeln!(stream, "{snap_req}").unwrap();
+    stream.flush().unwrap();
+
+    reader.read_line(&mut resp_line).unwrap();
+    let resp: ControlResponse = serde_json::from_str(&resp_line).unwrap();
+    let ControlResponseBody::Ok {
+        response: ControlResponseData::Snapshot { snapshot },
+    } = resp.body
+    else {
+        panic!("unexpected snapshot response: {resp_line}");
+    };
+    let pane_id = snapshot
+        .sessions
+        .iter()
+        .find(|s| s.name == session_name)
+        .and_then(|s| s.windows.first())
+        .and_then(|w| w.panes.first())
+        .map(|p| p.id)
+        .unwrap_or_else(|| panic!("session {session_name} pane missing"));
+
+    let write_req = serde_json::to_string(&ControlRequest::WritePane {
+        version: PROTOCOL_VERSION,
+        request_id: 3,
+        client_id,
+        pane_id,
+        data: format!("{command_line}\r"),
+    })
+    .unwrap();
+    writeln!(stream, "{write_req}").unwrap();
+    stream.flush().unwrap();
+    resp_line.clear();
+    reader.read_line(&mut resp_line).unwrap();
+    let ack: ControlResponse = serde_json::from_str(&resp_line).unwrap();
+    assert!(
+        matches!(ack.body, ControlResponseBody::Ok { .. }),
+        "write_pane failed: {resp_line}"
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn session_config_check_and_consented_restart_ignore_transient_agent_children() {
+    let root = temp_root("cfg-transient-child");
+    let socket = socket_path(&root);
+    let bin = root.join("bin");
+    let state = root.join("state");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(&state).unwrap();
+
+    let ready_fifo = root.join("ready.fifo");
+    let resumed_fifo = root.join("resumed.fifo");
+    mkfifo(&ready_fifo);
+    mkfifo(&resumed_fifo);
+
+    let claude_bin = bin.join("claude");
+    let mcp_bin = bin.join("sc-mcp");
+    let caff_bin = bin.join("caffeinate");
+    let holder_sh = state.join("holder.sh");
+    write_executable(&holder_sh, "#!/bin/sh\nwhile read _; do :; done\n");
+
+    let phase2_marker = state.join("phase2");
+    let resumed_log = state.join("resumed.log");
+    write_executable(
+        &claude_bin,
+        &format!(
+            "#!/bin/sh\n\
+             if [ -f '{}' ]; then\n\
+               printf '%s\\n' \"$*\" > '{}'\n\
+               echo resumed > '{}'\n\
+               while read _; do :; done\n\
+             fi\n\
+             /bin/bash -c 'exec -a \"$1\" /bin/sh \"$2\" < /dev/null' _ '{}' '{}' &\n\
+             /bin/bash -c 'exec -a \"$1\" /bin/sh \"$2\" < /dev/null' _ '{}' '{}' &\n\
+             echo ready > '{}'\n\
+             while read _; do :; done\n",
+            phase2_marker.display(),
+            resumed_log.display(),
+            resumed_fifo.display(),
+            mcp_bin.display(),
+            holder_sh.display(),
+            caff_bin.display(),
+            holder_sh.display(),
+            ready_fifo.display(),
+        ),
+    );
+    let launch_sh = state.join("launch.sh");
+    write_executable(
+        &launch_sh,
+        &format!(
+            "#!/bin/sh\n\
+             exec /bin/bash -c 'exec -a \"$1\" /bin/sh \"$2\" --resume sess-pt224 --model opus' _ '{}' '{}'\n",
+            claude_bin.display(),
+            claude_bin.display(),
+        ),
+    );
+
+    let path_env = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_else(|_| "/bin:/usr/bin".into())
+    );
+    let extra = [
+        ("PATH", path_env.as_str()),
+        ("PRISMATTYC_NO_LOGIN_SERVICE", "1"),
+    ];
+    let server = start_server_with_env(&socket, &root, &extra);
+
+    ok(&pmux(
+        &socket,
+        &root,
+        &extra,
+        &[
+            "new",
+            "--no-attach",
+            "work",
+            "--",
+            "/bin/sh",
+            launch_sh.to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(wait_fifo_line(&ready_fifo, "claude ready").trim(), "ready");
+
+    let cfg1 = root.join("cfg1.json");
+    let cfg2 = root.join("cfg2.json");
+    ok(&pmux(
+        &socket,
+        &root,
+        &extra,
+        &["session-config", "save", cfg1.to_str().unwrap()],
+    ));
+    ok(&pmux(
+        &socket,
+        &root,
+        &extra,
+        &["session-config", "save", cfg2.to_str().unwrap()],
+    ));
+    let saved_json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&cfg1).unwrap()).unwrap();
+    let saved_json2: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&cfg2).unwrap()).unwrap();
+    assert_eq!(
+        saved_json["space"]["sessions"], saved_json2["space"]["sessions"],
+        "repeated session-config save must not flap on transient child processes"
+    );
+    assert_eq!(saved_json["session_ids"], saved_json2["session_ids"]);
+    let work = saved_json["space"]["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "work")
+        .unwrap();
+    let saved_cmd = work["windows"][0]["root"]["command"].as_str().unwrap();
+    assert!(
+        saved_cmd.contains("--resume sess-pt224 --model opus"),
+        "expected claude resume cmd, got {saved_cmd}"
+    );
+    assert!(
+        !saved_cmd.contains("sc-mcp") && !saved_cmd.contains("caffeinate"),
+        "transient child leaked into saved command: {saved_cmd}"
+    );
+
+    ok(&pmux(
+        &socket,
+        &root,
+        &extra,
+        &["session-config", "check", cfg1.to_str().unwrap()],
+    ));
+
+    std::fs::write(&phase2_marker, b"1").unwrap();
+    let restarted = ok(&pmux(
+        &socket,
+        &root,
+        &extra,
+        &[
+            "restart",
+            "--daemon",
+            "--stop-sessions",
+            "--consented-config",
+            cfg1.to_str().unwrap(),
+            "--worker",
+            "--json",
+        ],
+    ));
+    assert!(
+        restarted.contains("\"status\":\"restarted\""),
+        "{restarted}"
+    );
+
+    ok(&pmux(
+        &socket,
+        &root,
+        &extra,
+        &["session-config", "restore", cfg1.to_str().unwrap()],
+    ));
+    assert_eq!(
+        wait_fifo_line(&resumed_fifo, "claude resumed").trim(),
+        "resumed"
+    );
+    let resumed_args = std::fs::read_to_string(&resumed_log).unwrap();
+    assert_eq!(resumed_args.trim(), "--resume sess-pt224 --model opus");
+
+    ok(&pmux(&socket, &root, &extra, &["stop"]));
+    drop(server);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn plain_saved_restart_resumes_exact_conversations_and_monitor_socket_ready() {
+    let root = temp_root("plain-exact-resume");
+    let socket = socket_path(&root);
+    let config_path = root.join("config/prismattyc.toml");
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &config_path,
+        "start_at_login = true\n[mux]\nspace_open_runs_commands = \"all\"\n",
+    )
+    .unwrap();
+
+    let bin = root.join("bin");
+    let state = root.join("state");
+    let codex_home = root.join("home/.codex/sessions/2026/11/21");
+    let claude_sessions = root.join("home/.claude/sessions");
+    let grok_sessions = root.join("home/.grok/sessions/grok-exact-33");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::create_dir_all(&codex_home).unwrap();
+    std::fs::create_dir_all(&claude_sessions).unwrap();
+    std::fs::create_dir_all(&grok_sessions).unwrap();
+
+    let main_id = "22222222-2222-2222-2222-222222222222";
+    let sub_id = "11111111-1111-1111-1111-111111111111";
+    let sub_rollout = codex_home.join(format!("rollout-2026-11-21T00-00-00-{sub_id}.jsonl"));
+    let main_rollout = codex_home.join(format!("rollout-2026-11-21T00-00-00-{main_id}.jsonl"));
+    std::fs::write(
+        &sub_rollout,
+        format!(
+            r#"{{"payload":{{"id":"{sub_id}","parent_thread_id":"{main_id}","thread_source":"subagent","source":{{"subagent":"x"}}}}}}"#
+        ) + "\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &main_rollout,
+        format!(r#"{{"payload":{{"id":"{main_id}","source":"cli","thread_source":"user"}}}}"#)
+            + "\n",
+    )
+    .unwrap();
+    let grok_events = grok_sessions.join("events.jsonl");
+    std::fs::write(&grok_events, "{}\n").unwrap();
+
+    let phase2_marker = state.join("phase2");
+    let claude_launches = state.join("claude.launches");
+    let claude_resumed_log = state.join("claude.resumed.log");
+    let codex_resumed_log = state.join("codex.resumed.log");
+    let grok_resumed_log = state.join("grok.resumed.log");
+    let monitor_resumed_log = state.join("monitor.resumed.log");
+
+    let claude_r1 = state.join("claude-r1.fifo");
+    let codex_r1 = state.join("codex-r1.fifo");
+    let grok_r1 = state.join("grok-r1.fifo");
+    let monitor_r1 = state.join("monitor-r1.fifo");
+    let claude_r2 = state.join("claude-r2.fifo");
+    let codex_r2 = state.join("codex-r2.fifo");
+    let grok_r2 = state.join("grok-r2.fifo");
+    let monitor_r2 = state.join("monitor-r2.fifo");
+    for f in [
+        &claude_r1,
+        &codex_r1,
+        &grok_r1,
+        &monitor_r1,
+        &claude_r2,
+        &codex_r2,
+        &grok_r2,
+        &monitor_r2,
+    ] {
+        mkfifo(f);
+    }
+
+    let claude_bin = bin.join("claude");
+    write_executable(
+        &claude_bin,
+        &format!(
+            "#!/bin/sh\n\
+             if [ -f '{}' ]; then\n\
+               printf '%s\\n' \"$*\" > '{}'\n\
+               echo ok > '{}'\n\
+               while read _; do :; done\n\
+             fi\n\
+             printf '{{\"pid\":%s,\"sessionId\":\"claude-exact-11\"}}\\n' \"$$\" > '{}/'\"$$.json\"\n\
+             echo ready > '{}'\n\
+             while read _; do :; done\n",
+            phase2_marker.display(),
+            claude_resumed_log.display(),
+            claude_r2.display(),
+            claude_sessions.display(),
+            claude_r1.display(),
+        ),
+    );
+    let claude_launch_sh = state.join("launch-claude.sh");
+    write_executable(
+        &claude_launch_sh,
+        &format!(
+            "#!/bin/sh\n\
+             printf 'ONCE\\n' >> '{}'\n\
+             exec /bin/bash -c 'exec -a \"$1\" /bin/sh \"$2\" --model opus \"Initial claude prompt\"' _ '{}' '{}'\n",
+            claude_launches.display(),
+            claude_bin.display(),
+            claude_bin.display(),
+        ),
+    );
+
+    let codex_bin = bin.join("codex");
+    write_executable(
+        &codex_bin,
+        &format!(
+            "#!/bin/sh\n\
+             if [ -f '{}' ]; then\n\
+               printf '%s\\n' \"$*\" > '{}'\n\
+               echo ok > '{}'\n\
+               while read _; do :; done\n\
+             fi\n\
+             exec 3<'{}' 4<'{}'\n\
+             echo ready > '{}'\n\
+             while read _; do :; done\n",
+            phase2_marker.display(),
+            codex_resumed_log.display(),
+            codex_r2.display(),
+            sub_rollout.display(),
+            main_rollout.display(),
+            codex_r1.display(),
+        ),
+    );
+    let codex_launch_sh = state.join("launch-codex.sh");
+    write_executable(
+        &codex_launch_sh,
+        &format!(
+            "#!/bin/sh\n\
+             exec /bin/bash -c 'exec -a \"$1\" /bin/sh \"$2\" --model o3 \"Read prompt.txt\"' _ '{}' '{}'\n",
+            codex_bin.display(),
+            codex_bin.display(),
+        ),
+    );
+
+    let grok_bin = bin.join("grok");
+    write_executable(
+        &grok_bin,
+        &format!(
+            "#!/bin/sh\n\
+             if [ -f '{}' ]; then\n\
+               printf '%s\\n' \"$*\" > '{}'\n\
+               echo ok > '{}'\n\
+               while read _; do :; done\n\
+             fi\n\
+             exec 3<'{}'\n\
+             echo ready > '{}'\n\
+             while read _; do :; done\n",
+            phase2_marker.display(),
+            grok_resumed_log.display(),
+            grok_r2.display(),
+            grok_events.display(),
+            grok_r1.display(),
+        ),
+    );
+    let grok_launch_sh = state.join("launch-grok.sh");
+    write_executable(
+        &grok_launch_sh,
+        &format!(
+            "#!/bin/sh\n\
+             exec /bin/bash -c 'exec -a \"$1\" /bin/sh \"$2\" --resume grok-exact-33 --model grok-4 -p \"Initial grok prompt\"' _ '{}' '{}'\n",
+            grok_bin.display(),
+            grok_bin.display(),
+        ),
+    );
+
+    let monitor_probe = bin.join("monitor-probe");
+    write_executable(
+        &monitor_probe,
+        &format!(
+            "#!/bin/sh\n\
+             if ! '{}' --socket '{}' ls >/dev/null 2>&1; then\n\
+               exit 22\n\
+             fi\n\
+             if [ -f '{}' ]; then\n\
+               echo CONNECTED > '{}'\n\
+               echo ok > '{}'\n\
+             else\n\
+               echo ready > '{}'\n\
+             fi\n\
+             while read _; do :; done\n",
+            env!("CARGO_BIN_EXE_pmux"),
+            socket.display(),
+            phase2_marker.display(),
+            monitor_resumed_log.display(),
+            monitor_r2.display(),
+            monitor_r1.display(),
+        ),
+    );
+
+    let path_env = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_else(|_| "/bin:/usr/bin".into())
+    );
+    let extra = [
+        ("PATH", path_env.as_str()),
+        ("PRISMATTYC_NO_LOGIN_SERVICE", "1"),
+    ];
+    let server = start_server_with_env(&socket, &root, &extra);
+
+    ok(&pmux(
+        &socket,
+        &root,
+        &extra,
+        &[
+            "new",
+            "--no-attach",
+            "claude-seat",
+            "--",
+            "/bin/sh",
+            claude_launch_sh.to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(wait_fifo_line(&claude_r1, "claude r1").trim(), "ready");
+
+    ok(&pmux(
+        &socket,
+        &root,
+        &extra,
+        &[
+            "new",
+            "--no-attach",
+            "codex-seat",
+            "--",
+            "/bin/sh",
+            codex_launch_sh.to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(wait_fifo_line(&codex_r1, "codex r1").trim(), "ready");
+
+    ok(&pmux(
+        &socket,
+        &root,
+        &extra,
+        &[
+            "new",
+            "--no-attach",
+            "grok-seat",
+            "--",
+            "/bin/sh",
+            grok_launch_sh.to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(wait_fifo_line(&grok_r1, "grok r1").trim(), "ready");
+
+    ok(&pmux(
+        &socket,
+        &root,
+        &extra,
+        &["new", "--no-attach", "monitor-seat"],
+    ));
+    write_pane_command_line(
+        &socket,
+        "monitor-seat",
+        &format!(
+            "/bin/bash -c 'exec -a \"{0}\" /bin/sh \"{0}\"'",
+            monitor_probe.display()
+        ),
+    );
+    assert_eq!(wait_fifo_line(&monitor_r1, "monitor r1").trim(), "ready");
+
+    std::fs::write(&phase2_marker, b"1").unwrap();
+    let restarted = ok(&pmux(
+        &socket,
+        &root,
+        &extra,
+        &[
+            "restart",
+            "--daemon",
+            "--stop-sessions",
+            "--worker",
+            "--json",
+        ],
+    ));
+    assert!(
+        restarted.contains("\"status\":\"restarted\""),
+        "{restarted}"
+    );
+
+    assert_eq!(wait_fifo_line(&claude_r2, "claude r2").trim(), "ok");
+    assert_eq!(wait_fifo_line(&codex_r2, "codex r2").trim(), "ok");
+    assert_eq!(wait_fifo_line(&grok_r2, "grok r2").trim(), "ok");
+    assert_eq!(wait_fifo_line(&monitor_r2, "monitor r2").trim(), "ok");
+
+    assert_eq!(
+        std::fs::read_to_string(&claude_launches).unwrap(),
+        "ONCE\n",
+        "launch script must not replay on plain restart"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&claude_resumed_log).unwrap().trim(),
+        "--resume claude-exact-11 --model opus"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&codex_resumed_log).unwrap().trim(),
+        format!("resume {main_id} --model o3")
+    );
+    assert_eq!(
+        std::fs::read_to_string(&grok_resumed_log).unwrap().trim(),
+        "--resume grok-exact-33 --model grok-4"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&monitor_resumed_log)
+            .unwrap()
+            .trim(),
+        "CONNECTED"
+    );
+
+    ok(&pmux(&socket, &root, &extra, &["stop"]));
+    drop(server);
+    std::fs::remove_dir_all(root).unwrap();
+}

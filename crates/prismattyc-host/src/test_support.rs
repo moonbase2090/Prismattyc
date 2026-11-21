@@ -16,20 +16,31 @@ use std::time::{Duration, Instant};
 /// the inode that gets executed.
 #[cfg(unix)]
 pub(crate) fn write_script(path: &std::path::Path, body: &str, mode: &str) {
-    std::fs::write(path, body).unwrap();
-    make_executable(path, mode);
+    let mut staged = path.as_os_str().to_owned();
+    staged.push(".staged");
+    let staged = std::path::PathBuf::from(staged);
+    std::fs::write(&staged, body).unwrap();
+    install_over(&staged, path, mode);
+    std::fs::remove_file(&staged).unwrap();
 }
 
 /// As `write_script`, for a script that is already written and closed.
 #[cfg(unix)]
 pub(crate) fn make_executable(path: &std::path::Path, mode: &str) {
+    install_over(path, path, mode);
+}
+
+/// Copy `source` through an exited `install` child to a sibling of `path`,
+/// then rename that finished file over `path`.
+#[cfg(unix)]
+fn install_over(source: &std::path::Path, path: &std::path::Path, mode: &str) {
     let mut installed = path.as_os_str().to_owned();
     installed.push(".installed");
     let installed = std::path::PathBuf::from(installed);
     let status = prismattyc_process::status(
         Command::new("install")
             .args(["-m", mode])
-            .arg(path)
+            .arg(source)
             .arg(&installed),
     )
     .unwrap();

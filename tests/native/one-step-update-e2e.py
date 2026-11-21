@@ -222,8 +222,14 @@ def main():
             change(lambda ui: ui.get('dialog') is not None and ui.get('modal') == 'restart',
                    'the Restart to update review')
             screenshot('notice-review')
-            Keys(host.pid).press('Escape')
-            change(lambda ui: ui.get('dialog') is None and ui.get('modal') is None, 'the review closed')
+            keys = Keys(host.pid)
+            keys.press('Escape')
+            # Escape closes the review; the update panel it opened over stays,
+            # as it does from the palette, until a second Escape.
+            ui = change(lambda ui: ui.get('dialog') is None, 'the review closed')
+            if ui.get('modal') is not None:
+                keys.press('Escape')
+                change(lambda ui: ui.get('modal') is None, 'the update panel closed')
             assert version_in(run(installed_pmux, '--version').stdout) == old, 'the notice installed something'
             passed('a click on the update notice opens the Restart to update review; Escape closes it')
             # Nothing to draw now: this build still renews its registration,

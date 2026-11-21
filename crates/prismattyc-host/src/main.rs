@@ -3189,6 +3189,9 @@ struct App {
     /// Defers operations that need a fresh mutable App borrow until the
     /// current window event releases its HostState borrow.
     event_proxy: EventLoopProxy<UserAction>,
+    /// Keeps the registration heartbeat thread running; it stops once the
+    /// app is gone.
+    _heartbeat: Arc<()>,
     /// Live `{stem}.host.pid` this process registered (PT-65).
     registered_host: Option<(PathBuf, u32)>,
     /// Default attach-layout path. Remembered so an idle pump does not
@@ -3239,6 +3242,11 @@ impl App {
                 let _ = proxy.send_event(UserAction::Wake);
             }
         });
+        // An idle app waits for input; this wakes it to renew its restart
+        // registration. A timed wait set from the pump does not wake an idle
+        // macOS app, so the wake comes from its own thread.
+        let heartbeat = Arc::new(());
+        restart::spawn_heartbeat(restart::HEARTBEAT, Arc::downgrade(&heartbeat), wake.clone());
         let config_path = config::config_path();
         let (watcher, rx) = match config::watch_with_wake(config_path.clone(), Some(wake.clone())) {
             Ok((watcher, rx)) => (Some(watcher), Some(rx)),
@@ -3292,6 +3300,7 @@ impl App {
             wake_pending,
             keymap,
             event_proxy,
+            _heartbeat: heartbeat,
             registered_host: None,
             default_layout_path: None,
             last_register_try: None,
@@ -4073,11 +4082,6 @@ impl App {
             if let Some(deadline) = self.next_automatic_update_check {
                 next_deadline = Some(deadline);
             }
-        }
-        // An idle app has nothing to draw and would otherwise wait for input;
-        // it still wakes to renew its restart registration.
-        if let Some(due) = restart::heartbeat_deadline(self.last_component_poll) {
-            next_deadline = Some(next_deadline.map_or(due, |deadline| deadline.min(due)));
         }
         let phase_started = Instant::now();
         self.retry_register_host_pid();

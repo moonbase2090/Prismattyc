@@ -111,6 +111,29 @@ mod skills;
 #[path = "pmux/spaces.rs"]
 mod space_commands;
 
+/// `pmux update` arguments with the global daemon target appended, so the
+/// complete update restarts that daemon's components. Source builds take no
+/// target.
+fn update_args(
+    mut rest: Vec<String>,
+    instance: Option<String>,
+    socket: Option<PathBuf>,
+) -> Vec<String> {
+    if rest.iter().any(|arg| arg == "--source") {
+        return rest;
+    }
+    if let Some(instance) = instance {
+        rest.extend(["--instance".to_string(), instance]);
+    }
+    if let Some(socket) = socket {
+        rest.extend([
+            "--socket".to_string(),
+            socket.to_string_lossy().into_owned(),
+        ]);
+    }
+    rest
+}
+
 fn print_help() {
     println!(
         "\
@@ -538,7 +561,7 @@ fn main() -> Result<()> {
         }
         Verb::Update => {
             reject_session_flag(cli_session.as_deref(), "update")?;
-            return prismattyc_mux::run_update(rest);
+            return prismattyc_mux::run_update(update_args(rest, cli_instance, cli_socket));
         }
         Verb::Uninstall => {
             reject_session_flag(cli_session.as_deref(), "uninstall")?;
@@ -851,7 +874,7 @@ _prismattyc_mux() {
     arrange) COMPREPLY=( $(compgen -W "main-vertical main-horizontal even-h even-v grid" -- "$cur") ); return ;;
     stop|kick|doctor) COMPREPLY=( $(compgen -W "--session" -- "$cur") ); return ;;
     restart) COMPREPLY=( $(compgen -W "--all --host --daemon --mcp --plan --stop-sessions --json --help" -- "$cur") ); return ;;
-    update) COMPREPLY=( $(compgen -W "--check --rollback --pre --bin-dir --repair-monitor-launcher --from-monitor-version --json --source --host --mux --all --help" -- "$cur") ); return ;;
+    update) COMPREPLY=( $(compgen -W "--restart --no-restart --check --rollback --pre --bin-dir --repair-monitor-launcher --from-monitor-version --json --source --host --mux --all --help" -- "$cur") ); return ;;
   esac
   if [[ "$cur" == -* ]]; then
     COMPREPLY=( $(compgen -W "--instance --socket --session --help" -- "$cur") )
@@ -925,7 +948,7 @@ case $state in
       join-pane) _arguments '--to[Window id]:id:' '-h' '-v' '1:pane:' ;;
       arrange) _arguments '1:session:' '2:kind:(main-vertical main-horizontal even-h even-v grid)' ;;
       restart) _arguments '--all' '--host' '--daemon' '--mcp' '--plan' '--stop-sessions' '--json' '--help' ;;
-      update) _arguments '--check' '--rollback' '--pre' '--repair-monitor-launcher' '--from-monitor-version[Existing monitor release]:version:' '--bin-dir[Install directory]:directory:_files -/' '--json' '--source' '--host' '--mux' '--all' '--help' ;;
+      update) _arguments '--restart' '--no-restart' '--check' '--rollback' '--pre' '--repair-monitor-launcher' '--from-monitor-version[Existing monitor release]:version:' '--bin-dir[Install directory]:directory:_files -/' '--json' '--source' '--host' '--mux' '--all' '--help' ;;
     esac
     ;;
 esac
@@ -1028,6 +1051,8 @@ complete -c pmux -n '__fish_seen_subcommand_from apply' -l tty
 complete -c pmux -n '__fish_seen_subcommand_from sync' -a 'on off status'
 complete -c pmux -n '__fish_seen_subcommand_from new' -l attach -d 'Attach after create'
 complete -c pmux -n '__fish_seen_subcommand_from new' -l no-attach -d 'Create without attaching'
+complete -c pmux -n '__fish_seen_subcommand_from update' -l restart -d 'Install, include the launcher, restart safely (default)'
+complete -c pmux -n '__fish_seen_subcommand_from update' -l no-restart -d 'Install and include the launcher without restarting'
 complete -c pmux -n '__fish_seen_subcommand_from update' -l host
 complete -c pmux -n '__fish_seen_subcommand_from update' -l mux
 complete -c pmux -n '__fish_seen_subcommand_from update' -l all
@@ -9536,6 +9561,24 @@ mod tests {
 
     /// Serializes tests that mutate `$PRISMATTYC_REPO`.
     static REPO_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn update_takes_the_global_daemon_target_except_for_source_builds() {
+        let rest = |list: &[&str]| list.iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert_eq!(
+            update_args(
+                rest(&["--json"]),
+                Some("dev".into()),
+                Some(PathBuf::from("/run/p.sock"))
+            ),
+            rest(&["--json", "--instance", "dev", "--socket", "/run/p.sock"])
+        );
+        assert_eq!(update_args(rest(&[]), None, None), rest(&[]));
+        assert_eq!(
+            update_args(rest(&["--source"]), Some("dev".into()), None),
+            rest(&["--source"])
+        );
+    }
 
     #[test]
     fn run_update_refuses_bad_prismattyc_repo() {

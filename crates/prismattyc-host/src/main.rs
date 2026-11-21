@@ -1208,6 +1208,9 @@ struct HostState {
     /// Swallow the matching left-release after a consumed press (URL open,
     /// bell-toast dismiss).
     suppress_left_release: bool,
+    /// The update review a clicked update notice asked for; the app takes
+    /// it on its next pump.
+    toast_update_action: Option<update_flow::Action>,
     /// Last caption-control press. A bounce or double-click at the same
     /// pixel must not fire Show me then Skip after the caption advances.
     caption_click: Option<(Instant, usize, usize)>,
@@ -2652,6 +2655,9 @@ struct BellToast {
     label: String,
     /// Set for status toasts (#171); `None` for bell, paste, and write-fail.
     status: Option<ToastKind>,
+    /// A click opens the Update and restart review instead of only
+    /// dismissing the toast (the update notice on Linux and Windows).
+    opens_update: bool,
 }
 
 /// Writer-death chip text is not a BEL toast (PT-119).
@@ -2682,6 +2688,7 @@ fn apply_write_fail_toasts(
                 until,
                 label,
                 status: None,
+                opens_update: false,
             }),
         }
     }
@@ -4031,7 +4038,9 @@ impl App {
             .windows
             .values_mut()
             .filter_map(|host| {
-                space_panel::take_update_action(host).or_else(|| restart_modal::take_action(host))
+                space_panel::take_update_action(host)
+                    .or_else(|| restart_modal::take_action(host))
+                    .or_else(|| host.toast_update_action.take())
             })
             .collect::<Vec<_>>();
         for action in actions {
@@ -4666,6 +4675,7 @@ impl App {
                 cursor_cell: None,
                 left_button_down: false,
                 suppress_left_release: false,
+                toast_update_action: None,
                 caption_click: None,
                 rich_pointer: None,
                 app_mouse_button: None,
@@ -8664,6 +8674,7 @@ impl App {
                             until,
                             label: BELL_TOAST_LABEL.to_string(),
                             status: None,
+                            opens_update: false,
                         }),
                     }
                     host.dirty = true;
@@ -9847,15 +9858,32 @@ fn status_toast(host: &mut HostState, kind: ToastKind, label: &str) {
             toast.label = label.to_string();
             toast.until = until;
             toast.status = Some(kind);
+            toast.opens_update = false;
         }
         None => host.bell_toasts.push(BellToast {
             pane,
             until,
             label: label.to_string(),
             status: Some(kind),
+            opens_update: false,
         }),
     }
     host.dirty = true;
+}
+
+/// Show the update notice as a toast that opens the Update and restart
+/// review when clicked. Nothing installs until the review is confirmed.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn update_notice_toast(host: &mut HostState, label: &str) {
+    status_toast(host, ToastKind::Notice, label);
+    let pane = host.mux.focused_id();
+    if let Some(toast) = host
+        .bell_toasts
+        .iter_mut()
+        .find(|toast| toast.pane == pane && toast.label == label)
+    {
+        toast.opens_update = true;
+    }
 }
 
 /// The chip list changed: refit when the chips size themselves to the
@@ -18821,6 +18849,7 @@ fn show_paste_toast_on(host: &mut HostState, pane: PaneId, path: &Path) {
             until,
             label,
             status: None,
+            opens_update: false,
         }),
     }
     host.dirty = true;
@@ -19510,32 +19539,36 @@ fn handle_caption_escape(host: &mut HostState) -> bool {
 /// Index of the bell toast chip under the pointer, if any. Clicks and hover
 /// share this so the dismiss cursor matches the dismiss target.
 fn bell_toast_at_pointer(host: &HostState, px: usize, py: usize) -> Option<usize> {
-    let geom = host.mux.geom();
     host.bell_toasts.iter().position(|toast| {
-        let Some((_, rect)) = host.mux.rects().find(|(id, _)| *id == toast.pane) else {
-            return false;
-        };
-        let (content_x, content_y, content_w, content_h) = geom.pane_content_px(rect);
-        let dock_px = host
-            .mux
-            .workspace_rows(toast.pane)
-            .saturating_mul(host.font.cell_h);
-        let guest_y = content_y.saturating_add(dock_px);
-        let guest_h = content_h.saturating_sub(dock_px);
-        bell_toast_chip_rect(
-            &toast.label,
-            host.font.cell_w,
-            host.font.cell_h,
-            content_x,
-            guest_y,
-            content_w,
-            guest_h,
-        )
-        .is_some_and(|(x0, y0, w, h)| px >= x0 && px < x0 + w && py >= y0 && py < y0 + h)
+        bell_toast_rect(host, toast)
+            .is_some_and(|(x0, y0, w, h)| px >= x0 && px < x0 + w && py >= y0 && py < y0 + h)
     })
 }
 
-/// Left-click on a bell toast chip dismisses it and swallows the click.
+/// Where `toast`'s chip is painted, as `(x, y, w, h)` device pixels.
+fn bell_toast_rect(host: &HostState, toast: &BellToast) -> Option<(usize, usize, usize, usize)> {
+    let geom = host.mux.geom();
+    let (_, rect) = host.mux.rects().find(|(id, _)| *id == toast.pane)?;
+    let (content_x, content_y, content_w, content_h) = geom.pane_content_px(rect);
+    let dock_px = host
+        .mux
+        .workspace_rows(toast.pane)
+        .saturating_mul(host.font.cell_h);
+    let guest_y = content_y.saturating_add(dock_px);
+    let guest_h = content_h.saturating_sub(dock_px);
+    bell_toast_chip_rect(
+        &toast.label,
+        host.font.cell_w,
+        host.font.cell_h,
+        content_x,
+        guest_y,
+        content_w,
+        guest_h,
+    )
+}
+
+/// Left-click on a bell toast chip dismisses it and swallows the click. The
+/// update notice also asks the app for the Update and restart review.
 fn handle_bell_toast_click(host: &mut HostState, button: MouseButton) -> bool {
     if button != MouseButton::Left || host.bell_toasts.is_empty() {
         return false;
@@ -19549,7 +19582,9 @@ fn handle_bell_toast_click(host: &mut HostState, button: MouseButton) -> bool {
     let Some(idx) = bell_toast_at_pointer(host, px as usize, py as usize) else {
         return false;
     };
-    host.bell_toasts.remove(idx);
+    if host.bell_toasts.remove(idx).opens_update {
+        host.toast_update_action = Some(update_flow::Action::Start);
+    }
     host.left_button_down = false;
     host.suppress_left_release = true;
     host.dirty = true;
@@ -22561,7 +22596,7 @@ impl ApplicationHandler<UserAction> for App {
                             .notice(&check, self.automatic_update_checks)
                         {
                             for host in self.windows.values_mut() {
-                                status_toast(host, ToastKind::Notice, &notice);
+                                update_notice_toast(host, &notice);
                             }
                         }
                     }

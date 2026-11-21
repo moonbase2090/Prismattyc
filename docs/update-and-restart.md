@@ -14,9 +14,11 @@ The command-line update path remains available on all platforms.
 On Linux and Windows the app runs the same check (`pmux update --check --json`)
 on launch and daily while `automatic_update_checks` is on. When a newer release
 exists it shows one notice naming the version, then stays quiet about that
-version until the app restarts. The notice does not install anything and never
-stops a session; install from **Update and restart** when you choose. It is
-kept in Recent messages and is hidden only by `toasts = "off"`.
+version until the app restarts. Click the notice to open **Restart to update**,
+the same review as **Update and restart** in the command palette. The notice
+itself does not install anything and never stops a session; nothing changes
+until you choose an action in the review. It is kept in Recent messages and is
+hidden only by `toasts = "off"`.
 
 ## Restart without stopping sessions
 
@@ -50,7 +52,11 @@ Choose one of these actions:
 - **Cancel** (or Esc) leaves the sessions and running components alone.
 
 The updater downloads and verifies the release before stopping sessions.
-It installs the release, restarts the daemon and supervised MCP adapters,
+It installs the release, then on Linux and Windows the matching official
+monitor launcher (see [the command line](#check-and-install-a-release)). A
+launcher that cannot be replaced is kept and named in the result with the
+command to fix it; it does not stop the update. It then restarts the daemon
+and supervised MCP adapters,
 asks every other open Prismattyc app process to restart, and relaunches the
 app you used. The result panel reports versions and failures in
 full-width text. An app window that cannot restart yet (for example one that
@@ -144,6 +150,43 @@ pmux update
 pmux versions
 ```
 
+`pmux update` is the one command for an update. It installs the newest
+release, includes its official monitor launcher on Linux and Windows, restarts
+what can restart without stopping a session, and ends with one receipt:
+
+```text
+Updated Prismattyc 0.3.72 to 0.3.73.
+  Core: installed 0.3.73
+  Monitor launcher: installed 0.3.73
+  Daemon: deferred (sessions are running; use --stop-sessions only when ready to end them)
+  Official plug-ins: pending (bundled plug-in migration waits for the daemon restart)
+  App window 4211: restarted
+  MCP adapter: restarted
+Next:
+  - Daemon: Sessions keep running on the old daemon. To move them to the new release, choose Update and restart in the app (it saves and restores them), or run pmux restart --daemon --stop-sessions to end them.
+  - Official plug-ins: They move to the new release when the daemon restarts.
+```
+
+Sessions keep running. The restart is the same as `pmux restart`: app windows
+and MCP adapters restart, and the daemon restarts only when it has no sessions.
+Anything that has to wait is listed under **Next** with what to do. When the
+newest release is already installed, the command still checks the monitor
+launcher and restarts only components still running an older release.
+
+- `pmux update --no-restart` installs the release and the launcher without
+  restarting anything. The receipt lists the components still on the old
+  release.
+- `pmux update --json` keeps the install-only report that apps use. Add
+  `--restart` or `--no-restart` for the complete update with a JSON receipt.
+- The command exits non-zero when a step failed, after printing the receipt.
+
+The launcher step uses the new release's updater. An existing launcher is
+replaced only when it has a repair receipt or matches the official launcher
+of the release installed before the update; otherwise it is kept and the
+receipt names the repair command below. An updater from 0.3.72 or earlier
+installs only the core; run `pmux update` once more after it to include the
+launcher and restart.
+
 The release channel starts at **0.2.0** in **Moonbase2090/Prismattyc**.
 That repository will start with fresh git history. Update uses release
 versions and assets. It does not need a checkout or shared commit history.
@@ -182,6 +225,8 @@ Linux release assets use `x86_64-unknown-linux-gnu` or
 
 ### Replace an older activity monitor launcher
 
+`pmux update` includes the launcher. Repair it by hand when the receipt says
+the existing launcher was kept, or after an updater from 0.3.72 or earlier.
 On Linux and Windows, update the core first. Then start a second command
 to repair `pmux-activity-monitor` for that installed core release:
 
@@ -226,9 +271,9 @@ previous app bundle for rollback. Releases from v0.2.21 onward publish the
 universal zip and `SHA256SUMS-macos`.
 
 The app menu and maintenance panel share the complete update flow above.
-The separate `pmux update` command installs files without stopping sessions.
-Use `pmux restart` for a safe restart that leaves active session owners running,
-or the complete update flow when you are ready to stop and restore sessions.
+`pmux update` installs and restarts without stopping sessions. Use the app's
+complete update flow when you are ready to save, stop and restore sessions so
+they run on the new release too.
 
 The bundle that gets replaced is the `Prismattyc.app` that contains the
 running command. Otherwise the updater uses `/Applications/Prismattyc.app`

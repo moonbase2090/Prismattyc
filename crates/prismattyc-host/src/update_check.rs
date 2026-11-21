@@ -84,7 +84,7 @@ impl Announced {
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 fn notice_text(version: &str) -> String {
     format!(
-        "Prismattyc {version} is available. Your sessions keep running. Open the palette and choose Update and restart to review it."
+        "Prismattyc {version} is available. Your sessions keep running. Click to review Update and restart (also in the palette)."
     )
 }
 

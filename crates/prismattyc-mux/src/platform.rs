@@ -43,8 +43,8 @@ pub fn secure_directory(path: &Path) -> io::Result<()> {
 pub(crate) use windows::private_to_user;
 #[cfg(windows)]
 pub use windows::{
-    owned_socket, process_alive, require_private_directory, secure_directory, set_mode,
-    user_directory,
+    grant_installer_access, owned_socket, process_alive, require_private_directory,
+    secure_directory, set_mode, user_directory,
 };
 #[cfg(windows)]
 mod windows {
@@ -178,6 +178,53 @@ mod windows {
                 | DACL_SECURITY_INFORMATION
                 | PROTECTED_DACL_SECURITY_INFORMATION;
             set_security(path, info, owner, acl)?;
+        }
+        Ok(())
+    }
+    /// Let Windows Installer replace a file the in-app updater published into
+    /// the install directory. `set_mode` leaves a protected user-only DACL.
+    /// The installer service cannot read that descriptor, so setup fails
+    /// while getting file security. SYSTEM and Administrators are added
+    /// without taking the file from the user. A reparse point is refused.
+    pub fn grant_installer_access(path: &Path) -> io::Result<()> {
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+        let meta = fs::symlink_metadata(path)?;
+        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "refusing to widen a reparse point",
+            ));
+        }
+        if meta.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "installer access is for a published file",
+            ));
+        }
+        let sid = user_sid()?;
+        let sddl = wide(std::ffi::OsStr::new(&format!(
+            "D:P(A;;FA;;;{sid})(A;;FA;;;SY)(A;;FA;;;BA)"
+        )));
+        unsafe {
+            let mut sd = ptr::null_mut();
+            if ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut sd,
+                ptr::null_mut(),
+            ) == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            let _guard = Local(sd);
+            if SetFileSecurityW(
+                wide(path.as_os_str()).as_ptr(),
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                sd,
+            ) == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
         }
         Ok(())
     }
@@ -581,6 +628,43 @@ mod windows {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn file_dacl_has_sid(path: &Path, sid: &str) -> bool {
+        unsafe {
+            let mut dacl = ptr::null_mut();
+            let mut sd = ptr::null_mut();
+            let code = GetNamedSecurityInfoW(
+                wide(path.as_os_str()).as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &mut dacl,
+                ptr::null_mut(),
+                &mut sd,
+            );
+            if code != 0 || dacl.is_null() {
+                return false;
+            }
+            let _guard = Local(sd);
+            for index in 0..u32::from((*dacl).AceCount) {
+                let mut ace = ptr::null_mut();
+                if GetAce(dacl, index, &mut ace) == 0 {
+                    return false;
+                }
+                let header = &*ace.cast::<ACE_HEADER>();
+                if header.AceType != 0 {
+                    continue;
+                }
+                let allowed = &*ace.cast::<ACCESS_ALLOWED_ACE>();
+                if sid_eq((&allowed.SidStart as *const u32).cast_mut().cast(), sid) {
+                    return true;
+                }
+            }
+            false
+        }
+    }
+
     /// The Windows counterpart of mode 0o600: owned by the current user, with
     /// a protected DACL whose only entry gives that user full access.
     #[cfg(test)]
@@ -652,6 +736,37 @@ mod windows {
             assert!(
                 file_dacl_is_private_user(&file),
                 "set_mode must leave one protected user ACE"
+            );
+        }
+
+        #[test]
+        fn grant_installer_access_keeps_the_user_and_adds_system() {
+            let dir = std::env::temp_dir()
+                .join(format!("prismattyc-installer-acl-{}", std::process::id()));
+            let _cleanup = RemoveDir(&dir);
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            let file = dir.join("pmux-activity-monitor.exe");
+            fs::write(&file, b"x").unwrap();
+            set_mode(&file, 0o755).unwrap();
+            assert!(
+                file_dacl_is_private_user(&file),
+                "the updater-shaped file starts user-only"
+            );
+            grant_installer_access(&file).unwrap();
+            assert!(
+                !file_dacl_is_private_user(&file),
+                "a user-only file is still unreadable by setup"
+            );
+            let user = user_sid().unwrap();
+            assert!(file_dacl_has_sid(&file, &user), "the user lost access");
+            assert!(
+                file_dacl_has_sid(&file, "S-1-5-18"),
+                "SYSTEM cannot read it"
+            );
+            assert!(
+                file_dacl_has_sid(&file, "S-1-5-32-544"),
+                "Administrators cannot read it"
             );
         }
 

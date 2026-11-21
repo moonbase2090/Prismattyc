@@ -145,10 +145,13 @@ def main():
             'The default shell is COMSPEC (normally cmd.exe); pass -- powershell.exe\n'
             'or -- pwsh.exe to select PowerShell. Configuration is under APPDATA,\n'
             'and runtime/data files are under LOCALAPPDATA.\n'
-            'Replacing or stopping pmuxd destroys active sessions; leave it running\n'
-            'until you have closed them intentionally.\n'
+            'Replacing or stopping pmuxd yourself destroys active sessions.\n'
+            'The MSI stops a pmuxd whose executable is in the install directory\n'
+            'or the update store, then starts the installed one. Signing in does\n'
+            'not stop a daemon that is already running.\n'
             'Read licenses\\MIT.txt and licenses\\NOTICE.txt for licensing.\n', encoding='utf-8')
         shutil.copy2(repo / 'scripts/release/reset-windows-update-pointer.ps1', root / 'bin/reset-windows-update-pointer.ps1')
+        shutil.copy2(repo / 'scripts/release/prepare-windows-install.ps1', root / 'bin/prepare-windows-install.ps1')
         shutil.copy2(repo / 'scripts/release/remove-windows-preview-installs.ps1', root / 'bin/remove-windows-preview-installs.ps1')
         shutil.copy2(repo / 'scripts/release/start-windows-pmuxd.ps1', root / 'bin/start-windows-pmuxd.ps1')
         stage_cmd_forwarders(repo, root / 'cmd', args.target, rebuild=not args.signed)

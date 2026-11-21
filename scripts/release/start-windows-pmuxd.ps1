@@ -1,8 +1,15 @@
 # Start the installed pmuxd when the default socket is down.
-# The MSI runs this after the files are copied and at the next user logon.
-# pmux up leaves a daemon that is already running alone.
-# Each run records its result in %LOCALAPPDATA%\Prismattyc\pmuxd-start.txt,
-# because a quiet install and a logon start have no console to show it.
+# The MSI runs this after the files are copied, with -ReplaceStale.
+# That switch clears the update pointer and stops a pmuxd whose executable
+# is in the install directory or the update store, then starts the installed
+# daemon. The logon Run key omits the switch, so a later sign-in leaves a
+# running daemon alone. Each run records its result in
+# %LOCALAPPDATA%\Prismattyc\pmuxd-start.txt, because a quiet install and a
+# logon start have no console to show it.
+[CmdletBinding()]
+param(
+    [switch]$ReplaceStale
+)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
@@ -35,6 +42,18 @@ $bin = Split-Path -Parent $PSCommandPath
 $pmux = Join-Path $bin 'pmux.exe'
 if (-not (Test-Path -LiteralPath $pmux -PathType Leaf)) {
     Exit-Start 1 "Missing $pmux"
+}
+
+if ($ReplaceStale) {
+    $prepare = Join-Path $bin 'prepare-windows-install.ps1'
+    if (-not (Test-Path -LiteralPath $prepare -PathType Leaf)) {
+        Exit-Start 1 "Missing $prepare"
+    }
+    try {
+        & $prepare
+    } catch {
+        Exit-Start 1 "The previous pmuxd could not be replaced. $_"
+    }
 }
 
 $start = New-Object System.Diagnostics.ProcessStartInfo

@@ -20975,12 +20975,15 @@ impl ApplicationHandler<UserAction> for App {
         if restart::resume(self, event_loop) {
             return;
         }
-        if let Err(e) = self.open_window(event_loop, false) {
-            eprintln!("prismattyc-host: failed to start: {e:#}");
-            self.exit_code = 1;
-            event_loop.exit();
+        let (reopened, unopened) = update_flow::open_saved_windows(self, event_loop);
+        if !reopened {
+            if let Err(e) = self.open_window(event_loop, false) {
+                eprintln!("prismattyc-host: failed to start: {e:#}");
+                self.exit_code = 1;
+                event_loop.exit();
+            }
         }
-        update_flow::resume(self);
+        update_flow::resume(self, &unopened);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {

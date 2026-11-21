@@ -282,19 +282,18 @@ def main():
             choose('Update and restart all components')
             wait(lambda: status().get('restart_modal'), 'second consent')
             choose_option('Save and restart')
-            wait(lambda: render_status()['host_instance'] != initial_instance and any('Restore sessions:' in r for r in (status().get('space_details') or {}).get('rows', [])), 'replacement host restore offer', timeout=90)
-            (out / 'before-restore.json').write_text(json.dumps(snapshot(), indent=2))
-            assert not any(s['name'] == 'work' for s in snapshot()['sessions']), 'startup recreated a session before restore consent'
-            capture('restore-offer')
+            # The restarted daemon brings the session back by itself and the
+            # replacement app reports it, with no second question.
+            wait(lambda: render_status()['host_instance'] != initial_instance and any(r.startswith('Restored ') for r in (status().get('space_details') or {}).get('rows', [])), 'replacement host restore result', timeout=90)
+            (out / 'after-restart.json').write_text(json.dumps(snapshot(), indent=2))
+            assert not any('Restore sessions:' in r for r in (status().get('space_details') or {}).get('rows', [])), 'the app asked again'
             backups = list((out / 'data').rglob('session-configurations/update-*.json'))
             assert len(backups) == 1, backups
             saved_view = json.loads(backups[0].read_text())['view']
             assert saved_view['focused_session'] == 'work', saved_view
             assert saved_view['tabs'] == [{'title': 'work', 'sessions': ['work']}], saved_view
             assert saved_view['session_names']['work'] == 'work', saved_view
-            choose('Restore sessions')
             wait(lambda: marker.read_text() == 'xx', 'saved command relaunched')
-            wait(lambda: any('Session restoration finished.' in r for r in (status().get('space_details') or {}).get('rows', [])), 'restoration result')
             def restored_focus():
                 target = status().get('focused_session')
                 sessions = snapshot()['sessions']

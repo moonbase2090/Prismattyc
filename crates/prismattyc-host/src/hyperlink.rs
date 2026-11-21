@@ -9,7 +9,8 @@ use std::process::{Command, Stdio};
 #[cfg(not(windows))]
 use std::thread;
 
-use prismattyc_core::{Screen, MAX_HYPERLINK_URI_BYTES};
+use crate::content::Content;
+use prismattyc_core::MAX_HYPERLINK_URI_BYTES;
 use winit::keyboard::ModifiersState;
 
 use crate::link_click::{Identity, Target};
@@ -55,28 +56,33 @@ impl HoverPreview {
     pub fn update(
         &mut self,
         pane: prismattyc_mux::PaneId,
-        screen: &Screen,
-        scroll: usize,
+        content: Content<'_>,
         row: usize,
         col: usize,
     ) -> bool {
-        let key = HoverKey {
-            pane,
-            row,
-            col,
-            scroll: scroll.min(screen.max_view_scroll()),
-            epoch: screen.content_epoch(),
-            size: (screen.columns(), screen.rows()),
+        // Only the retained screen has a content epoch. Re-resolve native
+        // frames so rearming a session cannot reuse a prior scene's hover.
+        let key = match content {
+            Content::Classic { screen, scroll } => Some(HoverKey {
+                pane,
+                row,
+                col,
+                scroll,
+                epoch: screen.content_epoch(),
+                size: (screen.columns(), screen.rows()),
+            }),
+            #[cfg(native_transport)]
+            Content::Native(_) => None,
         };
-        if self.key == Some(key) {
+        if key.is_some() && self.key == key {
             return false;
         }
-        let url = url_at(screen, key.scroll, row, col);
+        let url = url_at(content, row, col);
         let changed = self.url != url;
         if changed {
             self.label = url.as_deref().and_then(preview_label);
         }
-        self.key = Some(key);
+        self.key = key;
         self.url = url;
         changed
     }
@@ -135,46 +141,51 @@ pub fn click_owns_url(open_gesture: bool, hit: bool) -> bool {
 }
 
 /// URL covering viewport cell `(row, col)` under `scroll`, if any.
-pub fn url_at(screen: &Screen, scroll: usize, row: usize, col: usize) -> Option<String> {
-    target_at(screen, scroll, row, col).map(|target| target.url)
+pub fn url_at(content: Content<'_>, row: usize, col: usize) -> Option<String> {
+    target_at(content, row, col).map(|target| target.url)
 }
 
 /// Link target and occurrence identity covering viewport cell `(row, col)`.
-pub fn target_at(screen: &Screen, scroll: usize, row: usize, col: usize) -> Option<Target> {
-    let scroll = scroll.min(screen.max_view_scroll());
-    let columns = screen.columns();
-    let rows = screen.rows();
-    if columns == 0 || rows == 0 {
+pub fn target_at(content: Content<'_>, row: usize, col: usize) -> Option<Target> {
+    let columns = content.columns();
+    let rows = content.rows();
+    if row >= rows || col >= columns {
         return None;
     }
-    if let Some(id) = screen.view_cell(scroll, row, col).hyperlink_id() {
-        let uri = screen.hyperlink_uri_at_view(scroll, row, col)?;
-        if !is_allowed_http_url(uri) {
-            return None;
+    match content {
+        Content::Classic { screen, scroll } => {
+            if let Some(id) = screen.view_cell(scroll, row, col).hyperlink_id() {
+                let uri = screen.hyperlink_uri_at_view(scroll, row, col)?;
+                if !is_allowed_http_url(uri) {
+                    return None;
+                }
+                let index = row.saturating_mul(columns).saturating_add(col);
+                let count = rows.saturating_mul(columns);
+                let id_at = |index: usize| {
+                    (index < count).then(|| {
+                        screen
+                            .view_cell(scroll, index / columns, index % columns)
+                            .hyperlink_id()
+                    })
+                };
+                let mut start = index;
+                while start > 0 && id_at(start - 1) == Some(Some(id)) {
+                    start -= 1;
+                }
+                let mut end = index;
+                while end + 1 < count && id_at(end + 1) == Some(Some(id)) {
+                    end += 1;
+                }
+                return Some(Target {
+                    url: uri.to_owned(),
+                    identity: Identity::Osc8 { id, start, end },
+                });
+            }
         }
-        let index = row.saturating_mul(columns).saturating_add(col);
-        let count = rows.saturating_mul(columns);
-        let id_at = |index: usize| {
-            (index < count).then(|| {
-                screen
-                    .view_cell(scroll, index / columns, index % columns)
-                    .hyperlink_id()
-            })
-        };
-        let mut start = index;
-        while start > 0 && id_at(start - 1) == Some(Some(id)) {
-            start -= 1;
-        }
-        let mut end = index;
-        while end + 1 < count && id_at(end + 1) == Some(Some(id)) {
-            end += 1;
-        }
-        return Some(Target {
-            url: uri.to_owned(),
-            identity: Identity::Osc8 { id, start, end },
-        });
+        #[cfg(native_transport)]
+        Content::Native(_) => {}
     }
-    detect_urls(screen, scroll)
+    detect_urls(content)
         .into_iter()
         .find(|found| found.contains(columns, row, col))
         .map(|found| Target {
@@ -186,20 +197,32 @@ pub fn target_at(screen: &Screen, scroll: usize, row: usize, col: usize) -> Opti
         })
 }
 
-pub fn detect_urls(screen: &Screen, scroll: usize) -> Vec<DetectedUrl> {
-    let rows = screen.rows();
-    let columns = screen.columns();
+pub fn detect_urls(content: Content<'_>) -> Vec<DetectedUrl> {
+    let rows = content.rows();
+    let columns = content.columns();
     if rows == 0 || columns == 0 {
         return Vec::new();
     }
-    let scroll = scroll.min(screen.max_view_scroll());
     let mut chars = Vec::with_capacity(rows.saturating_mul(columns));
     let mut pos = Vec::with_capacity(rows.saturating_mul(columns));
+    let mut text = String::new();
     for row in 0..rows {
         for col in 0..columns {
-            let cell = screen.view_cell(scroll, row, col);
-            chars.push(cell.character);
-            pos.push((row, col));
+            let cell = content.cell(row, col).unwrap();
+            if cell.width() == 0 {
+                continue;
+            }
+            text.clear();
+            cell.append_to(&mut text);
+            for character in text.chars() {
+                // A run of non-URL scalars is one separator. Long combining
+                // clusters must not multiply the URL work buffers.
+                if !is_url_char(character) && chars.last().is_some_and(|last| !is_url_char(*last)) {
+                    continue;
+                }
+                chars.push(character);
+                pos.push(((row, col), (row, col + cell.width() - 1)));
+            }
         }
     }
 
@@ -226,8 +249,8 @@ pub fn detect_urls(screen: &Screen, scroll: usize) -> Vec<DetectedUrl> {
         if is_allowed_http_url(&url) {
             found.push(DetectedUrl {
                 url,
-                start: pos[i],
-                end: pos[trimmed - 1],
+                start: pos[i].0,
+                end: pos[trimmed - 1].1,
             });
             i = trimmed;
         } else {
@@ -392,6 +415,15 @@ pub fn ring_host_bell() {
 
 #[cfg(test)]
 mod tests {
+    fn classic(screen: &Screen, scroll: usize) -> super::Content<'_> {
+        super::Content::select(
+            screen,
+            scroll,
+            #[cfg(native_transport)]
+            None,
+        )
+    }
+
     use super::*;
     use prismattyc_core::Screen;
     use prismattyc_emulator::Emulator;
@@ -423,14 +455,18 @@ mod tests {
         let start = 4usize;
         for col in start..start + url.len() {
             assert_eq!(
-                url_at(&screen, 0, 0, col).as_deref(),
+                url_at(classic(&screen, 0), 0, col).as_deref(),
                 Some(url),
                 "col {col}"
             );
         }
-        assert_eq!(url_at(&screen, 0, 0, 0), None, "text before URL is a miss");
         assert_eq!(
-            url_at(&screen, 0, 0, start + url.len()),
+            url_at(classic(&screen, 0), 0, 0),
+            None,
+            "text before URL is a miss"
+        );
+        assert_eq!(
+            url_at(classic(&screen, 0), 0, start + url.len()),
             None,
             "space after URL is a miss"
         );
@@ -450,14 +486,14 @@ mod tests {
         );
         let mut preview = HoverPreview::default();
         let pane = preview_pane();
-        assert!(preview.update(pane, emulator.screen(), 0, 0, 2));
+        assert!(preview.update(pane, classic(emulator.screen(), 0), 0, 2));
         assert_eq!(preview.url(), Some("https://destination.example/manual"));
         assert_eq!(
             preview.label(),
             Some("Host: destination.example | https://destination.example/manual")
         );
-        assert!(!preview.update(pane, emulator.screen(), 0, 0, 2));
-        assert!(!preview.update(pane, emulator.screen(), 0, 0, 4));
+        assert!(!preview.update(pane, classic(emulator.screen(), 0), 0, 2));
+        assert!(!preview.update(pane, classic(emulator.screen(), 0), 0, 4));
         assert!(preview.clear());
         assert_eq!(preview.url(), None);
         assert_eq!(preview.label(), None);
@@ -491,19 +527,19 @@ mod tests {
         let pane = preview_pane();
         let mut preview = HoverPreview::default();
         emulator.feed(b"\x1b]8;;https://first.example\x1b\\docs\x1b]8;;\x1b\\");
-        preview.update(pane, emulator.screen(), 0, 0, 0);
+        preview.update(pane, classic(emulator.screen(), 0), 0, 0);
         assert_eq!(preview.url(), Some("https://first.example"));
         emulator.feed(b"\r\x1b]8;;https://second.example\x1b\\docs\x1b]8;;\x1b\\");
         preview.invalidate();
-        assert!(preview.update(pane, emulator.screen(), 0, 0, 0));
+        assert!(preview.update(pane, classic(emulator.screen(), 0), 0, 0));
         assert_eq!(preview.url(), Some("https://second.example"));
         emulator.feed(b"\r\x1b]8;;javascript:alert(1)\x1b\\https://safe.example\x1b]8;;\x1b\\");
         preview.invalidate();
-        assert!(preview.update(pane, emulator.screen(), 0, 0, 0));
+        assert!(preview.update(pane, classic(emulator.screen(), 0), 0, 0));
         assert_eq!(preview.url(), None);
         emulator.feed(b"\r\x1b[2Kordinary text");
         preview.invalidate();
-        assert!(!preview.update(pane, emulator.screen(), 0, 0, 0));
+        assert!(!preview.update(pane, classic(emulator.screen(), 0), 0, 0));
         assert_eq!(preview.url(), None);
     }
 
@@ -513,11 +549,11 @@ mod tests {
         let _ = emulator.feed(b"\x1b]8;id=docs;https://example.com/manual\x1b\\docs\x1b]8;;\x1b\\");
         for col in 0..4 {
             assert_eq!(
-                url_at(emulator.screen(), 0, 0, col).as_deref(),
+                url_at(classic(emulator.screen(), 0), 0, col).as_deref(),
                 Some("https://example.com/manual")
             );
         }
-        assert_eq!(url_at(emulator.screen(), 0, 0, 4), None);
+        assert_eq!(url_at(classic(emulator.screen(), 0), 0, 4), None);
     }
 
     #[test]
@@ -525,19 +561,19 @@ mod tests {
         let mut screen = Screen::new(40, 1, 0);
         fill(&mut screen, "https://example.com");
         assert_eq!(
-            target_at(&screen, 0, 0, 1),
-            target_at(&screen, 0, 0, 12),
+            target_at(classic(&screen, 0), 0, 1),
+            target_at(classic(&screen, 0), 0, 12),
             "every cell of a detected URL shares one click target"
         );
 
         let mut emulator = Emulator::new(20, 1, 0);
         let _ = emulator.feed(b"\x1b]8;id=docs;https://example.com/manual\x1b\\docs\x1b]8;;\x1b\\");
         assert_eq!(
-            target_at(emulator.screen(), 0, 0, 0),
-            target_at(emulator.screen(), 0, 0, 3),
+            target_at(classic(emulator.screen(), 0), 0, 0),
+            target_at(classic(emulator.screen(), 0), 0, 3),
             "every cell of an OSC 8 run shares one click target"
         );
-        assert_eq!(target_at(emulator.screen(), 0, 0, 4), None);
+        assert_eq!(target_at(classic(emulator.screen(), 0), 0, 4), None);
     }
 
     #[test]
@@ -545,7 +581,7 @@ mod tests {
         let mut emulator = Emulator::new(32, 1, 0);
         let _ =
             emulator.feed(b"\x1b]8;;javascript:alert(1)\x1b\\https://safe.example\x1b]8;;\x1b\\");
-        assert_eq!(url_at(emulator.screen(), 0, 0, 0), None);
+        assert_eq!(url_at(classic(emulator.screen(), 0), 0, 0), None);
     }
 
     #[test]
@@ -553,7 +589,7 @@ mod tests {
         let mut emulator = Emulator::new(32, 1, 0);
         let _ = emulator
             .feed("\x1b]8;;日本語のリンク\x1b\\https://safe.example\x1b]8;;\x1b\\".as_bytes());
-        assert_eq!(url_at(emulator.screen(), 0, 0, 0), None);
+        assert_eq!(url_at(classic(emulator.screen(), 0), 0, 0), None);
     }
 
     #[test]
@@ -563,10 +599,10 @@ mod tests {
         assert_eq!(screen.view_cell(0, 0, 19).character, '/');
         assert_eq!(screen.view_cell(0, 1, 0).character, 'x');
         let url = "https://example.com/x";
-        assert_eq!(url_at(&screen, 0, 0, 0).as_deref(), Some(url));
-        assert_eq!(url_at(&screen, 0, 0, 19).as_deref(), Some(url));
-        assert_eq!(url_at(&screen, 0, 1, 0).as_deref(), Some(url));
-        assert_eq!(url_at(&screen, 0, 1, 1), None);
+        assert_eq!(url_at(classic(&screen, 0), 0, 0).as_deref(), Some(url));
+        assert_eq!(url_at(classic(&screen, 0), 0, 19).as_deref(), Some(url));
+        assert_eq!(url_at(classic(&screen, 0), 1, 0).as_deref(), Some(url));
+        assert_eq!(url_at(classic(&screen, 0), 1, 1), None);
     }
 
     #[test]
@@ -574,10 +610,10 @@ mod tests {
         let mut screen = Screen::new(40, 2, 0);
         fill(&mut screen, "https://example.com\n/not-joined");
         assert_eq!(
-            url_at(&screen, 0, 0, 0).as_deref(),
+            url_at(classic(&screen, 0), 0, 0).as_deref(),
             Some("https://example.com")
         );
-        assert_eq!(url_at(&screen, 0, 1, 0), None);
+        assert_eq!(url_at(classic(&screen, 0), 1, 0), None);
     }
 
     #[test]
@@ -585,15 +621,15 @@ mod tests {
         let mut screen = Screen::new(48, 1, 0);
         fill(&mut screen, "https://example.com.,;:!?)`] ");
         let url = "https://example.com";
-        assert_eq!(url_at(&screen, 0, 0, 0).as_deref(), Some(url));
+        assert_eq!(url_at(classic(&screen, 0), 0, 0).as_deref(), Some(url));
         assert_eq!(
-            url_at(&screen, 0, 0, url.len() - 1).as_deref(),
+            url_at(classic(&screen, 0), 0, url.len() - 1).as_deref(),
             Some(url),
             "last URL cell is a hit"
         );
         for col in url.len()..url.len() + TRAILING_PUNCT.len() {
             assert_eq!(
-                url_at(&screen, 0, 0, col),
+                url_at(classic(&screen, 0), 0, col),
                 None,
                 "trailing punct col {col} is a miss"
             );
@@ -614,8 +650,8 @@ mod tests {
 
         let mut screen = Screen::new(40, 1, 0);
         fill(&mut screen, "javascript:alert(1) file://x data:y");
-        assert!(detect_urls(&screen, 0).is_empty());
-        assert_eq!(url_at(&screen, 0, 0, 0), None);
+        assert!(detect_urls(classic(&screen, 0)).is_empty());
+        assert_eq!(url_at(classic(&screen, 0), 0, 0), None);
     }
 
     #[test]
@@ -641,8 +677,8 @@ mod tests {
     fn hit_vs_miss_vs_selection() {
         let mut screen = Screen::new(32, 1, 0);
         fill(&mut screen, "https://ex.com plus");
-        let hit = url_at(&screen, 0, 0, 2).is_some();
-        let miss = url_at(&screen, 0, 0, 20).is_none();
+        let hit = url_at(classic(&screen, 0), 0, 2).is_some();
+        let miss = url_at(classic(&screen, 0), 0, 20).is_none();
         assert!(hit);
         assert!(miss);
 
@@ -685,12 +721,12 @@ mod tests {
         fill(&mut screen, "https://scrolled.example/\nnext\nlive");
         assert_eq!(screen.max_view_scroll(), 1);
         assert_eq!(
-            url_at(&screen, 0, 0, 0),
+            url_at(classic(&screen, 0), 0, 0),
             None,
             "live view does not show the scrolled URL"
         );
         assert_eq!(
-            url_at(&screen, 1, 0, 0).as_deref(),
+            url_at(classic(&screen, 1), 0, 0).as_deref(),
             Some("https://scrolled.example/")
         );
     }

@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: MIT
+[package]
+name = "native-component-proof"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+unicode-segmentation = "=1.13.3"
+libc = "=0.2.191"
+getrandom = "0.3"
+sha2 = "=0.10.9"
+anyhow = "1"
+portable-pty = "0.9"
+prismattyc-emulator = { path = "../../../../../crates/prismattyc-emulator" }
+prismattyc-protocol = { path = "../../../../../crates/prismattyc-protocol" }
+prismattyc-process = { path = "../../../../../crates/prismattyc-process" }
+
+[workspace]
+
+[patch.crates-io]
+portable-pty = { path = "../../../../../third_party/portable-pty" }

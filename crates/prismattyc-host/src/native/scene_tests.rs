@@ -1,0 +1,287 @@
+// SPDX-License-Identifier: MIT
+use super::super::{
+    backing::tests as backing,
+    frame::{literals, Glyph},
+    wire12::{MetricsEpoch, PtyEpoch, SessionId, RING_BYTES, SLOT_BYTES},
+};
+use super::*;
+use std::{
+    os::fd::{AsRawFd, OwnedFd},
+    ptr::NonNull,
+    sync::atomic::{AtomicU64, Ordering},
+};
+
+pub(crate) struct Producer {
+    address: NonNull<u8>,
+    _descriptor: OwnedFd,
+}
+impl Producer {
+    pub(crate) fn minor(&self) -> u16 {
+        unsafe {
+            u16::from_le_bytes([
+                self.address.as_ptr().add(10).read_volatile(),
+                self.address.as_ptr().add(11).read_volatile(),
+            ])
+        }
+    }
+    pub(crate) fn new(descriptor: OwnedFd) -> Self {
+        let address = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                RING_BYTES as usize,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                descriptor.as_raw_fd(),
+                0,
+            )
+        };
+        assert_ne!(address, libc::MAP_FAILED);
+        Self {
+            address: NonNull::new(address.cast()).unwrap(),
+            _descriptor: descriptor,
+        }
+    }
+    pub(crate) fn counter(&self, offset: usize) -> &AtomicU64 {
+        unsafe { &*self.address.as_ptr().add(offset).cast::<AtomicU64>() }
+    }
+    pub(crate) fn publish(&self, sequence: u64, literal: &[u8]) {
+        let start = 4096 + ((sequence - 1) % 4) as usize * SLOT_BYTES as usize;
+        unsafe {
+            let address = self.address.as_ptr().add(start);
+            std::ptr::write_bytes(address, 0, SLOT_BYTES as usize);
+            std::ptr::copy_nonoverlapping(literal.as_ptr(), address, literal.len());
+            std::ptr::copy_nonoverlapping(sequence.to_le_bytes().as_ptr(), address.add(8), 8);
+        }
+        self.counter(64).store(sequence, Ordering::Release);
+    }
+}
+impl Drop for Producer {
+    fn drop(&mut self) {
+        assert_eq!(
+            unsafe { libc::munmap(self.address.as_ptr().cast(), RING_BYTES as usize) },
+            0
+        );
+    }
+}
+fn frames() -> SessionFrames {
+    SessionFrames::new(
+        RingContext {
+            session: SessionId::new(1).unwrap(),
+            epoch: PtyEpoch::new(7).unwrap(),
+            metrics: MetricsEpoch::new(9).unwrap(),
+            columns: 1,
+            rows: 1,
+        },
+        ImagePool::isolated(),
+    )
+    .unwrap()
+}
+fn descriptor() -> ImageDescriptor {
+    let (source, physical) = backing::source();
+    ImageDescriptor::validate(source, backing::metadata(physical)).unwrap()
+}
+fn sequence(n: u64) -> FrameSequence {
+    FrameSequence::new(n).unwrap()
+}
+
+#[test]
+fn pending_full_snapshots_coalesce_without_installing_or_blocking_ring_progress() {
+    let mut frames = frames();
+    let producer = Producer::new(frames.descriptor().try_clone_to_owned().unwrap());
+    assert!(!frames.prepare_next().unwrap());
+    let mut previous_pending = None;
+    for n in 1..=12 {
+        let mut bytes = literals::FRAME_INITIAL.to_vec();
+        bytes[128] = b'A' + n as u8;
+        producer.publish(n, &bytes);
+        assert!(frames.prepare_next().unwrap());
+        assert!(frames.installed().is_none());
+        assert_eq!(producer.counter(128).load(Ordering::Acquire), n);
+        if let Some(previous) = previous_pending.take() {
+            assert!(std::sync::Weak::upgrade(&previous).is_none());
+        }
+        previous_pending = frames.pending.as_ref().map(Arc::downgrade);
+    }
+    assert_eq!(frames.install_next(), Ok(Some(sequence(12))));
+    assert_eq!(
+        frames.installed().unwrap().frame().cells[0].glyph,
+        Glyph::Scalar('M')
+    );
+    assert_eq!(frames.install_next(), Ok(None));
+}
+
+#[test]
+fn an_unresolved_image_never_acknowledges_the_frame_or_replaces_the_installed_scene() {
+    let mut frames = frames();
+    let producer = Producer::new(frames.descriptor().try_clone_to_owned().unwrap());
+    producer.publish(1, literals::FRAME_INITIAL);
+    frames.prepare_next().unwrap();
+    frames.install_next().unwrap();
+    producer.publish(2, literals::FRAME_PLACEMENT);
+    assert_eq!(
+        frames.prepare_next(),
+        Err(SceneError::Resource(RegistryError::UnknownHandle))
+    );
+    assert_eq!(producer.counter(128).load(Ordering::Acquire), 1);
+    assert_eq!(
+        frames.installed().unwrap().frame().context.sequence.get(),
+        1
+    );
+    assert_eq!(
+        frames.installed().unwrap().frame().cells[0].glyph,
+        Glyph::Scalar('?')
+    );
+}
+
+#[test]
+fn retiring_waits_for_the_installed_omission_and_a_real_retained_scene() {
+    let mut frames = frames();
+    let now = Instant::now();
+    let producer = Producer::new(frames.descriptor().try_clone_to_owned().unwrap());
+    producer.publish(1, literals::FRAME_INITIAL);
+    frames.prepare_next().unwrap();
+    frames.install_next().unwrap();
+    assert!(matches!(
+        frames.put(descriptor(), now).unwrap(),
+        Reply::Admitted { .. }
+    ));
+    frames.resources.finish_for_test().unwrap();
+    producer.publish(2, literals::FRAME_PLACEMENT);
+    frames.prepare_next().unwrap();
+    frames.install_next().unwrap();
+    let retained = Arc::clone(frames.installed().unwrap());
+    assert_eq!(retained.images()[0].pixels.pixels(), [255, 0, 0, 128]);
+    assert_eq!(retained.images()[0].placement.size, [8, 16]);
+    producer.publish(3, literals::FRAME_OMISSION);
+    frames.prepare_next().unwrap();
+    let handle = ResourceHandle::new(1).unwrap();
+    assert_eq!(frames.retire(handle, sequence(3)), Ok(Retirement::Busy));
+    producer.publish(4, literals::FRAME_OMISSION);
+    assert!(frames.prepare_next().unwrap());
+    assert_eq!(frames.retire(handle, sequence(3)), Ok(Retirement::Busy));
+    assert_eq!(frames.install_next(), Ok(Some(sequence(4))));
+    assert!(frames.installed().unwrap().images().is_empty());
+    assert_eq!(frames.retire(handle, sequence(3)), Ok(Retirement::Busy));
+    drop(retained);
+    assert_eq!(frames.retire(handle, sequence(3)), Ok(Retirement::Retired));
+    assert_eq!(frames.pong(now), Ok(UploadState::Idle));
+    producer.publish(5, literals::FRAME_PLACEMENT);
+    assert_eq!(
+        frames.prepare_next(),
+        Err(SceneError::Resource(RegistryError::UnknownHandle))
+    );
+    assert_eq!(producer.counter(128).load(Ordering::Acquire), 4);
+}
+
+#[test]
+fn an_exec_child_publishes_into_the_real_inherited_ring_before_installation() {
+    const CHILD_FD: i32 = 198;
+    const CHILD_ENV: &str = "PRISMATTYC_NATIVE_PROOF_RING_CHILD";
+    if std::env::var_os(CHILD_ENV).is_some() {
+        use std::os::fd::FromRawFd;
+        let producer = Producer::new(unsafe { OwnedFd::from_raw_fd(CHILD_FD) });
+        assert_eq!(producer.counter(64).load(Ordering::Acquire), 0);
+        producer.publish(1, literals::FRAME_INITIAL);
+        return;
+    }
+    use std::os::unix::process::CommandExt;
+    let mut frames = frames();
+    let descriptor = frames.descriptor().try_clone_to_owned().unwrap();
+    let raw = descriptor.as_raw_fd();
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    let module = module_path!().split_once("::").unwrap().1;
+    let test = format!(
+        "{module}::an_exec_child_publishes_into_the_real_inherited_ring_before_installation"
+    );
+    command
+        .args([test.as_str(), "--exact"])
+        .env(CHILD_ENV, "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    unsafe {
+        command.pre_exec(move || {
+            if raw != CHILD_FD && libc::dup2(raw, CHILD_FD) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::fcntl(CHILD_FD, libc::F_SETFD, 0) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let output = prismattyc_process::spawn(&mut command)
+        .unwrap()
+        .wait_with_output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(frames.installed().is_none());
+    assert!(frames.prepare_next().unwrap());
+    assert!(frames.installed().is_none());
+    assert_eq!(frames.install_next(), Ok(Some(sequence(1))));
+    assert_eq!(
+        frames.installed().unwrap().grid().cell(0, 0).unwrap().text,
+        super::super::grid::Text::Scalar('?')
+    );
+}
+
+#[test]
+fn installed_scene_blink_metadata_only_counts_visible_ink() {
+    let mut frames = frames();
+    let producer = Producer::new(frames.descriptor().try_clone_to_owned().unwrap());
+    for (index, (glyph, meta, expected)) in [
+        ('?', 0x1000u32, false),
+        ('?', 0x1040, true),
+        ('?', 0x1140, false),
+        (' ', 0x1040, false),
+        (' ', 0x1048, true),
+        (' ', 0x1240, true),
+        (' ', 0x1440, true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut bytes = literals::FRAME_INITIAL.to_vec();
+        bytes[128..132].copy_from_slice(&u32::from(glyph).to_le_bytes());
+        bytes[140..144].copy_from_slice(&meta.to_le_bytes());
+        producer.publish(index as u64 + 1, &bytes);
+        assert!(frames.prepare_next().unwrap());
+        assert!(frames.install_next().unwrap().is_some());
+        assert_eq!(
+            frames.installed().unwrap().blinks(),
+            expected,
+            "glyph {glyph:?}, meta {meta:x}"
+        );
+    }
+}
+
+#[test]
+fn a_blinking_blank_cluster_does_not_arm_the_scene_timer() {
+    let mut frames = frames();
+    let producer = Producer::new(frames.descriptor().try_clone_to_owned().unwrap());
+    let mut bytes = literals::FRAME_INITIAL.to_vec();
+    bytes.resize(168, 0);
+    for (offset, value) in [
+        (0, 168u32),
+        (40, 1),
+        (44, 144),
+        (48, 1),
+        (52, 160),
+        (60, 168),
+        (128, 0x8000_0000),
+        (140, 0x1040),
+        (148, 1),
+    ] {
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    bytes[152] = 1;
+    bytes[160] = b' ';
+    producer.publish(1, &bytes);
+    assert!(frames.prepare_next().unwrap());
+    assert!(frames.install_next().unwrap().is_some());
+    assert!(!frames.installed().unwrap().blinks());
+}

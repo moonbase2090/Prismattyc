@@ -839,7 +839,7 @@ fn verify_dispatch(host: &mut HostState) {
 
     let _ = host.emulator.feed(b"hello rail\r\n");
     assert_eq!(dispatch(host, A::SelectAll), Dispatch::Handled);
-    let selected = selected_clipboard_text(&host.selection, host.emulator.screen());
+    let selected = selected_clipboard_text(&host.selection, host.mux.focused().content());
     assert!(
         selected.as_deref().unwrap_or("").contains("hello rail"),
         "select all copies the viewport, got {selected:?}"
@@ -847,7 +847,7 @@ fn verify_dispatch(host: &mut HostState) {
     assert_eq!(dispatch(host, A::Copy), Dispatch::Handled);
     assert_eq!(dispatch(host, A::ClearScrollback), Dispatch::Handled);
     assert_eq!(host.view_scroll, 0);
-    assert!(selected_clipboard_text(&host.selection, host.emulator.screen()).is_none());
+    assert!(selected_clipboard_text(&host.selection, host.mux.focused().content()).is_none());
 
     assert_eq!(dispatch(host, A::Paste), Dispatch::Handled);
 

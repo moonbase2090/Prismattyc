@@ -2256,6 +2256,7 @@ impl PtySession {
         command.env_remove("PRISMATTYC_SESSION_ID");
         command.env_remove("PMUX_AGENT");
         command.env_remove("PMUX_TUTORIAL_PACK");
+        command.env_remove("PRISMATTYC_NATIVE_FD");
         for (key, value) in environment {
             command.env(key, value);
         }

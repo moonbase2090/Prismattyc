@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: MIT
+[package]
+name = "native-client-probe"
+version = "0.0.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+anyhow = "1"
+libc = "=0.2.191"
+sha2 = "=0.10.9"
+getrandom = "0.3"
+serde_json = "1"
+lunatui-core = { git = "https://github.com/moonbase2090/lunatui", rev = "2d1e7d8231978a96f601c773db9b74a990f780b3" }
+lunatui-image = { git = "https://github.com/moonbase2090/lunatui", rev = "2d1e7d8231978a96f601c773db9b74a990f780b3" }
+lunatui-prismattyc = { git = "https://github.com/moonbase2090/lunatui", rev = "2d1e7d8231978a96f601c773db9b74a990f780b3" }
+lunatui-theme = { git = "https://github.com/moonbase2090/lunatui", rev = "2d1e7d8231978a96f601c773db9b74a990f780b3" }
+lunatui-widgets = { git = "https://github.com/moonbase2090/lunatui", rev = "2d1e7d8231978a96f601c773db9b74a990f780b3", default-features = false, features = ["image"] }
+lunatui-term = { git = "https://github.com/moonbase2090/lunatui", rev = "2d1e7d8231978a96f601c773db9b74a990f780b3", features = ["pixel-layer"] }
+prismattyc-process = { path = "../../../../../crates/prismattyc-process" }
+
+[dev-dependencies]
+native-component-proof = { path = "../native-components" }
+
+[patch.crates-io]
+portable-pty = { path = "../../../../../third_party/portable-pty" }

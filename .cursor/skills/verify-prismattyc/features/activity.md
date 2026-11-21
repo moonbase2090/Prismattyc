@@ -8,10 +8,11 @@ daemon or replacing sessions. See [the feed design](../../../../docs/agent-activ
 
 The monitor UI and connector query logic run as contained plug-ins. The native
 `pmux-activity-monitor` executable presents validated frames and forwards its
-compatibility query modes. First use installs and enables the bundled defaults
+compatibility query modes. Startup reconciliation installs and enables the bundled defaults
 with local activity read for the connector and local read plus stopped-session
 cleanup for the monitor when no saved package selection exists. Saved disables
-are preserved. Explicit package installation leaves the package disabled.
+are preserved. Enabled defaults can advance to a newer compatible bundled
+version with their saved grants. Explicit package installation leaves the package disabled.
 `PRISMATTYC_DEFAULT_PLUGINS=0` skips default provisioning for isolated tests.
 Endpoint registration, package grants, and the MCP operator allowlist are
 separate steps.
@@ -37,6 +38,11 @@ wheel selection and return, and click-to-dismiss help. Plain right-click opens
 the host pane menu; Shift+right-click passes through to return to the monitor's
 list. The terminal-only flow sends SGR mouse reports directly to the pane and
 does not prove host input routing.
+
+When changing Details, use a long event line and verify Enter or Space expands
+and collapses the selected line, `e` expands and collapses all lines, and a
+click toggles the pointed line. Inspect the restored text and duration column.
+The existing mouse flow does not assert these expansion states.
 
 The native drive requires an allocated interactive desktop. macOS needs
 Accessibility permission; Linux needs X11, XTEST, xdotool, and a window manager;
@@ -368,6 +374,10 @@ upload response and captured host frames from an allocated desktop.
 Run the CLI restart check in clean macOS and Windows VMs at the PR head.
 Prepare the reviewed bundle with the Launch recipe. Build and run the check
 with the guest's native toolchain.
+
+The restart fixture needs retained monitor 1.3.4 and connector 1.0.1 packages
+in that bundle, plus a newer monitor. Check those catalog entries before
+launching the migration drive.
 
 ```sh
 python3 scripts/test-plugin-runtime.py --bundle "$verify_bundle" \

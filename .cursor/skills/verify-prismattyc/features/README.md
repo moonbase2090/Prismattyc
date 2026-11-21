@@ -1,10 +1,11 @@
 # Prismattyc verification map
 
-Read this index before selecting proof. Each feature file names the user entry points, prerequisites, observable results, and limitations. This map covers five feature groups; it is not a claim that every application action has a recipe.
+Read this index before selecting proof. Each feature file names the user entry points, prerequisites, observable results, and limitations. This map covers six feature groups; it is not a claim that every application action has a recipe.
 
 - [Sessions and mail](sessions-mail.md): real shell output, mailbox claim/commit, and live process preservation.
 - [Saved spaces](spaces.md): create, save, open, rename, and delete saved definitions while sessions remain alive.
 - [Desktop UI](desktop.md): native rail deletion, session naming, restart rendering, settings and plug-in management, complete updates with session restoration, and macOS Dock restoration.
+- [Native terminal sessions](native.md): direct local activation, grid and uploaded images, source recovery, retained endpoints, image budgets and animation.
 - [Windows](windows.md): installer lifecycle, matched plug-in provenance, launcher repair, console newlines, and new-pane shell selection.
 - [Agent activity](activity.md): headless ingestion, bounded hook-profile edits, contained monitor and connector, native mouse input, grants, native MCP, bundle identity, and updater migration.
 

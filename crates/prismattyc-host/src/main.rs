@@ -18,6 +18,7 @@ mod config;
 mod config_document;
 mod config_schema;
 mod config_template;
+mod content;
 mod daemon_startup;
 mod file_writer;
 mod font_fallback;
@@ -48,6 +49,13 @@ mod macos_update;
 mod macos_window;
 mod move_target;
 mod mux;
+#[cfg(native_transport)]
+mod native;
+#[cfg(any(test, native_transport))]
+mod native_platform;
+#[cfg(test)]
+#[path = "native_platform_tests.rs"]
+mod native_platform_tests;
 mod notify;
 mod palette;
 mod pane_bell;
@@ -1297,6 +1305,8 @@ struct HostState {
     caret_blink_armed: bool,
     /// Current blink phase. True paints the caret.
     last_caret_phase_on: bool,
+    #[cfg(native_transport)]
+    native_blink: CaretBlinkClock,
     /// Window focus, tracked so decorative animation pauses when the window is
     /// in the background. Agent panes are active around the clock, so the dot
     /// pulse is otherwise a PERMANENT ~16 repaints/second — measured at 25-46%
@@ -2858,7 +2868,7 @@ fn caret_blink_wanted(host: &HostState) -> bool {
         return false;
     }
     let pane = host.mux.focused();
-    pane.emulator.cursor_blink() || pane.caret_blink_latched()
+    !pane.content().is_native() && (pane.emulator.cursor_blink() || pane.caret_blink_latched())
 }
 
 fn caret_blink_deadline(host: &HostState, now: Instant) -> Option<Instant> {
@@ -2966,6 +2976,44 @@ fn settle_caret_blink(host: &mut HostState, now: Instant) {
     }
     host.dirty = true;
     host.mux.focused_mut().emulator.mark_cursor_damage();
+}
+
+#[cfg(native_transport)]
+fn native_blink_wanted(host: &HostState) -> bool {
+    host.window_focused
+        && !host.window_occluded
+        && host
+            .mux
+            .panes_and_rects()
+            .any(|(_, pane, _)| pane.native_scene().is_some_and(|scene| scene.blinks()))
+}
+
+#[cfg(native_transport)]
+fn native_blink_deadline(host: &HostState, now: Instant) -> Option<Instant> {
+    native_blink_wanted(host).then(|| next_caret_blink_at(host.native_blink.epoch, now))
+}
+
+#[cfg(not(native_transport))]
+fn native_blink_deadline(_: &HostState, _: Instant) -> Option<Instant> {
+    None
+}
+
+#[cfg(native_transport)]
+fn settle_native_blink(host: &mut HostState, now: Instant) {
+    let wanted = native_blink_wanted(host);
+    if !settle_caret_clock(&mut host.native_blink, wanted, now) {
+        return;
+    }
+    let panes: Vec<_> = host
+        .mux
+        .panes_and_rects()
+        .filter(|(_, pane, _)| pane.native_scene().is_some_and(|scene| scene.blinks()))
+        .map(|(id, _, _)| id)
+        .collect();
+    for id in panes {
+        host.mux.pane_mut(id).unwrap().invalidate_native_paint();
+    }
+    host.dirty = true;
 }
 
 impl Deref for HostState {
@@ -4157,7 +4205,10 @@ impl App {
                         ),
                         earliest(
                             host.link_click_gesture.deadline(),
-                            caret_blink_deadline(host, now),
+                            earliest(
+                                caret_blink_deadline(host, now),
+                                native_blink_deadline(host, now),
+                            ),
                         ),
                     ),
                 ),
@@ -4171,7 +4222,7 @@ impl App {
                 // output (EventLoopProxy) or focus wakes it.
                 host.mux.active_count() > 0 && host.window_focused && !host.window_occluded,
                 host.pulse_epoch,
-                extra_deadline,
+                earliest(extra_deadline, host.mux.native_deadline()),
             ) {
                 next_deadline = Some(match next_deadline {
                     Some(existing) => existing.min(when),
@@ -4693,6 +4744,12 @@ impl App {
                 caret_blink_epoch: Instant::now(),
                 caret_blink_armed: false,
                 last_caret_phase_on: true,
+                #[cfg(native_transport)]
+                native_blink: CaretBlinkClock {
+                    epoch: Instant::now(),
+                    armed: false,
+                    phase_on: true,
+                },
                 window_focused: true,
                 window_occluded: false,
                 light_cycle: self.cli.light_cycle,
@@ -5061,22 +5118,18 @@ fn take_live_announce(host: &mut HostState) -> Option<a11y::LiveSnap> {
 }
 
 fn focused_cursor_line(host: &HostState) -> (Option<usize>, String) {
-    let pane = host.mux.focused();
-    let screen = pane.emulator.screen();
-    let scroll = pane.view_scroll.min(screen.max_view_scroll());
-    if scroll != 0 {
+    let content = host.mux.focused().content();
+    if content.scroll() != 0 {
         return (None, String::new());
     }
-    let row = screen.cursor().row;
-    let mut line = String::new();
-    for col in 0..screen.columns() {
-        screen.view_cell(0, row, col).write_grapheme_into(&mut line);
-    }
-    (Some(row), line.trim_end_matches(' ').to_string())
+    let Some(cursor) = content.cursor() else {
+        return (None, String::new());
+    };
+    (Some(cursor.row), content.row_text(cursor.row))
 }
 
 fn queue_selection_announce(host: &mut HostState) {
-    if let Some(text) = selected_clipboard_text(&host.selection, host.emulator.screen()) {
+    if let Some(text) = selected_clipboard_text(&host.selection, host.mux.focused().content()) {
         let mut text = text;
         if text.chars().count() > 200 {
             text = text.chars().take(200).collect();
@@ -5149,8 +5202,9 @@ fn chrome_snapshot(host: &HostState, live: Option<a11y::LiveSnap>) -> a11y::Chro
     let overlay = chrome_overlay(host);
     let scroll = {
         let pane = host.mux.focused();
-        let max = pane.emulator.screen().max_view_scroll();
-        let scroll = pane.view_scroll.min(max);
+        let content = pane.content();
+        let max = content.max_scroll();
+        let scroll = content.scroll();
         (scroll > 0).then(|| format!("{scroll}/{max}"))
     };
     let rail = if host.mux.geom().rail_side == space_rail::RailSide::Off {
@@ -5241,10 +5295,16 @@ fn prepare_config_reload<'a>(
 
 fn focused_document(host: &HostState) -> a11y::DocumentSnap {
     let pane = host.mux.focused();
-    let screen = pane.emulator.screen();
-    let scroll = pane.view_scroll.min(screen.max_view_scroll());
-    let rows = screen.rows();
-    let cols = screen.columns();
+    document_for_content(pane.content(), &pane.selection)
+}
+
+fn document_for_content(
+    content: content::Content<'_>,
+    selection: &Selection,
+) -> a11y::DocumentSnap {
+    let scroll = content.scroll();
+    let rows = content.rows();
+    let cols = content.columns();
     let mut lines = Vec::with_capacity(rows);
     let mut widths = Vec::with_capacity(rows);
     for row in 0..rows {
@@ -5252,9 +5312,7 @@ fn focused_document(host: &HostState) -> a11y::DocumentSnap {
         let mut cell_chars = Vec::with_capacity(cols);
         for col in 0..cols {
             let start = line.len();
-            screen
-                .view_cell(scroll, row, col)
-                .write_grapheme_into(&mut line);
+            content.cell(row, col).unwrap().append_to(&mut line);
             cell_chars.push(line[start..].chars().count());
         }
         lines.push(line);
@@ -5263,16 +5321,16 @@ fn focused_document(host: &HostState) -> a11y::DocumentSnap {
     let char_at = |row: usize, col: usize| {
         a11y::chars_before_cell(widths.get(row).map(Vec::as_slice).unwrap_or(&[]), col)
     };
-    let cursor = (scroll == 0).then(|| {
-        let cursor = screen.cursor();
-        (cursor.row, char_at(cursor.row, cursor.column))
-    });
-    let selection = pane.selection.range().and_then(|range| {
+    let cursor = content
+        .cursor()
+        .filter(|_| scroll == 0)
+        .map(|cursor| (cursor.row, char_at(cursor.row, cursor.column)));
+    let selection = selection.range().and_then(|range| {
         if rows == 0 {
             return None;
         }
-        let first = screen.abs_row_at_view(scroll, 0);
-        let last = screen.abs_row_at_view(scroll, rows - 1);
+        let first = content.abs_row_at_view(0);
+        let last = content.abs_row_at_view(rows - 1);
         if range.end_row < first || range.start_row > last {
             return None;
         }
@@ -6173,7 +6231,7 @@ fn frame_chrome_snapshot(
             active,
             &mut boxes,
         );
-        let max_scroll = pane.emulator.screen().max_view_scroll();
+        let max_scroll = pane.content().max_scroll();
         let scroll = pane.view_scroll.min(max_scroll);
         if should_record_scrollbar_box(max_scroll) {
             let (bar_x, bar_y, bar_w, bar_h) = geom.scrollbar_px(rect);
@@ -6368,12 +6426,13 @@ fn frame_damage_snapshot(
                 .get(&pane_id)
                 .map(damage_rows)
                 .unwrap_or_default();
+            let source = pane.content();
             let dirty_rows = snapshot_dirty_rows(
                 assignment_changed,
-                pane.emulator.screen().rows(),
+                source.rows(),
                 &existing,
                 focus_affects_pane(focus_changed, prior_focus, pane_id.get(), focused.get()),
-                pane.emulator.screen().cursor().row,
+                source.cursor().map_or(0, |cursor| cursor.row),
                 host.last_painted_cursor_rows
                     .get(&pane_id)
                     .copied()
@@ -6773,7 +6832,10 @@ fn rasterize_frame(
             .restore(buffer, width as usize, &mut frame_damage);
     }
     let overlay_surface = host_overlay_surface(host);
-    if host.find.active && host.emulator.screen().alt_active() {
+    if host.find.active
+        && !host.mux.focused().content().is_native()
+        && host.emulator.screen().alt_active()
+    {
         close_find(&mut host.find);
     }
     if let Some(picker) = host.theme_picker.as_mut() {
@@ -7039,6 +7101,7 @@ fn rasterize_frame(
         paint_pane_header(host, buffer, width as usize, geom);
     }
     for (pane_id, pane, rect) in host.mux.panes_and_rects() {
+        let displayed = pane.content();
         let (slot_x, slot_y, slot_width, slot_height) = geom.pane_slot_px(rect);
         let (content_x, content_y, content_w, content_h) = geom.pane_content_px(rect);
         let pane_full = frame_damage_covers(
@@ -7046,11 +7109,10 @@ fn rasterize_frame(
             PixelRect::new(slot_x, slot_y, slot_width, slot_height),
         );
         if !full && pane_full {
-            let screen = pane.emulator.screen();
             host.render_frame.cells_painted = host
                 .render_frame
                 .cells_painted
-                .saturating_add(screen.columns() as u64 * screen.rows() as u64);
+                .saturating_add(displayed.columns() as u64 * displayed.rows() as u64);
         }
         let surface_alpha = pane_surface_alpha(host, pane_id, focused, zoomed);
         let damage = host.pane_damage.get(&pane_id);
@@ -7120,18 +7182,20 @@ fn rasterize_frame(
                 );
             }
         }
-        let scroll = pane
-            .view_scroll
-            .min(pane.emulator.screen().max_view_scroll());
-        let caret_visible = live_caret_visible(
-            pane.emulator.cursor_visible(),
-            pane.emulator.cursor_blink(),
-            pane.caret_blink_latched(),
-            pane_id == focused,
-            host.window_focused,
-            host.window_occluded,
-            host.last_caret_phase_on,
-        );
+        let scroll = displayed.scroll();
+        let caret_visible = if displayed.is_native() {
+            displayed.cursor().is_some()
+        } else {
+            live_caret_visible(
+                pane.emulator.cursor_visible(),
+                pane.emulator.cursor_blink(),
+                pane.caret_blink_latched(),
+                pane_id == focused,
+                host.window_focused,
+                host.window_occluded,
+                host.last_caret_phase_on,
+            )
+        };
         let overlay = overlay_paint_decision(OverlayPaintContext {
             pane_focused: pane_id == focused,
             live_view: scroll == 0,
@@ -7193,9 +7257,10 @@ fn rasterize_frame(
         let guest_y = content_y.saturating_add(dock_px);
         let guest_h = content_h.saturating_sub(dock_px);
         let current_cursor_row = matches!(overlay.input, InputOverlay::Cursor)
-            .then(|| pane.emulator.screen().cursor().row);
+            .then(|| displayed.cursor().map(|cursor| cursor.row))
+            .flatten();
         let mut blit_applied = false;
-        if !pane_full {
+        if !pane_full && !displayed.is_native() {
             if let Some(damage) = damage {
                 let screen = pane.emulator.screen();
                 let pixel_width = damage.columns().checked_mul(host.font.cell_w);
@@ -7297,72 +7362,93 @@ fn rasterize_frame(
                 );
             }
         }
-        rasterize_screen_at_with_theme_options_filtered(
-            &host.theme,
-            pane.emulator.screen(),
-            &host.font,
-            matches!(overlay.input, InputOverlay::Cursor),
-            pane.emulator.cursor_shape(),
-            scroll,
-            pane.selection.range(),
-            buffer,
-            width as usize,
-            content_x,
-            guest_y,
-            content_w,
-            guest_h,
-            host.font_ligatures,
-            &host.font_features,
-            pane_screen_paint(host, pane_id, focused, zoomed),
-            pane.emulator.images(),
-            pane.emulator.screen().scrolled_lines(),
-            (!pane_full).then_some(paint_rows.as_slice()),
-        );
+        match displayed {
+            #[cfg(native_transport)]
+            content::Content::Native(scene) => {
+                raster::native_raster::rasterize(
+                    raster::native_raster::Paint {
+                        scene,
+                        theme: &host.theme,
+                        font: &host.font,
+                        selection: pane.selection.range(),
+                        cursor: matches!(overlay.input, InputOverlay::Cursor),
+                        blink_on: host.native_blink.phase_on,
+                        background: pane_screen_paint(host, pane_id, focused, zoomed),
+                    },
+                    raster::native_raster::Target {
+                        buffer,
+                        stride: width as usize,
+                        rect: [content_x, guest_y, content_w, guest_h],
+                    },
+                );
+                frame_damage.push_rect(PixelRect::new(content_x, guest_y, content_w, guest_h));
+            }
+            content::Content::Classic { screen, .. } => {
+                rasterize_screen_at_with_theme_options_filtered(
+                    &host.theme,
+                    screen,
+                    &host.font,
+                    matches!(overlay.input, InputOverlay::Cursor),
+                    pane.emulator.cursor_shape(),
+                    scroll,
+                    pane.selection.range(),
+                    buffer,
+                    width as usize,
+                    content_x,
+                    guest_y,
+                    content_w,
+                    guest_h,
+                    host.font_ligatures,
+                    &host.font_features,
+                    pane_screen_paint(host, pane_id, focused, zoomed),
+                    pane.emulator.images(),
+                    pane.emulator.screen().scrolled_lines(),
+                    (!pane_full).then_some(paint_rows.as_slice()),
+                );
+                // Unicode placeholders replace the U+10EEEE glyph (Ghostty skip + tile).
+                blit_kitty_placeholders(
+                    &pane.emulator,
+                    &host.font,
+                    scroll,
+                    buffer,
+                    width as usize,
+                    content_x,
+                    guest_y,
+                    content_w,
+                    guest_h,
+                );
+                // Inline Kitty-graphics images for this pane (any mode).
+                blit_direct_kitty_images(
+                    pane.emulator.images(),
+                    pane.emulator.screen().scrolled_lines(),
+                    scroll,
+                    &host.font,
+                    buffer,
+                    width as usize,
+                    content_x,
+                    guest_y,
+                    content_w,
+                    guest_h,
+                );
+            }
+        }
         let cursor_row_painted =
             current_cursor_row.is_some_and(|row| paint_rows.binary_search(&row).is_ok());
         if should_record_cursor_row(pane_full, blit_applied, cursor_row_painted) {
             host.last_painted_cursor_rows
                 .insert(pane_id, current_cursor_row);
         }
-        // Unicode placeholders replace the U+10EEEE glyph (Ghostty skip + tile).
-        blit_kitty_placeholders(
-            &pane.emulator,
-            &host.font,
-            scroll,
-            buffer,
-            width as usize,
-            content_x,
-            guest_y,
-            content_w,
-            guest_h,
-        );
-        // Inline Kitty-graphics images for this pane (any mode).
-        blit_direct_kitty_images(
-            pane.emulator.images(),
-            pane.emulator.screen().scrolled_lines(),
-            scroll,
-            &host.font,
-            buffer,
-            width as usize,
-            content_x,
-            guest_y,
-            content_w,
-            guest_h,
-        );
         if overlay.paint_ime_cursor_area {
-            let screen = pane.emulator.screen();
-            let cursor = screen.cursor();
-            if cursor.row < screen.rows() && cursor.column < screen.columns() {
-                let wide = cursor.column + 1 < screen.columns()
-                    && screen
-                        .view_cell(scroll, cursor.row, cursor.column + 1)
-                        .wide_cont;
+            if let Some(cursor) = displayed.cursor() {
+                let cursor_width = displayed
+                    .cell(cursor.row, cursor.column)
+                    .map_or(1, |cell| cell.width().max(1));
                 let area = ime_cursor_area(
                     geom,
                     rect,
                     guest_y,
                     (cursor.row, cursor.column),
-                    if wide { 2 } else { 1 },
+                    cursor_width,
                 );
                 if matches!(overlay.input, InputOverlay::Preedit) {
                     rasterize_preedit_at(
@@ -7403,7 +7489,7 @@ fn rasterize_frame(
                 height as usize,
                 pane_box,
             ) {
-                let max = pane.emulator.screen().max_view_scroll();
+                let max = pane.content().max_scroll();
                 let label = if pane.scroll_new_output {
                     format!(" {scroll}/{max} · new ")
                 } else {
@@ -7500,8 +7586,8 @@ fn rasterize_frame(
             bar_w,
             guest_h,
             scroll,
-            pane.emulator.screen().max_view_scroll(),
-            pane.emulator.screen().rows(),
+            displayed.max_scroll(),
+            displayed.rows(),
         ) {
             let thumb = mix_rgb(host.theme.default_bg, host.theme.default_fg, 160);
             let thumb = if host.hover_target == Some(HoverTarget::ScrollbarThumb(pane_id)) {
@@ -8650,6 +8736,8 @@ impl App {
             }
         }
         settle_caret_blink(host, Instant::now());
+        #[cfg(native_transport)]
+        settle_native_blink(host, Instant::now());
         settle_pane_bells(host, Instant::now());
         // Settle an expired bell flash with one final repaint.
         if host
@@ -12544,13 +12632,8 @@ fn sync_hyperlink_hover(host: &mut HostState, eligible: bool) -> bool {
     let Some(runtime) = host.mux.pane(pane) else {
         return host.hyperlink_hover.clear();
     };
-    host.hyperlink_hover.update(
-        pane,
-        runtime.emulator.screen(),
-        runtime.view_scroll,
-        row,
-        col,
-    )
+    host.hyperlink_hover
+        .update(pane, runtime.content(), row, col)
 }
 
 /// Name under a collapsed-strip icon, or the collapse control's label.
@@ -15724,31 +15807,23 @@ fn apply_find_step(
     find: &mut FindMode,
     selection: &mut Selection,
     view_scroll: &mut usize,
-    emulator: &Emulator,
+    content: content::Content<'_>,
     reverse: bool,
 ) {
     if find.query.is_empty() {
         find.rank = None;
         return;
     }
-    let m = if reverse {
-        let before = find.last.map(|h| (h.abs_row, h.start_col));
-        emulator
-            .screen()
-            .find_in_history_rev(&find.query, before, false)
-    } else {
-        let after = find.last.map(|h| (h.abs_row, h.end_col));
-        emulator.screen().find_in_history(&find.query, after)
-    };
-    let Some(m) = m else {
+    let found = content.find(&find.query, find.last, reverse);
+    let Some((m, rank, scroll)) = found else {
         selection.clear();
         find.last = None;
         find.rank = None;
         return;
     };
     find.last = Some(m);
-    find.rank = emulator.screen().history_match_rank(&find.query, m, false);
-    *view_scroll = emulator.screen().view_scroll_for_history_row(m.abs_row);
+    find.rank = Some(rank);
+    *view_scroll = scroll;
     selection.set_range(m.abs_row, m.start_col, m.abs_row, m.end_col);
     selection.dragged = true;
 }
@@ -16187,7 +16262,7 @@ fn open_command_palette(host: &mut HostState, action: keybind::Action) {
 }
 
 fn open_find_prompt(host: &mut HostState) {
-    if host.emulator.screen().alt_active() {
+    if !host.mux.focused().content().is_native() && host.emulator.screen().alt_active() {
         return;
     }
     if host.find.active {
@@ -16266,7 +16341,7 @@ fn finish_palette_result(host: &mut HostState, result: PaletteVerdict) -> Palett
 }
 
 fn find_key_on_alt_screen(host: &mut HostState) -> bool {
-    if !host.emulator.screen().alt_active() {
+    if host.mux.focused().content().is_native() || !host.emulator.screen().alt_active() {
         return false;
     }
     let had = host.find.active;
@@ -16310,13 +16385,8 @@ fn find_key_while_open(host: &mut HostState, logical: &Key) -> bool {
     let alt = host.modifiers.alt_key();
     if matches!(logical, Key::Named(NamedKey::Enter | NamedKey::F3)) && !ctrl && !alt {
         let pane = host.mux.focused_mut();
-        apply_find_step(
-            &mut host.find,
-            &mut pane.selection,
-            &mut pane.view_scroll,
-            &pane.emulator,
-            shift,
-        );
+        let (content, selection, scroll) = pane.selectable_content();
+        apply_find_step(&mut host.find, selection, scroll, content, shift);
         host.dirty = true;
         return true;
     }
@@ -16328,13 +16398,8 @@ fn find_key_while_open(host: &mut HostState, logical: &Key) -> bool {
             host.mux.focused_mut().selection.clear();
         } else {
             let pane = host.mux.focused_mut();
-            apply_find_step(
-                &mut host.find,
-                &mut pane.selection,
-                &mut pane.view_scroll,
-                &pane.emulator,
-                false,
-            );
+            let (content, selection, scroll) = pane.selectable_content();
+            apply_find_step(&mut host.find, selection, scroll, content, false);
         }
         host.dirty = true;
         return true;
@@ -16347,13 +16412,8 @@ fn find_key_while_open(host: &mut HostState, logical: &Key) -> bool {
                     host.find.last = None;
                     host.find.rank = None;
                     let pane = host.mux.focused_mut();
-                    apply_find_step(
-                        &mut host.find,
-                        &mut pane.selection,
-                        &mut pane.view_scroll,
-                        &pane.emulator,
-                        false,
-                    );
+                    let (content, selection, scroll) = pane.selectable_content();
+                    apply_find_step(&mut host.find, selection, scroll, content, false);
                     host.dirty = true;
                     return true;
                 }
@@ -17090,7 +17150,7 @@ fn window_title(mux: &mux::MuxRuntime, show_tabs: bool) -> String {
     };
     if env_flag_enabled_default_true("PRISMATTYC_SCROLL_TITLE") {
         let pane = mux.focused();
-        let max = pane.emulator.screen().max_view_scroll();
+        let max = pane.content().max_scroll();
         let scroll = pane.view_scroll.min(max);
         if scroll > 0 {
             if pane.scroll_new_output {
@@ -18365,39 +18425,30 @@ fn selection_motion(logical: &Key) -> Option<NamedKey> {
 
 fn extend_selection_keyboard(
     selection: &mut Selection,
-    screen: &Screen,
-    scroll: usize,
+    content: content::Content<'_>,
     motion: NamedKey,
 ) -> bool {
-    let cols = screen.columns();
-    let rows = screen.rows();
+    let cols = content.columns();
+    let rows = content.rows();
     if cols == 0 || rows == 0 {
         return false;
     }
-    let scroll = scroll.min(screen.max_view_scroll());
-    let first_abs = screen.abs_row_at_view(scroll, 0);
-    let last_abs = screen.abs_row_at_view(scroll, rows - 1);
+    let scroll = content.scroll();
+    let first_abs = content.abs_row_at_view(0);
+    let last_abs = content.abs_row_at_view(rows - 1);
     if selection.range().is_none() {
-        let caret = screen.cursor();
+        let caret = content.absolute_cursor();
         // When scrolled, mark at top-left of the visible window.
-        let mark_row = if scroll == 0 {
-            screen.abs_row_at_view(0, caret.row)
-        } else {
-            first_abs
-        };
+        let mark_row = if scroll == 0 { caret.row } else { first_abs };
         let mark_col = if scroll == 0 { caret.column } else { 0 };
         selection.begin(mark_row, mark_col);
     } else {
         selection.active = true;
     }
     let free = selection.cursor.unwrap_or_else(|| {
-        let caret = screen.cursor();
+        let caret = content.absolute_cursor();
         prismattyc_core::Cursor {
-            row: if scroll == 0 {
-                screen.abs_row_at_view(0, caret.row)
-            } else {
-                first_abs
-            },
+            row: if scroll == 0 { caret.row } else { first_abs },
             column: if scroll == 0 { caret.column } else { 0 },
         }
     });
@@ -18419,8 +18470,8 @@ fn extend_selection_keyboard(
     true
 }
 
-fn selected_clipboard_text(selection: &Selection, screen: &Screen) -> Option<String> {
-    let text = screen.extract_text_abs(selection.range()?);
+fn selected_clipboard_text(selection: &Selection, content: content::Content<'_>) -> Option<String> {
+    let text = content.extract_text(selection.range()?);
     // Reuse the classic host's exact D-H4 eligibility gate. The encoded OSC
     // bytes are intentionally discarded because this host writes natively.
     encode_osc52_clipboard(&text)?;
@@ -18466,7 +18517,7 @@ fn write_clipboard_text(host: &mut HostState, text: String) -> bool {
 }
 
 fn copy_selection_native(host: &mut HostState) -> bool {
-    let Some(text) = selected_clipboard_text(&host.selection, host.emulator.screen()) else {
+    let Some(text) = selected_clipboard_text(&host.selection, host.mux.focused().content()) else {
         return false;
     };
     if host.clipboard.is_none() {
@@ -18834,9 +18885,7 @@ fn link_target_at_cursor(host: &HostState) -> Option<link_click::Target> {
     if pane != host.mux.focused_id() {
         return None;
     }
-    let screen = host.emulator.screen();
-    let scroll = host.view_scroll.min(screen.max_view_scroll());
-    hyperlink::target_at(screen, scroll, row, col)
+    hyperlink::target_at(host.mux.focused().content(), row, col)
 }
 
 /// Send the captured http(s) URI through the allowlisted platform opener.
@@ -18867,14 +18916,11 @@ fn begin_pointer_selection_with_clicks(
     host.keyboard_select_mode = false;
     host.left_button_down = true;
     let (abs, range) = {
-        let screen = host.emulator.screen();
-        let scroll = host.view_scroll.min(screen.max_view_scroll());
-        let abs = screen.abs_row_at_view(scroll, row);
+        let content = host.mux.focused().content();
+        let abs = content.abs_row_at_view(row);
         let range = match clicks {
-            2 => screen
-                .word_range_at_view(scroll, row, col)
-                .map(|word| (word.start_col, word.end_col)),
-            3 => Some((0, screen.columns().saturating_sub(1))),
+            2 => content.word_columns(row, col),
+            3 => Some((0, content.columns().saturating_sub(1))),
             _ => None,
         };
         (abs, range)
@@ -18892,7 +18938,7 @@ fn pan_view_scroll(host: &mut HostState, delta_rows: isize) {
         host.view_scroll = 0;
         return;
     }
-    let max = host.emulator.screen().max_view_scroll();
+    let max = host.mux.focused().content().max_scroll();
     let before = host.view_scroll;
     if delta_rows > 0 {
         host.view_scroll = (host.view_scroll + delta_rows as usize).min(max);
@@ -18952,7 +18998,7 @@ fn pan_pane_view_scroll(host: &mut HostState, pane_id: PaneId, delta_rows: isize
     let Some(pane) = host.mux.pane_mut(pane_id) else {
         return;
     };
-    let max = pane.emulator.screen().max_view_scroll();
+    let max = pane.content().max_scroll();
     let changed = step_pane_view_scroll(
         &mut pane.view_scroll,
         max,
@@ -18972,7 +19018,7 @@ fn pan_pane_view_scroll(host: &mut HostState, pane_id: PaneId, delta_rows: isize
 }
 
 fn set_view_scroll(host: &mut HostState, scroll: usize) {
-    let max = host.emulator.screen().max_view_scroll();
+    let max = host.mux.focused().content().max_scroll();
     let next = scroll.min(max);
     if host.view_scroll == next {
         return;
@@ -19011,7 +19057,7 @@ fn pane_scrollbar_at(
             .saturating_mul(host.font.cell_h);
         let guest_y = content_y.saturating_add(dock_px);
         let guest_h = content_h.saturating_sub(dock_px);
-        let max = pane.emulator.screen().max_view_scroll();
+        let max = pane.content().max_scroll();
         let scroll = pane.view_scroll.min(max);
         let bar = scrollbar_layout(
             bar_x,
@@ -19539,7 +19585,7 @@ fn handle_scrollbar_drag(host: &mut HostState) -> bool {
             .saturating_mul(host.font.cell_h);
         let guest_y = content_y.saturating_add(dock_px);
         let guest_h = content_h.saturating_sub(dock_px);
-        let max = pane.emulator.screen().max_view_scroll();
+        let max = pane.content().max_scroll();
         let Some(bar) = scrollbar_layout(
             bar_x,
             guest_y,
@@ -19568,11 +19614,13 @@ fn handle_scrollbar_drag(host: &mut HostState) -> bool {
     true
 }
 
-/// guest TUIs on alt (vim) refuse host select unless Shift.
+/// Classic guest TUIs on alt (vim) refuse host select unless Shift.
 /// Attach chrome uses 1049 + 7700 without 1000-level tracking — that is not a
 /// guest TUI, so plain drag must still select.
-fn guest_alt_blocks_host_select(emulator: &Emulator) -> bool {
-    emulator.screen().alt_active()
+/// Native content ignores the retained alt bit. Mouse tracking is routed first.
+fn guest_alt_blocks_host_select(emulator: &Emulator, content: content::Content<'_>) -> bool {
+    !content.is_native()
+        && emulator.screen().alt_active()
         && (!emulator.mouse_wheel_only() || emulator.mouse_tracking().is_on())
 }
 #[allow(clippy::too_many_arguments)] // single report encoder site
@@ -19658,13 +19706,14 @@ fn finish_pointer_selection(host: &mut HostState) {
 /// `select_all` action: select the visible viewport and auto-copy it
 /// (text selection D-H3).
 fn select_all_viewport(host: &mut HostState) {
-    if let Some(range) = host.emulator.screen().viewport_range() {
-        let screen = host.emulator.screen();
-        let scroll = host.view_scroll.min(screen.max_view_scroll());
-        let start = screen.abs_row_at_view(scroll, range.start_row);
-        let end = screen.abs_row_at_view(scroll, range.end_row);
-        host.selection
-            .set_range(start, range.start_col, end, range.end_col);
+    let range = host.mux.focused().content().viewport_range();
+    if let Some(range) = range {
+        host.selection.set_range(
+            range.start_row,
+            range.start_col,
+            range.end_row,
+            range.end_col,
+        );
         host.keyboard_select_mode = true;
         host.dirty = true;
         let _ = copy_selection_native(host);
@@ -19915,7 +19964,7 @@ fn guest_alt_select_gesture(logical: &Key, modifiers: ModifiersState) -> bool {
 fn handle_selection_key(host: &mut HostState, logical: &Key) -> bool {
     // Guest alt (vim/less): refuse host selection so Ctrl+C interrupts the child.
     // Attach 1049+7700 is chrome, not a guest TUI.
-    if guest_alt_blocks_host_select(&host.emulator) {
+    if guest_alt_blocks_host_select(&host.emulator, host.mux.focused().content()) {
         // Explicit host-owned gesture for alternate-screen apps: Super plus
         // the primary-screen mark/extend keys. Each step needs Super (no
         // sticky keyboard-select mode), so ordinary Shift+arrow and Ctrl+Space
@@ -19923,9 +19972,8 @@ fn handle_selection_key(host: &mut HostState, logical: &Key) -> bool {
         if guest_alt_select_gesture(logical, host.modifiers) {
             if is_mark_key(logical, host.modifiers) {
                 let (row, column) = {
-                    let screen = host.emulator.screen();
-                    let caret = screen.cursor();
-                    (screen.abs_row_at_view(0, caret.row), caret.column)
+                    let caret = host.mux.focused().content().absolute_cursor();
+                    (caret.row, caret.column)
                 };
                 host.selection.begin(row, column);
                 host.selection.dragged = true;
@@ -19933,15 +19981,9 @@ fn handle_selection_key(host: &mut HostState, logical: &Key) -> bool {
                 return true;
             }
             if let Some(motion) = selection_motion(logical) {
-                let scroll = host.view_scroll;
                 let changed = {
-                    let pane = host.mux.focused_mut();
-                    extend_selection_keyboard(
-                        &mut pane.selection,
-                        pane.emulator.screen(),
-                        scroll,
-                        motion,
-                    )
+                    let (content, selection, _) = host.mux.focused_mut().selectable_content();
+                    extend_selection_keyboard(selection, content, motion)
                 };
                 host.dirty |= changed;
                 return true;
@@ -19988,9 +20030,8 @@ fn handle_selection_key(host: &mut HostState, logical: &Key) -> bool {
 
     if is_mark_key(logical, host.modifiers) {
         let (row, column) = {
-            let screen = host.emulator.screen();
-            let caret = screen.cursor();
-            (screen.abs_row_at_view(0, caret.row), caret.column)
+            let caret = host.mux.focused().content().absolute_cursor();
+            (caret.row, caret.column)
         };
         host.selection.begin(row, column);
         host.selection.dragged = true;
@@ -20002,15 +20043,9 @@ fn handle_selection_key(host: &mut HostState, logical: &Key) -> bool {
     if let Some(motion) = selection_motion(logical) {
         if host.modifiers.shift_key() || host.keyboard_select_mode {
             host.keyboard_select_mode = true;
-            let scroll = host.view_scroll;
             let changed = {
-                let pane = host.mux.focused_mut();
-                extend_selection_keyboard(
-                    &mut pane.selection,
-                    pane.emulator.screen(),
-                    scroll,
-                    motion,
-                )
+                let (content, selection, _) = host.mux.focused_mut().selectable_content();
+                extend_selection_keyboard(selection, content, motion)
             };
             host.dirty |= changed;
             return true;
@@ -20513,12 +20548,12 @@ fn dispatch_action(
             Dispatch::Handled
         }
         ActionRoute::Copy => dispatch_copy_action(
-            guest_alt_blocks_host_select(&host.emulator),
+            guest_alt_blocks_host_select(&host.emulator, host.mux.focused().content()),
             host.modifiers,
             || copy_selection_native(host),
         ),
         ActionRoute::SelectAll => {
-            if !guest_alt_blocks_host_select(&host.emulator) {
+            if !guest_alt_blocks_host_select(&host.emulator, host.mux.focused().content()) {
                 select_all_viewport(host);
             }
             Dispatch::Handled
@@ -21447,7 +21482,8 @@ impl ApplicationHandler<UserAction> for App {
                 }
                 // Host selection actions yield inside a guest alt screen
                 // (vim/less) exactly like the fixed selection keys do.
-                let host_select = !guest_alt_blocks_host_select(&host.emulator);
+                let host_select =
+                    !guest_alt_blocks_host_select(&host.emulator, host.mux.focused().content());
                 match action_any {
                     Some(keybind::Action::ScrollLineUp) if host_select => {
                         match dispatch_action(
@@ -21689,10 +21725,7 @@ impl ApplicationHandler<UserAction> for App {
                     if let Some((_, row, col)) =
                         host.cursor_cell.filter(|(pane, _, _)| *pane == focused)
                     {
-                        let scroll = host
-                            .view_scroll
-                            .min(host.emulator.screen().max_view_scroll());
-                        let abs = host.emulator.screen().abs_row_at_view(scroll, row);
+                        let abs = host.mux.focused().content().abs_row_at_view(row);
                         host.selection.update(abs, col);
                         host.dirty = true;
                         host.window.request_redraw();
@@ -22092,7 +22125,10 @@ impl ApplicationHandler<UserAction> for App {
                     url_openable,
                     suppress_left_release: host.suppress_left_release,
                     tracking: host.emulator.mouse_tracking(),
-                    guest_alt_blocks: guest_alt_blocks_host_select(&host.emulator),
+                    guest_alt_blocks: guest_alt_blocks_host_select(
+                        &host.emulator,
+                        host.mux.focused().content(),
+                    ),
                     cursor_cell: host.cursor_cell,
                     left_button_down: host.left_button_down,
                 });
@@ -26385,7 +26421,14 @@ mod tests {
             &super_key,
         ));
         assert_eq!(
-            selected_clipboard_text(&selection, &screen).as_deref(),
+            selected_clipboard_text(
+                &selection,
+                content::Content::Classic {
+                    screen: &screen,
+                    scroll: 0
+                }
+            )
+            .as_deref(),
             Some("copy me")
         );
 
@@ -26403,7 +26446,13 @@ mod tests {
         assert!(!action_blocked_by_guest_alt(copy, true, cmd));
         assert_eq!(action_route(copy), ActionRoute::Copy);
 
-        let selected_text = selected_clipboard_text(&selection, &screen);
+        let selected_text = selected_clipboard_text(
+            &selection,
+            content::Content::Classic {
+                screen: &screen,
+                scroll: 0,
+            },
+        );
         let mut copied = None;
         let result = dispatch_copy_action(true, cmd, || {
             let Some(text) = selected_text else {
@@ -27134,8 +27183,10 @@ session mail (id 15)
         let mut selection = Selection::default();
         assert!(extend_selection_keyboard(
             &mut selection,
-            &screen,
-            0,
+            content::Content::Classic {
+                screen: &screen,
+                scroll: 0
+            },
             NamedKey::ArrowDown
         ));
         let range = selection.range().expect("paintable range");
@@ -27152,13 +27203,27 @@ session mail (id 15)
         let mut selection = Selection::default();
         selection.set_range(0, 0, 0, 6);
         assert_eq!(
-            selected_clipboard_text(&selection, &screen).as_deref(),
+            selected_clipboard_text(
+                &selection,
+                content::Content::Classic {
+                    screen: &screen,
+                    scroll: 0
+                }
+            )
+            .as_deref(),
             Some("copy me")
         );
 
         let blank = Screen::new(4, 1, 0);
         selection.set_range(0, 0, 0, 3);
-        assert!(selected_clipboard_text(&selection, &blank).is_none());
+        assert!(selected_clipboard_text(
+            &selection,
+            content::Content::Classic {
+                screen: &blank,
+                scroll: 0
+            }
+        )
+        .is_none());
     }
 
     #[test]
@@ -27754,7 +27819,10 @@ session mail (id 15)
             &mut find,
             &mut selection,
             &mut view_scroll,
-            &emulator,
+            content::Content::Classic {
+                screen: emulator.screen(),
+                scroll: 0,
+            },
             false,
         );
         assert!(selection.range().is_some());
@@ -27765,7 +27833,10 @@ session mail (id 15)
             &mut find,
             &mut selection,
             &mut view_scroll,
-            &emulator,
+            content::Content::Classic {
+                screen: emulator.screen(),
+                scroll: 0,
+            },
             false,
         );
         assert!(selection.range().is_none());
@@ -28807,11 +28878,23 @@ session mail (id 15)
         let mut emulator = Emulator::new(40, 10, 0);
         let _ = emulator.feed(b"\x1b[?1049h\x1b[?7700h\x1b[?1006h");
         assert!(emulator.screen().alt_active());
-        assert!(!guest_alt_blocks_host_select(&emulator));
+        assert!(!guest_alt_blocks_host_select(
+            &emulator,
+            content::Content::Classic {
+                screen: emulator.screen(),
+                scroll: 0
+            }
+        ));
 
         let _ = emulator.feed(b"\x1b[?1000h");
         assert!(
-            guest_alt_blocks_host_select(&emulator),
+            guest_alt_blocks_host_select(
+                &emulator,
+                content::Content::Classic {
+                    screen: emulator.screen(),
+                    scroll: 0
+                }
+            ),
             "real app mouse on alt still blocks plain select"
         );
     }

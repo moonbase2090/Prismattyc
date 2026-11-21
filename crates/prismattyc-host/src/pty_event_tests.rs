@@ -296,13 +296,8 @@ fn verify_timers_and_hover(host: &mut HostState) {
         .focused_mut()
         .emulator
         .feed(b"\x1b[Hhttps://moonbase2090.com/");
-    host.hyperlink_hover.update(
-        host.mux.focused_id(),
-        host.mux.focused().emulator.screen(),
-        0,
-        0,
-        0,
-    );
+    host.hyperlink_hover
+        .update(host.mux.focused_id(), host.mux.focused().content(), 0, 0);
     assert_eq!(
         host.hyperlink_hover.url(),
         Some("https://moonbase2090.com/")

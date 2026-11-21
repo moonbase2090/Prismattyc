@@ -69,6 +69,11 @@ yeslogic-fontconfig-sys = { version = "6", features = ["dlopen"] }
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 arboard = "3.6"
 
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+libc = "0.2"
+sha2 = "0.10.9"
+unicode-segmentation = "1.13.3"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
 objc2-io-surface = { version = "0.3.2", default-features = false, features = [

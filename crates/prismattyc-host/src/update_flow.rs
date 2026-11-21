@@ -1196,6 +1196,7 @@ echo '{"status":"installed"}'"#,
         assert_eq!(output, r#"{"status":"installed"}"#);
         std::fs::remove_dir_all(pmux.parent().unwrap()).unwrap();
     }
+    #[cfg(unix)]
     fn restarts(seen: Vec<Event>) -> Vec<(String, usize, usize)> {
         seen.into_iter()
             .map(|event| match event {

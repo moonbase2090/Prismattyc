@@ -35,10 +35,10 @@ or its scrim changed, carrying the frame's dump sequence
 (PRISMATTYC_DUMP_PRESENT with {seq}). Keys go to the host as in
 update-progress-e2e.py (Quartz events, XTEST, SendInput, or --key-relay).
 
---system names what the operating system is set to when the drive starts, which
-the operator sets first (macOS Accessibility > Display, Windows Settings, GNOME
-Settings or gsettings): none (the default), reduce-motion, reduce-transparency
-or both. The drive then also requires what the setting changes. With reduce
+--system names what the operating system is set to when the drive starts: none
+(the default), reduce-motion, reduce-transparency or both. On macOS and Windows
+the operator sets it first (Accessibility > Display, or Settings); on Linux the
+drive writes GNOME's settings into a private key file itself. The drive then also requires what the setting changes. With reduce
 motion each scrim is already settled on the modal's first change line. With
 reduce transparency the scrim dims only: blur false and edge contrast kept.
 Reduce motion alone must still blur. The first change line's state is recorded
@@ -206,6 +206,17 @@ def main():
         env.update(HOME=str(out / 'home'), SHELL='/bin/sh', XDG_RUNTIME_DIR=str(runtime),
                    XDG_DATA_HOME=str(out / 'data'), XDG_CONFIG_HOME=str(out / 'config'),
                    XDG_STATE_HOME=str(out / 'state'))
+    if sys.platform.startswith('linux'):
+        # GNOME's settings come from a private key file, so the drive chooses
+        # them and the machine's own desktop settings do not matter.
+        schema = out / 'config' / 'glib-2.0' / 'settings'
+        schema.mkdir(parents=True)
+        (schema / 'keyfile').write_text(
+            '[org/gnome/desktop/interface]\n'
+            f'enable-animations={"false" if expect_still else "true"}\n'
+            '[org/gnome/desktop/a11y/interface]\n'
+            f'high-contrast={"true" if expect_flat else "false"}\n')
+        env['GSETTINGS_BACKEND'] = 'keyfile'
     env['PATH'] = str(bins) + os.pathsep + env['PATH']
     result = {'status': 'FAIL', 'platform': sys.platform, 'system': args.system, 'checks': [], 'modals': {}}
     owned, readers = [], []

@@ -14,8 +14,9 @@ text, opens the app on it, and then opens, one at a time:
 - the Restart to update confirmation, opened from the update panel.
 
 For each one it waits until the scrim has finished fading in, then checks a
-strip at the left edge of the window that no modal covers (the window opens
-112 cells wide, wider than any modal). Against the frame
+strip at the left edge of the window that no modal covers: its left 4%, over
+the whole height (modals keep a wider margin; the window opens 112 cells
+wide). Against the frame
 just before the modal opened, the strip must be dimmed (its mean brightness
 down to between 45% and 85%) and blurred (its edge contrast down well beyond
 the dimming alone). Escape then closes every modal; the first frame without
@@ -114,11 +115,12 @@ def png_rgb(path):
 
 def strip_metrics(rows):
     """Mean brightness and mean horizontal edge contrast of the left strip:
-    the window's left 10%, from 10% to 90% of its height."""
+    the window's left 4% (narrower than any modal's margin), over its whole
+    height, where the chrome's and the pane's text give it edges."""
     height, width = len(rows), len(rows[0])
-    x1 = max(8, width // 10)
+    x1 = max(8, width * 4 // 100)
     total = edges = count = 0
-    for row in rows[height // 10:height * 9 // 10]:
+    for row in rows:
         values = [sum(px) / 3 for px in row[:x1]]
         total += sum(values)
         edges += sum(abs(b - a) for a, b in zip(values, values[1:]))
@@ -290,7 +292,7 @@ def main():
         shutil.copy(frame(last['seq']), out / 'before.png')
         screenshot('before')
         base = strip_metrics(png_rgb(frame(last['seq'])))
-        assert base[1] > 1.0, f'the strip has no text to blur: {base}'
+        assert base[1] > 0.3, f'the strip has no text to blur: {base}'
         for name, key, kind in MODALS:
             settled = open_modal(name, key, kind, last['seq'])
             if name == 'update-panel':

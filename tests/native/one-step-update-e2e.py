@@ -35,6 +35,8 @@ _spec.loader.exec_module(_drive)
 Keys, LineReader, EXE = _drive.Keys, _drive.LineReader, _drive.EXE
 
 UI = 'prismattyc-host: ui: '
+# Every command the run made, kept for result.json even when the run fails.
+RECORDS = []
 # A program that keeps a session busy until the machine is thrown away.
 BUSY = [sys.executable, '-c', 'import time\nwhile True: time.sleep(3600)']
 
@@ -115,7 +117,7 @@ def main():
     installed_host = installed_pmux.with_name('prismattyc-host' + EXE)
     again_pmux = (args.again_pmux or args.pmux).absolute()
     env = dict(os.environ)
-    checks, records = [], []
+    checks, records = [], RECORDS
     relay = Keys(0, args.key_relay) if args.key_relay else None
 
     def passed(check):
@@ -223,6 +225,8 @@ def main():
     versions(installed_pmux)  # recorded: what runs just before the update
 
     update = run(installed_pmux, 'update', timeout=900, check=False)
+    # A negative code is the signal that ended the app; None means it runs.
+    records.append({'app_host_exit_after_update': app_host.poll()})
     (out / 'receipt.txt').write_text(update.stdout)
     (out / 'update-stderr.txt').write_text(update.stderr)
     print(update.stdout, flush=True)
@@ -283,5 +287,6 @@ if __name__ == '__main__':
         # Keep what the run saw; the arguments name the output directory.
         out = Path(sys.argv[sys.argv.index('--out') + 1]).resolve()
         if out.is_dir() and not (out / 'result.json').exists():
-            (out / 'result.json').write_text(json.dumps({'status': 'FAIL', 'error': repr(error)}, indent=2) + '\n')
+            (out / 'result.json').write_text(json.dumps({'status': 'FAIL', 'error': repr(error), 'records': RECORDS},
+                                                        indent=2) + '\n')
         raise

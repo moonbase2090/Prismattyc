@@ -49,6 +49,8 @@ try {
     & $python.Source (Join-Path $repo 'scripts\release\pe_icon.py') @icons
     if ($LASTEXITCODE -ne 0) { throw 'Windows executables are missing the Prismattyc icon resource' }
     $wxs = Join-Path $repo 'scripts\release\prismattyc.wxs'
+    $prepareEncoded = & $python.Source -c "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); from windows_msi import prepare_install_encoded; print(prepare_install_encoded(Path(sys.argv[2])), end='')" (Join-Path $repo 'scripts\release') $repo
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrEmpty($prepareEncoded)) { throw 'prepare script encoding failed' }
     $olderBuilt = Join-Path $stage 'older.msi'
     $sameBuilt = Join-Path $stage 'same.msi'
     & $wix build $wxs -arch x64 -ext WixToolset.Util.wixext/5.0.2 `
@@ -56,6 +58,7 @@ try {
         -d "SourceVersion=$($manifest.version)" `
         -d "Payload=$($payload.FullName)" `
         -d "Repo=$repo" `
+        -d "PrepareEncoded=$prepareEncoded" `
         -o $olderBuilt
     if ($LASTEXITCODE -ne 0) { throw "older MSI build exited $LASTEXITCODE" }
     # A second build of the same ProductVersion gets a new ProductCode.
@@ -64,6 +67,7 @@ try {
         -d "SourceVersion=$($manifest.version)" `
         -d "Payload=$($payload.FullName)" `
         -d "Repo=$repo" `
+        -d "PrepareEncoded=$prepareEncoded" `
         -o $sameBuilt
     if ($LASTEXITCODE -ne 0) { throw "same-version MSI build exited $LASTEXITCODE" }
     # Releases through 0.3.64 use major 0 (0.3.63 is 0.3.63999). A package that uses
@@ -77,6 +81,7 @@ try {
             -d "SourceVersion=$($manifest.version)" `
             -d "Payload=$($payload.FullName)" `
             -d "Repo=$repo" `
+            -d "PrepareEncoded=$prepareEncoded" `
             -o $legacyBuilt
         if ($LASTEXITCODE -ne 0) { throw "legacy-encoding MSI build exited $LASTEXITCODE" }
     }

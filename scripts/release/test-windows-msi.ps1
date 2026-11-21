@@ -1,7 +1,9 @@
 # Install, upgrade, and uninstall the per-user Prismattyc MSI.
 # Run on Windows with nothing in %LOCALAPPDATA%\Programs\Prismattyc\bin executing.
-# The MSI starts pmuxd and does not stop it. This test stops an installed
-# pmuxd before replacing files. It then locks one installed executable and
+# The MSI stops a pmuxd whose executable is in the install directory or the
+# update store, then starts the installed one. This test also stops an
+# installed pmuxd before the phases that replace files themselves. It then
+# locks one installed executable and
 # records the msiexec exit code instead of treating Restart Manager as proof.
 # -SameVersionFrom installs another build of the same product version first and
 # then checks that every installed executable is the one in -Msi.
@@ -569,6 +571,7 @@ function Assert-PmuxdReady {
         if ($item) { $value = [string]$item.PrismattycPmuxd }
     }
     if ($value -notlike '*start-windows-pmuxd.ps1*') { throw "pmuxd autostart is missing: $value" }
+    if ($value -like '*-ReplaceStale*') { throw "logon autostart stops a running daemon: $value" }
     $statusPath = Get-StartStatusPath
     if (-not (Test-Path -LiteralPath $statusPath -PathType Leaf)) { throw "The install did not record a pmuxd start result in $statusPath" }
     $recorded = Get-Content -LiteralPath $statusPath -Raw
@@ -618,6 +621,120 @@ function Assert-PmuxdReady {
     Write-Output "pmuxd pid $serverPid is the installed executable"
 }
 
+function Get-PrismattycProofUpdateRoot {
+    # Same rule as prepare-windows-install.ps1: a nonempty XDG_DATA_HOME wins,
+    # and a whitespace-only value stays nonempty. Do not trim.
+    $xdg = $env:XDG_DATA_HOME
+    $data = if (-not [string]::IsNullOrEmpty($xdg)) {
+        $xdg
+    } else {
+        $localAppData = [Environment]::GetFolderPath('LocalApplicationData')
+        if (-not $localAppData) { throw 'LocalApplicationData is unset.' }
+        $localAppData
+    }
+    return Join-Path (Join-Path $data 'prismattyc') 'updates'
+}
+
+function Assert-StaleDaemonUpgrade {
+    param([Parameter(Mandatory = $true)][string[]]$ArgumentList)
+    $install = Get-PrismattycInstall
+    $monitor = Join-Path $install.Bin 'pmux-activity-monitor.exe'
+    if (-not (Test-Path -LiteralPath $monitor -PathType Leaf)) {
+        throw "Missing $monitor"
+    }
+    $windir = $env:WINDIR
+    if ([string]::IsNullOrEmpty($windir)) { $windir = 'C:\Windows' }
+    $csc = Join-Path $windir 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+    if (-not (Test-Path -LiteralPath $csc -PathType Leaf)) {
+        $csc = Join-Path $windir 'Microsoft.NET\Framework\v4.0.30319\csc.exe'
+    }
+    if (-not (Test-Path -LiteralPath $csc -PathType Leaf)) {
+        throw 'csc.exe is required to build the stale pmuxd stub'
+    }
+    $updates = Get-PrismattycProofUpdateRoot
+    $stubRoot = Join-Path $updates 'vstub'
+    $stubDir = Join-Path $stubRoot 'bin'
+    $stub = Join-Path $stubDir 'pmuxd.exe'
+    $source = Join-Path $stubDir 'Hold.cs'
+    $pointer = Join-Path $updates 'windows-current.json'
+    $held = $null
+    $started = $false
+    $removePointer = $false
+    try {
+        New-Item -ItemType Directory -Path $stubDir -Force | Out-Null
+        Set-Content -LiteralPath $source -Encoding ascii -Value @'
+using System;
+using System.Threading;
+public class Hold {
+    public static int Main() {
+        Console.Out.WriteLine("ready");
+        Console.Out.Flush();
+        using (var gate = new ManualResetEvent(false)) {
+            gate.WaitOne();
+        }
+        return 0;
+    }
+}
+'@
+        & $csc @('/nologo', '/target:exe', "/out:$stub", $source)
+        if ($LASTEXITCODE -ne 0) { throw "csc exited $LASTEXITCODE" }
+        if (-not (Test-Path -LiteralPath $stub -PathType Leaf)) { throw "csc did not write $stub" }
+        Stop-InstalledPmuxd
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $stub
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardOutput = $true
+        $psi.CreateNoWindow = $true
+        $held = New-Object System.Diagnostics.Process
+        $held.StartInfo = $psi
+        if (-not $held.Start()) { throw 'stale pmuxd stub did not start' }
+        $started = $true
+        $ready = $held.StandardOutput.ReadLine()
+        if ($ready -ne 'ready') { throw "stale pmuxd stub did not signal ready: $ready" }
+        $seen = @(Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $($held.Id)")
+        if ($seen.Count -ne 1) { throw "stale pmuxd stub $($held.Id) is not visible to Win32_Process" }
+        $image = [string]$seen[0].ExecutablePath
+        if ([string]::IsNullOrEmpty($image)) {
+            throw "stale pmuxd stub $($held.Id) has no ExecutablePath"
+        }
+        if ([string]::Compare($image, $stub, $true) -ne 0) {
+            throw "stale pmuxd stub image $image is not $stub"
+        }
+        Set-Content -LiteralPath $pointer -Encoding ascii -Value '{"bin_dir":"vstub"}'
+        $removePointer = $true
+        $acl = New-Object System.Security.AccessControl.FileSecurity
+        $acl.SetAccessRuleProtection($true, $false)
+        $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+            $user, 'FullControl', 'Allow')
+        $acl.AddAccessRule($rule)
+        Set-Acl -LiteralPath $monitor -AclObject $acl
+        # No stop between the stub and the installer. Setup has to stop this
+        # process and replace the user-only file itself.
+        Invoke-Msi -ArgumentList $ArgumentList
+        $still = Get-Process -Id $held.Id -ErrorAction SilentlyContinue
+        if ($still -and -not $still.HasExited) {
+            throw "stale updates-dir pmuxd $($held.Id) survived the install ($image)"
+        }
+        if (Test-Path -LiteralPath $pointer) {
+            throw 'windows-current.json survived the install'
+        }
+        $removePointer = $false
+        Assert-PmuxdReady -PathExpected (Get-PathExpected)
+        Write-Output 'upgrade from an updates-dir pmuxd replaced the install and started the installed daemon'
+    } finally {
+        if ($started -and $held -and -not $held.HasExited) {
+            try { $held.Kill() } catch { }
+        }
+        if ($removePointer -and (Test-Path -LiteralPath $pointer)) {
+            Remove-Item -LiteralPath $pointer -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath $stubRoot) {
+            Remove-Item -LiteralPath $stubRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 $msiPath = (Resolve-Path -LiteralPath $Msi).Path
 $install = Get-PrismattycInstall
 $preserved = @(
@@ -661,6 +778,7 @@ try {
     Invoke-Msi -ArgumentList $installArgs
     Assert-Installed -VersionText $ExpectedVersion -ProductVersion $ExpectedProductVersion -PathExpected (Get-PathExpected)
     Assert-PmuxdReady -PathExpected (Get-PathExpected)
+    Assert-StaleDaemonUpgrade -ArgumentList $installArgs
     Assert-PreviewSweep -Fixtures $fixtures
     if ($sameVersion) {
         Assert-InstalledMatchesPayload -Expected $sameVersion.Expected -Previous $sameVersion.Previous -Label $msiPath

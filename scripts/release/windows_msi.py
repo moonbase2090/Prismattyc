@@ -20,6 +20,7 @@ current value sorts after every legacy value (which all have major 0). This
 reaches patch 654 and major 254.
 """
 import argparse
+import base64
 import hashlib
 import json
 import re
@@ -99,6 +100,14 @@ def msi_product_version(version: str) -> str:
     return f"{out_major}.{minor}.{build}"
 
 
+def prepare_install_encoded(repo: Path) -> str:
+    """UTF-16LE Base64 of the prepare script, for powershell -EncodedCommand."""
+    text = (repo / "scripts/release/prepare-windows-install.ps1").read_text(encoding="utf-8")
+    if text.startswith("\ufeff"):
+        text = text.lstrip("\ufeff")
+    return base64.b64encode(text.encode("utf-16le")).decode("ascii")
+
+
 def build_msi(payload: Path, repo: Path, version: str, out_msi: Path) -> None:
     """Compile prismattyc.wxs. WiX's directory check only succeeds on Windows."""
     product_version = msi_product_version(version)
@@ -119,6 +128,8 @@ def build_msi(payload: Path, repo: Path, version: str, out_msi: Path) -> None:
         f"Payload={payload}",
         "-d",
         f"Repo={repo}",
+        "-d",
+        f"PrepareEncoded={prepare_install_encoded(repo)}",
         "-o",
         str(out_msi),
     ]

@@ -22,7 +22,9 @@ one must have no scrim, and the strip must be back to its old brightness.
 
 Captures go to OUT: before.png (no modal), one PNG per modal, after.png
 (all closed), and with --screenshots the whole screen at each of those
-moments (screen-*.png), for the owner.
+moments (screen-*.png), for the owner. With --key-relay the relay takes the
+screen instead (a request {"snap": NAME}), since a macOS guest's console is
+what shows the window.
 
 It waits on signals, never on fixed time: the app prints a change line
 (PRISMATTYC_UI_EVENTS=1) after each presented frame in which the open modal
@@ -186,6 +188,11 @@ def main():
         if not args.screenshots:
             return
         path = out / f'screen-{name}.png'
+        if args.key_relay:
+            request = (json.dumps({'snap': name}) + '\n').encode()
+            assert os.write(keys.requests, request) == len(request), f'short relay write for {name}'
+            keys._await_ack(name)
+            return
         if sys.platform == 'darwin':
             command = ['screencapture', '-x', str(path)]
         elif sys.platform.startswith('linux'):

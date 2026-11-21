@@ -39,6 +39,12 @@ UI = 'prismattyc-host: ui: '
 RECORDS = []
 # A program that keeps a session busy until the machine is thrown away.
 BUSY = [sys.executable, '-c', 'import time\nwhile True: time.sleep(3600)']
+# A session with steady output, like a running agent. An app from before
+# this change renews its restart registration only while it has something to
+# draw; its window is kept busy so the update can restart it.
+TICKING = [sys.executable, '-u', '-c', 'import time\nwhile True:\n    print("tick", flush=True)\n    time.sleep(0.5)']
+# Longer than the five seconds a restart registration stays current.
+PAST_FRESH = 7
 
 
 def version_in(label):
@@ -179,8 +185,8 @@ def main():
 
     # A fresh installation may have no daemon yet; `up` leaves a running one alone.
     run(installed_pmux, 'up', timeout=60)
-    for name in ('work-1', 'work-2'):
-        run(installed_pmux, 'new', '--no-attach', name, '--', *BUSY)
+    run(installed_pmux, 'new', '--no-attach', 'work-1', '--', *BUSY)
+    run(installed_pmux, 'new', '--no-attach', 'work-2', '--', *TICKING)
     sessions = set(run(installed_pmux, 'ls').stdout.split())
     assert {'work-1', 'work-2'} <= sessions, sessions
 
@@ -209,6 +215,17 @@ def main():
             change(lambda ui: ui.get('dialog') is None and ui.get('modal') is None, 'the review closed')
             assert version_in(run(installed_pmux, '--version').stdout) == old, 'the notice installed something'
             passed('a click on the update notice opens the Restart to update review; Escape closes it')
+            # Nothing to draw now: this build still renews its registration,
+            # so `pmux restart` and `pmux update` keep seeing the window.
+            idle_since = time.monotonic()
+            while True:
+                listed = any(item.get('component') == 'host' and item.get('pid') == host.pid
+                             for item in versions(installed_pmux)['running'])
+                assert listed, 'the idle window dropped out of the running components'
+                if time.monotonic() - idle_since >= PAST_FRESH:
+                    break
+                time.sleep(0.5)
+            passed(f'an idle window from this build stays registered past {PAST_FRESH} s')
         finally:
             host.terminate()
             host.wait(30)

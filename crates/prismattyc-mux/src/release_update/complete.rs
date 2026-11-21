@@ -255,10 +255,55 @@ fn next_action(component: &str, status: &str) -> Option<String> {
         ("plugins", "pending") => "They move to the new release when the daemon restarts.",
         ("plugins", "unconfirmed") => "Run pmux plugin list to check the official plug-ins.",
         ("host", "deferred") => "Fix what the window names, then run pmux restart --host, or close and reopen that window.",
+        ("host", "idle") => "Click or type in that window to wake it, then run pmux restart --host.",
         (_, "pending") => "It did not answer within 15 seconds. Run pmux versions before restarting it again.",
         _ => return None,
     };
     Some(next.into())
+}
+
+/// Add each open window in `idle` that the restart report does not name.
+/// A restart from an older release skips such windows and may report no
+/// window at all; the receipt names them with what to do instead.
+pub(super) fn with_idle_hosts(mut components: Vec<Component>, idle: &[u32]) -> Vec<Component> {
+    let named = |pid: u32| {
+        components
+            .iter()
+            .any(|c| c.component == "host" && c.pid == Some(u64::from(pid)))
+    };
+    let missing: Vec<u32> = idle.iter().copied().filter(|pid| !named(*pid)).collect();
+    if missing.is_empty() {
+        return components;
+    }
+    components.retain(|c| !(c.component == "host" && c.status == "not_registered"));
+    for pid in missing {
+        components.push(Component {
+            component: "host".into(),
+            status: "idle".into(),
+            pid: Some(u64::from(pid)),
+            detail: Some("open but idle, so it was not asked to restart".into()),
+            next: next_action("host", "idle"),
+        });
+    }
+    components
+}
+
+/// The daemon socket the restart targets: `--socket` from the plan, or the
+/// default instance's.
+fn plan_socket(plan: &Plan) -> PathBuf {
+    plan.target
+        .windows(2)
+        .find(|pair| pair[0] == "--socket")
+        .map(|pair| PathBuf::from(&pair[1]))
+        .or_else(|| {
+            let instance = plan
+                .target
+                .windows(2)
+                .find(|pair| pair[0] == "--instance")
+                .map_or("default", |pair| pair[1].as_str());
+            crate::default_socket_path(instance).ok()
+        })
+        .unwrap_or_default()
 }
 
 /// Components whose running version differs from `installed`, from
@@ -556,7 +601,12 @@ fn restart(plan: &Plan, core: &Core) -> Restart {
         return Restart::NotNeeded;
     }
     match run_restart(plan) {
-        Ok(components) => Restart::Ran { components },
+        Ok(components) => {
+            let idle = crate::component_restart::idle_components(&plan_socket(plan), "host");
+            Restart::Ran {
+                components: with_idle_hosts(components, &idle),
+            }
+        }
         Err(error) => Restart::Failed {
             detail: format!("{error:#}"),
         },
@@ -751,6 +801,58 @@ mod tests {
         assert_eq!(by("host", Some(41)).next, None);
         assert_eq!(by("mcp", None).next, None);
         assert!(restart_from("{\"status\":\"planned\"}").is_err());
+    }
+
+    #[test]
+    fn an_idle_window_the_restart_skipped_is_named_with_what_to_do() {
+        let skipped = restart_from(
+            &json!({"status":"restart_results","components":[
+                {"component":"host","status":"not_registered","detail":"no cooperative component found"},
+                {"component":"mcp","status":"not_registered","detail":"no cooperative component found"},
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let components = with_idle_hosts(skipped, &[77]);
+        let hosts: Vec<&Component> = components
+            .iter()
+            .filter(|c| c.component == "host")
+            .collect();
+        assert_eq!(hosts.len(), 1, "{components:?}");
+        assert_eq!((hosts[0].status.as_str(), hosts[0].pid), ("idle", Some(77)));
+        assert!(hosts[0]
+            .next
+            .as_deref()
+            .unwrap()
+            .contains("pmux restart --host"));
+        assert!(
+            components.iter().any(|c| c.component == "mcp"),
+            "other components stay"
+        );
+        let receipt = Receipt::new(
+            "0.3.72".into(),
+            installed(),
+            repaired(),
+            Restart::Ran { components },
+        );
+        assert_eq!(receipt.status, "updated_with_deferrals");
+        assert!(
+            receipt
+                .text()
+                .contains("  App window 77: idle (open but idle, so it was not asked to restart)"),
+            "{}",
+            receipt.text()
+        );
+        // A window the restart already named is not added twice.
+        let named = restart_from(
+            &json!({"status":"restart_results","components":[
+                {"component":"host","status":"idle","pid":77,"detail":"open but idle, so it was not asked to restart"},
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(with_idle_hosts(named.clone(), &[77]), named);
+        assert_eq!(with_idle_hosts(named.clone(), &[]), named);
     }
 
     #[test]

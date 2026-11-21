@@ -375,6 +375,38 @@ fn restart_plan_never_reports_a_locked_unresponsive_daemon_as_empty() {
 }
 
 #[test]
+fn an_open_window_that_stopped_renewing_its_registration_is_reported_idle() {
+    let root = temp_root("restart-idle");
+    let missing = root.join("missing.sock");
+    prismattyc_mux::component_restart::register(&missing, "host").unwrap();
+    let pid = std::process::id();
+    let path =
+        prismattyc_mux::component_restart::directory(&missing).join(format!("host-{pid}.json"));
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let fresh = prismattyc_mux::component_restart::FRESH.as_millis() as u64;
+    value["sampled_ms"] = (prismattyc_mux::host_render_status::unix_ms() - fresh - 1).into();
+    std::fs::write(&path, value.to_string()).unwrap();
+
+    let report: serde_json::Value =
+        serde_json::from_str(ok(&pmux(&missing, &root, &[], &["restart", "--host"])).trim())
+            .unwrap();
+    let hosts: Vec<&serde_json::Value> = report["components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["component"] == "host")
+        .collect();
+    assert_eq!(hosts.len(), 1, "{report}");
+    assert_eq!(hosts[0]["status"], "idle", "{report}");
+    assert_eq!(hosts[0]["pid"], pid, "{report}");
+    assert!(
+        !prismattyc_mux::component_restart::request_path(&missing, "host", pid).exists(),
+        "an idle window is not sent a request it would act on later"
+    );
+}
+
+#[test]
 fn restart_plans_and_cooperative_components() {
     let root = temp_root("restart");
     let missing = root.join("missing.sock");

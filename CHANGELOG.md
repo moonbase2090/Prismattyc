@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- An open app window with nothing to draw stopped renewing its registration, so `pmux restart` and **Update and restart all components** skipped it as if no window were open. Windows now renew it while idle, and `pmux restart` reports a window from an older release that stopped answering as `idle` instead of leaving it out.
 - **Restart components** no longer fails with "expected" the newest release's version when the installed Prismattyc is newer than that release; it restarts on the installed version.
 - On Linux and Windows, a key held while a window gains focus is no longer applied twice. One Escape pressed as the app reopened after an update closed both the update dialog and the result notice under it.
 - **Update and restart all components** now restarts every open Prismattyc app process, not only the one you used, and the result lists any window that is still on the previous version with the exact next action. `pmux restart --host` accepts `--except-pid` to leave one app process for last.

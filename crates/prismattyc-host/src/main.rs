@@ -4074,6 +4074,11 @@ impl App {
                 next_deadline = Some(deadline);
             }
         }
+        // An idle app has nothing to draw and would otherwise wait for input;
+        // it still wakes to renew its restart registration.
+        if let Some(due) = restart::heartbeat_deadline(self.last_component_poll) {
+            next_deadline = Some(next_deadline.map_or(due, |deadline| deadline.min(due)));
+        }
         let phase_started = Instant::now();
         self.retry_register_host_pid();
         self.pump_timing.record_phase(

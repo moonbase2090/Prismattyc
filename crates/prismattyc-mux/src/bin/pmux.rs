@@ -111,19 +111,24 @@ mod skills;
 #[path = "pmux/spaces.rs"]
 mod space_commands;
 
-/// `pmux update` arguments with the global daemon target appended, so the
-/// complete update restarts that daemon's components. Source builds take no
-/// target.
-fn update_args(
-    mut rest: Vec<String>,
-    instance: Option<String>,
-    socket: Option<PathBuf>,
-) -> Vec<String> {
+/// The daemon socket `pmux update` restarts components for, resolved like
+/// every other command (`--socket`, `--instance`, the `[mux]` config, the
+/// environment). `None` when it cannot be resolved; the restart then uses
+/// its own default.
+fn update_socket(instance: Option<String>, socket: Option<PathBuf>) -> Option<PathBuf> {
+    let file = load_mux_section(&prism_config_path()).unwrap_or_default();
+    let (instance, socket_override) = resolve_mux_target(instance, socket, &file).ok()?;
+    Paths::resolve(&instance, socket_override)
+        .ok()
+        .map(|paths| paths.socket)
+}
+
+/// `pmux update` arguments with the daemon socket appended, so the complete
+/// update restarts that daemon's components and finds its idle windows.
+/// Source builds take no target.
+fn update_args(mut rest: Vec<String>, socket: Option<PathBuf>) -> Vec<String> {
     if rest.iter().any(|arg| arg == "--source") {
         return rest;
-    }
-    if let Some(instance) = instance {
-        rest.extend(["--instance".to_string(), instance]);
     }
     if let Some(socket) = socket {
         rest.extend([
@@ -561,7 +566,8 @@ fn main() -> Result<()> {
         }
         Verb::Update => {
             reject_session_flag(cli_session.as_deref(), "update")?;
-            return prismattyc_mux::run_update(update_args(rest, cli_instance, cli_socket));
+            let socket = update_socket(cli_instance, cli_socket);
+            return prismattyc_mux::run_update(update_args(rest, socket));
         }
         Verb::Uninstall => {
             reject_session_flag(cli_session.as_deref(), "uninstall")?;
@@ -9563,20 +9569,20 @@ mod tests {
     static REPO_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
-    fn update_takes_the_global_daemon_target_except_for_source_builds() {
+    fn update_takes_the_daemon_socket_except_for_source_builds() {
         let rest = |list: &[&str]| list.iter().map(ToString::to_string).collect::<Vec<_>>();
         assert_eq!(
-            update_args(
-                rest(&["--json"]),
-                Some("dev".into()),
-                Some(PathBuf::from("/run/p.sock"))
-            ),
-            rest(&["--json", "--instance", "dev", "--socket", "/run/p.sock"])
+            update_args(rest(&["--json"]), Some(PathBuf::from("/run/p.sock"))),
+            rest(&["--json", "--socket", "/run/p.sock"])
         );
-        assert_eq!(update_args(rest(&[]), None, None), rest(&[]));
+        assert_eq!(update_args(rest(&[]), None), rest(&[]));
         assert_eq!(
-            update_args(rest(&["--source"]), Some("dev".into()), None),
+            update_args(rest(&["--source"]), Some(PathBuf::from("/run/p.sock"))),
             rest(&["--source"])
+        );
+        assert_eq!(
+            update_socket(None, Some(PathBuf::from("/run/explicit.sock"))),
+            Some(PathBuf::from("/run/explicit.sock"))
         );
     }
 

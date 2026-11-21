@@ -37,6 +37,17 @@ pub(super) fn receive() -> Result<Option<Resume>> {
     Ok(Some(resume))
 }
 
+/// How often an idle app wakes to renew its restart registration. It must
+/// stay well inside the registration's freshness, or `pmux restart` and
+/// `pmux update` stop seeing an open window that has nothing to draw.
+pub(super) const HEARTBEAT: Duration = Duration::from_secs(2);
+
+/// When the next heartbeat is due after the one at `last`; nothing before
+/// the first heartbeat.
+pub(super) fn heartbeat_deadline(last: Option<Instant>) -> Option<Instant> {
+    last.map(|at| at + HEARTBEAT)
+}
+
 pub(super) fn poll(app: &mut App) {
     let now = Instant::now();
     if app
@@ -343,6 +354,19 @@ pub(super) fn resume(app: &mut App, event_loop: &ActiveEventLoop) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_idle_app_renews_its_registration_well_before_it_goes_stale() {
+        assert_eq!(heartbeat_deadline(None), None);
+        let at = Instant::now();
+        assert_eq!(heartbeat_deadline(Some(at)), Some(at + HEARTBEAT));
+        // Two missed wakes still leave the registration current.
+        assert!(
+            HEARTBEAT * 2 < requests::FRESH,
+            "{HEARTBEAT:?} vs {:?}",
+            requests::FRESH
+        );
+    }
     use prismattyc_mux::attach_tabs::{AttachTabRecord, AttachTabsFile};
 
     fn tab(title: &str, sessions: &[&str]) -> AttachTabRecord {

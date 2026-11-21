@@ -44,6 +44,10 @@ reduce transparency the scrim dims only: blur false and edge contrast kept.
 Reduce motion alone must still blur. The first change line's state is recorded
 as `settled_at_once`.
 
+--handover-system MODE (Linux and macOS) changes the setting while the update panel is open, just before
+it hands over to the restart confirmation; the confirmation, a dialog that took the panel's place with no frame
+between, must follow the new setting (settled at once or fading, blurred or dimmed only).
+
   modal-scrim-e2e.py --bins target/release --out DIR [--key-relay DIR] [--screenshots]
                      [--system none|reduce-motion|reduce-transparency|both]
 """
@@ -173,6 +177,9 @@ def main():
     parser.add_argument('--screenshots', action='store_true', help='also capture the whole screen')
     parser.add_argument('--system', choices=['none', 'reduce-motion', 'reduce-transparency', 'both'], default='none',
                         help='the system accessibility setting in force; the drive checks its effect')
+    parser.add_argument('--handover-system', choices=['none', 'reduce-motion', 'reduce-transparency', 'both'],
+                        help='change the system setting to this just before the update panel hands over to the '
+                             'restart confirmation (Linux and macOS); the confirmation must follow the new setting')
     args = parser.parse_args()
     expect_still = args.system in ('reduce-motion', 'both')
     expect_flat = args.system in ('reduce-transparency', 'both')
@@ -324,6 +331,24 @@ def main():
                f'{"at once" if at_once else "faded in"} behind the {kind}')
         return settled
 
+    def set_system(mode):
+        """Change the operating system's setting while the app runs."""
+        motion, transparency = mode in ('reduce-motion', 'both'), mode in ('reduce-transparency', 'both')
+        if sys.platform.startswith('linux'):
+            (out / 'config' / 'glib-2.0' / 'settings' / 'keyfile').write_text(
+                '[org/gnome/desktop/interface]\n'
+                f'enable-animations={"false" if motion else "true"}\n'
+                '[org/gnome/desktop/a11y/interface]\n'
+                f'high-contrast={"true" if transparency else "false"}\n')
+        elif sys.platform == 'darwin':
+            for domain in ('com.apple.universalaccess', 'com.apple.Accessibility'):
+                for key, value in (('reduceMotion', motion), ('reduceTransparency', transparency),
+                                   ('ReduceMotionEnabled', motion), ('EnhancedBackgroundContrastEnabled', transparency)):
+                    subprocess.check_call(['defaults', 'write', domain, key, '-bool', 'true' if value else 'false'])
+            subprocess.call(['killall', 'cfprefsd'])
+        else:
+            raise AssertionError('--handover-system needs Linux or macOS')
+
     def close_all(label):
         while True:
             keys.press('Escape')
@@ -380,6 +405,13 @@ def main():
                     keys.press('Down' if target > selected else 'Up')
                     selected = (change(lambda ui: (ui.get('panel') or {}).get('selected') not in (None, selected),
                                        'panel selection')['ui'].get('panel') or {}).get('selected')
+                if args.handover_system:
+                    # The panel is open and settled; the setting changes now,
+                    # and the dialog that takes its place must follow it.
+                    set_system(args.handover_system)
+                    expect_still = args.handover_system in ('reduce-motion', 'both')
+                    expect_flat = args.handover_system in ('reduce-transparency', 'both')
+                    result['handover_system'] = args.handover_system
                 keys.press('Return')
                 confirm = change(lambda ui: ui.get('modal') == 'restart', 'restart confirmation', 120)
                 settle('restart-confirmation', 'restart', before_seq, confirm)

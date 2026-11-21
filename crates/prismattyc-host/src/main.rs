@@ -6178,7 +6178,12 @@ fn open_modal(host: &HostState) -> Option<&'static str> {
 /// Paint the modal scrim when a modal is open, and keep frames coming while
 /// it fades in.
 fn paint_modal_scrim(host: &mut HostState, buffer: &mut [u32], width: usize, height: usize) {
-    let modal = open_modal(host);
+    let modal = open_modal(host).map(|name| modal_scrim::Dialog {
+        name,
+        // Menus are made one at a time, each with its own number; the other
+        // dialogs open from closed, so their kind says which one it is.
+        opening: host.context_menu.as_ref().map_or(0, |menu| menu.opening),
+    });
     let open = modal.is_some();
     if host.modal_scrim.opens_with(modal) {
         host.modal_scrim

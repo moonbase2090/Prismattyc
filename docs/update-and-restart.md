@@ -5,7 +5,8 @@ check runs on launch and daily when **Automatically Check for Updates** is
 enabled, which is the default. Turn it off in the app menu or set
 `automatic_update_checks = false` in `config.toml`. Manual checks remain
 available either way.
-When a release is available, Prismattyc shows its version and release notes.
+When a release is available, Prismattyc shows its version, up to three
+highlights, and **Release Notes**, which opens the full notes in the browser.
 Choose **Review Update** to review the sessions that will stop. The same
 flow is available from **Update and restart** in the command palette on
 all platforms. **Roll Back Last Update…** restores the previous verified app.
@@ -13,9 +14,10 @@ The command-line update path remains available on all platforms.
 
 On Linux and Windows the app runs the same check (`pmux update --check --json`)
 on launch and daily while `automatic_update_checks` is on. When a newer release
-exists it shows one notice naming the version, then stays quiet about that
-version until the app restarts. Click the notice to open **Restart to update**,
-the same review as **Update and restart** in the command palette. The notice
+exists it shows one notice naming the version and its top change, then stays
+quiet about that version until the app restarts. Click the notice to open **Restart to update**,
+the same review as **Update and restart** in the command palette. Its
+**Release notes** link opens the full notes. The notice
 itself does not install anything and never stops a session; nothing changes
 until you choose an action in the review. It is kept in Recent messages and is
 hidden only by `toasts = "off"`.

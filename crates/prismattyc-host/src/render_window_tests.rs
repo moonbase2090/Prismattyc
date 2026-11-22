@@ -645,6 +645,14 @@ fn verify_startup_restore(app: &mut App, event_loop: &ActiveEventLoop) {
             host,
             &WindowEvent::Ime(winit::event::Ime::Commit("secret".into()))
         ));
+        // The prompt's buttons have frames on the rows a click selects.
+        let bounds = chrome_snapshot(host, None).bounds;
+        for row in 0..2 {
+            let rect = bounds.overlay_rows[row].expect("restore prompt rows have frames");
+            let (x, y) = (rect.x + rect.w / 2, rect.y + rect.h / 2);
+            let layout = host.palette_layout.as_ref().unwrap();
+            assert_eq!(palette_hit(layout, x, y), Some(row), "restore row {row}");
+        }
         let device_id = winit::event::DeviceId::dummy();
         let layout = host.palette_layout.as_ref().unwrap();
         let x = (layout.panel_x + 1) as f64;

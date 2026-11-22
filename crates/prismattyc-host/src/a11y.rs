@@ -8,6 +8,8 @@ use accesskit::{
     Action, Live, Node, NodeId, Role, TextPosition, TextSelection, Tree, TreeId, TreeUpdate,
 };
 
+use crate::graphite::Rect;
+
 pub(crate) const WINDOW_ID: u64 = 1;
 pub(crate) const TAB_LIST_ID: u64 = 2;
 pub(crate) const SCROLLBAR_ID: u64 = 3;
@@ -148,6 +150,50 @@ pub(crate) struct ChromeSnapshot {
     /// otherwise. The buttons paint icons, so these are their only names.
     pub arrange: Vec<String>,
     pub arrange_current: Option<usize>,
+    pub bounds: ChromeBounds,
+}
+
+/// Where the chrome is painted, in window pixels: physical pixels from the
+/// top-left of the content area, the space pointer hit tests use and the one
+/// AccessKit expects for node bounds. Each list follows the matching
+/// [`ChromeSnapshot`] list. A missing entry or an empty rectangle leaves that
+/// node without bounds, and macOS then reports it as offscreen.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ChromeBounds {
+    pub window: Option<Rect>,
+    pub tabs: Vec<Option<Rect>>,
+    pub rail: Vec<Option<Rect>>,
+    pub remote: Vec<Option<Rect>>,
+    pub arrange: Vec<Option<Rect>>,
+    pub document: Option<Rect>,
+    pub overlay: Option<Rect>,
+    pub overlay_rows: Vec<Option<Rect>>,
+}
+
+/// Entry `index` of a bounds list, dropping empty rectangles.
+fn bounds_at(list: &[Option<Rect>], index: usize) -> Option<Rect> {
+    list.get(index)
+        .copied()
+        .flatten()
+        .filter(|r| r.w > 0 && r.h > 0)
+}
+
+/// Smallest rectangle around every non-empty entry, for container nodes.
+fn bounds_union<'a>(lists: impl IntoIterator<Item = &'a [Option<Rect>]>) -> Option<Rect> {
+    let mut out: Option<(usize, usize, usize, usize)> = None;
+    for list in lists {
+        for index in 0..list.len() {
+            let Some(r) = bounds_at(list, index) else {
+                continue;
+            };
+            let (x1, y1) = (r.x + r.w, r.y + r.h);
+            out = Some(match out {
+                None => (r.x, r.y, x1, y1),
+                Some((a, b, c, d)) => (a.min(r.x), b.min(r.y), c.max(x1), d.max(y1)),
+            });
+        }
+    }
+    out.map(|(x0, y0, x1, y1)| Rect::new(x0, y0, x1 - x0, y1 - y0))
 }
 
 /// One live-region utterance (accessibility D-A5).
@@ -284,6 +330,7 @@ pub(crate) struct TreeNode {
     pub caret: Option<usize>,
     pub sel_anchor: Option<usize>,
     pub sel_focus: Option<usize>,
+    pub bounds: Option<Rect>,
 }
 
 fn chrome_node(
@@ -304,6 +351,7 @@ fn chrome_node(
         caret: None,
         sel_anchor: None,
         sel_focus: None,
+        bounds: None,
     }
 }
 
@@ -398,14 +446,11 @@ pub(crate) fn build_chrome_tree(snap: &ChromeSnapshot) -> (u64, Vec<TreeNode>) {
     let mut nodes = Vec::new();
     let mut window_children = vec![TAB_LIST_ID];
 
+    let bounds = &snap.bounds;
     let tab_ids: Vec<u64> = (0..snap.tabs.len()).map(|i| TAB_BASE + i as u64).collect();
-    nodes.push(chrome_node(
-        TAB_LIST_ID,
-        "TabList",
-        "tabs",
-        false,
-        tab_ids.clone(),
-    ));
+    let mut tab_list = chrome_node(TAB_LIST_ID, "TabList", "tabs", false, tab_ids.clone());
+    tab_list.bounds = bounds_union([bounds.tabs.as_slice()]);
+    nodes.push(tab_list);
 
     let mut focus = WINDOW_ID;
     for (index, tab) in snap.tabs.iter().enumerate() {
@@ -416,6 +461,7 @@ pub(crate) fn build_chrome_tree(snap: &ChromeSnapshot) -> (u64, Vec<TreeNode>) {
         }
         let mut tab_node = chrome_node(id, "Tab", tab.title.clone(), tab.selected, pane_ids);
         tab_node.description = tab.description.clone();
+        tab_node.bounds = bounds_at(&bounds.tabs, index);
         nodes.push(tab_node);
         for (p, pane) in tab.panes.iter().enumerate() {
             let pid = pane_id(index, p);
@@ -449,30 +495,30 @@ pub(crate) fn build_chrome_tree(snap: &ChromeSnapshot) -> (u64, Vec<TreeNode>) {
             .map(|i| RAIL_CHIP_BASE + i as u64)
             .chain((0..snap.remote.len()).map(|i| RAIL_DEST_BASE + i as u64))
             .collect();
-        nodes.push(chrome_node(
-            RAIL_ID,
-            "Complementary",
-            "spaces",
-            false,
-            chips,
-        ));
+        let mut rail = chrome_node(RAIL_ID, "Complementary", "spaces", false, chips);
+        rail.bounds = bounds_union([bounds.rail.as_slice(), bounds.remote.as_slice()]);
+        nodes.push(rail);
         for (i, name) in snap.rail.iter().enumerate() {
-            nodes.push(chrome_node(
+            let mut chip = chrome_node(
                 RAIL_CHIP_BASE + i as u64,
                 "Button",
                 name.clone(),
                 snap.rail_current == Some(i),
                 Vec::new(),
-            ));
+            );
+            chip.bounds = bounds_at(&bounds.rail, i);
+            nodes.push(chip);
         }
         for (i, label) in snap.remote.iter().enumerate() {
-            nodes.push(chrome_node(
+            let mut dest = chrome_node(
                 RAIL_DEST_BASE + i as u64,
                 "Button",
                 label.clone(),
                 false,
                 Vec::new(),
-            ));
+            );
+            dest.bounds = bounds_at(&bounds.remote, i);
+            nodes.push(dest);
         }
     }
 
@@ -481,17 +527,19 @@ pub(crate) fn build_chrome_tree(snap: &ChromeSnapshot) -> (u64, Vec<TreeNode>) {
         let buttons: Vec<u64> = (0..snap.arrange.len())
             .map(|i| ARRANGE_BASE + i as u64)
             .collect();
-        nodes.push(chrome_node(
-            ARRANGE_ID, "Toolbar", "arrange", false, buttons,
-        ));
+        let mut toolbar = chrome_node(ARRANGE_ID, "Toolbar", "arrange", false, buttons);
+        toolbar.bounds = bounds_union([bounds.arrange.as_slice()]);
+        nodes.push(toolbar);
         for (i, name) in snap.arrange.iter().enumerate() {
-            nodes.push(chrome_node(
+            let mut button = chrome_node(
                 ARRANGE_BASE + i as u64,
                 "Button",
                 name.clone(),
                 snap.arrange_current == Some(i),
                 Vec::new(),
-            ));
+            );
+            button.bounds = bounds_at(&bounds.arrange, i);
+            nodes.push(button);
         }
     }
 
@@ -511,6 +559,7 @@ pub(crate) fn build_chrome_tree(snap: &ChromeSnapshot) -> (u64, Vec<TreeNode>) {
         document.caret = Some(doc.caret);
         document.sel_anchor = doc.sel_anchor;
         document.sel_focus = doc.sel_focus;
+        document.bounds = bounds_at(&[bounds.document], 0);
         nodes.push(document);
         let mut run = chrome_node(TEXT_RUN_ID, "TextRun", "", false, Vec::new());
         run.value = doc.text.clone();
@@ -547,28 +596,30 @@ pub(crate) fn build_chrome_tree(snap: &ChromeSnapshot) -> (u64, Vec<TreeNode>) {
             .unwrap_or(OVERLAY_ID);
         let mut dialog = chrome_node(OVERLAY_ID, "Dialog", snap.overlay.title(), false, row_ids);
         dialog.description = extra;
+        dialog.bounds = bounds_at(&[bounds.overlay], 0);
         nodes.push(dialog);
         for (i, row) in rows.iter().enumerate() {
-            nodes.push(chrome_node(
+            let mut button = chrome_node(
                 OVERLAY_ROW_BASE + i as u64,
                 "Button",
                 row.clone(),
                 selected == Some(i),
                 Vec::new(),
-            ));
+            );
+            button.bounds = bounds_at(&bounds.overlay_rows, i);
+            nodes.push(button);
         }
     }
 
-    nodes.insert(
-        0,
-        chrome_node(
-            WINDOW_ID,
-            "Window",
-            snap.window_title.clone(),
-            false,
-            window_children,
-        ),
+    let mut window = chrome_node(
+        WINDOW_ID,
+        "Window",
+        snap.window_title.clone(),
+        false,
+        window_children,
     );
+    window.bounds = bounds_at(&[bounds.window], 0);
+    nodes.insert(0, window);
     (focus, nodes)
 }
 
@@ -716,6 +767,14 @@ fn to_accesskit(node: TreeNode) -> (NodeId, Node) {
             ak.set_text_selection(TextSelection { anchor, focus });
         }
     }
+    if let Some(r) = node.bounds {
+        ak.set_bounds(accesskit::Rect {
+            x0: r.x as f64,
+            y0: r.y as f64,
+            x1: (r.x + r.w) as f64,
+            y1: (r.y + r.h) as f64,
+        });
+    }
     if matches!(role, Role::Tab | Role::Button) {
         ak.add_action(Action::Click);
         ak.add_action(Action::Focus);
@@ -761,6 +820,7 @@ mod tests {
             caption: None,
             arrange: Vec::new(),
             arrange_current: None,
+            bounds: ChromeBounds::default(),
         };
         let (focus, nodes) = build_chrome_tree(&snap);
         assert_eq!(focus, TAB_BASE);
@@ -819,6 +879,7 @@ mod tests {
             caption: None,
             arrange: Vec::new(),
             arrange_current: None,
+            bounds: ChromeBounds::default(),
         };
         let (focus, nodes) = build_chrome_tree(&snap);
         assert_eq!(focus, pane_id(0, 1));
@@ -848,6 +909,7 @@ mod tests {
             caption: None,
             arrange: Vec::new(),
             arrange_current: None,
+            bounds: ChromeBounds::default(),
         };
         let (focus, nodes) = build_chrome_tree(&snap);
         assert_eq!(focus, OVERLAY_ROW_BASE + 1);
@@ -896,6 +958,7 @@ mod tests {
             caption: None,
             arrange: vec!["Single".into(), "Split".into(), "Grid".into()],
             arrange_current: Some(2),
+            bounds: ChromeBounds::default(),
         };
         let (_, nodes) = build_chrome_tree(&snap);
         let window = nodes.iter().find(|n| n.id == WINDOW_ID).unwrap();
@@ -955,6 +1018,7 @@ mod tests {
             caption: None,
             arrange: Vec::new(),
             arrange_current: None,
+            bounds: ChromeBounds::default(),
         };
         let (_, nodes) = build_chrome_tree(&snap);
         let find = nodes.iter().find(|n| n.role == "Dialog").unwrap();
@@ -991,6 +1055,7 @@ mod tests {
             caption: None,
             arrange: Vec::new(),
             arrange_current: None,
+            bounds: ChromeBounds::default(),
         };
         let (_, nodes) = build_chrome_tree(&snap);
         let rail = nodes.iter().find(|node| node.id == RAIL_ID).unwrap();
@@ -1038,6 +1103,7 @@ mod tests {
             caption: None,
             arrange: Vec::new(),
             arrange_current: None,
+            bounds: ChromeBounds::default(),
         };
         assert_eq!(action_for(WINDOW_ID, &snap), None);
         assert_eq!(action_for(TAB_BASE + 9, &snap), None);
@@ -1058,6 +1124,7 @@ mod tests {
             caption: None,
             arrange: Vec::new(),
             arrange_current: None,
+            bounds: ChromeBounds::default(),
         };
         let palette = ChromeSnapshot {
             overlay: OverlayKind::Palette {
@@ -1088,6 +1155,7 @@ mod tests {
             caption: None,
             arrange: Vec::new(),
             arrange_current: None,
+            bounds: ChromeBounds::default(),
         };
         let update = tree_update(&snap);
         assert_eq!(update.focus, NodeId(TAB_BASE));
@@ -1164,6 +1232,7 @@ mod tests {
             caption: None,
             arrange: Vec::new(),
             arrange_current: None,
+            bounds: ChromeBounds::default(),
         };
         let (focus, nodes) = build_chrome_tree(&snap);
         assert_eq!(focus, DOCUMENT_ID);
@@ -1196,6 +1265,7 @@ mod tests {
             caption: None,
             arrange: Vec::new(),
             arrange_current: None,
+            bounds: ChromeBounds::default(),
         };
         let (focus, nodes) = build_chrome_tree(&snap);
         assert_eq!(focus, OVERLAY_ROW_BASE);
@@ -1310,6 +1380,7 @@ mod tests {
             caption: None,
             arrange: Vec::new(),
             arrange_current: None,
+            bounds: ChromeBounds::default(),
         };
         let (focus, nodes) = build_chrome_tree(&snap);
         assert_eq!(focus, TAB_BASE);
@@ -1350,6 +1421,7 @@ mod tests {
             caption: None,
             arrange: Vec::new(),
             arrange_current: None,
+            bounds: ChromeBounds::default(),
         };
         let (focus, nodes) = build_chrome_tree(&snap);
         assert_ne!(focus, LIVE_ID);
@@ -1374,6 +1446,7 @@ mod tests {
             caption: Some("Split the pane to the right. Ctrl+Shift+\\".into()),
             arrange: Vec::new(),
             arrange_current: None,
+            bounds: ChromeBounds::default(),
         };
         let (focus, nodes) = build_chrome_tree(&snap);
         assert_eq!(focus, TAB_BASE);
@@ -1384,5 +1457,82 @@ mod tests {
         assert_eq!(caption.value, "Split the pane to the right. Ctrl+Shift+\\");
         assert!(nodes[0].children.contains(&CAPTION_ID));
         assert_eq!(action_for(CAPTION_ID, &snap), None);
+    }
+
+    #[test]
+    fn painted_chrome_carries_bounds_into_the_accesskit_tree() {
+        let r = |x, y, w, h| Some(Rect::new(x, y, w, h));
+        let snap = ChromeSnapshot {
+            window_title: "Prismattyc".into(),
+            tabs: vec![
+                tab("main", true, "", vec![]),
+                tab("logs", false, "", vec![]),
+            ],
+            overlay: OverlayKind::RestorePrompt {
+                rows: vec!["Restore".into(), "Start fresh".into()],
+                selected: 0,
+            },
+            scroll: None,
+            rail: vec!["default".into()],
+            rail_current: Some(0),
+            remote: vec!["devbox, remote, connected".into()],
+            document: Some(viewport_document(&["$ ls".into()], Some((0, 4)), None)),
+            live: None,
+            caption: None,
+            arrange: vec!["Single".into(), "Split".into(), "Grid".into()],
+            arrange_current: Some(0),
+            bounds: ChromeBounds {
+                window: r(0, 0, 1600, 1000),
+                // The second tab is scrolled out of the bar: no bounds.
+                tabs: vec![r(300, 10, 120, 40), None],
+                rail: vec![r(10, 80, 200, 30)],
+                remote: vec![r(10, 900, 200, 30)],
+                // An empty rectangle is no rectangle.
+                arrange: vec![r(1400, 60, 40, 30), r(1440, 60, 40, 30), r(1480, 60, 0, 30)],
+                document: r(220, 100, 1370, 890),
+                overlay: r(500, 300, 600, 200),
+                overlay_rows: vec![r(500, 380, 600, 40), r(500, 420, 600, 40)],
+            },
+        };
+        let (_, nodes) = build_chrome_tree(&snap);
+        let at = |id: u64| nodes.iter().find(|n| n.id == id).unwrap().bounds;
+        assert_eq!(at(WINDOW_ID), r(0, 0, 1600, 1000));
+        assert_eq!(at(TAB_LIST_ID), r(300, 10, 120, 40));
+        assert_eq!(at(TAB_BASE), r(300, 10, 120, 40));
+        assert_eq!(at(TAB_BASE + 1), None);
+        assert_eq!(at(RAIL_ID), r(10, 80, 200, 850));
+        assert_eq!(at(RAIL_CHIP_BASE), r(10, 80, 200, 30));
+        assert_eq!(at(RAIL_DEST_BASE), r(10, 900, 200, 30));
+        assert_eq!(at(ARRANGE_ID), r(1400, 60, 80, 30));
+        assert_eq!(at(ARRANGE_BASE + 1), r(1440, 60, 40, 30));
+        assert_eq!(at(ARRANGE_BASE + 2), None);
+        assert_eq!(at(DOCUMENT_ID), r(220, 100, 1370, 890));
+        assert_eq!(at(OVERLAY_ID), r(500, 300, 600, 200));
+        assert_eq!(at(OVERLAY_ROW_BASE + 1), r(500, 420, 600, 40));
+        assert_eq!(at(LIVE_ID), None);
+
+        let update = tree_update(&snap);
+        let node = |id: u64| {
+            &update
+                .nodes
+                .iter()
+                .find(|(n, _)| *n == NodeId(id))
+                .unwrap()
+                .1
+        };
+        let fresh = node(OVERLAY_ROW_BASE + 1)
+            .bounds()
+            .expect("Start fresh has bounds");
+        assert_eq!(
+            (fresh.x0, fresh.y0, fresh.x1, fresh.y1),
+            (500.0, 420.0, 1100.0, 460.0)
+        );
+        let split = node(ARRANGE_BASE + 1).bounds().expect("Split has bounds");
+        assert_eq!(
+            (split.x0, split.y0, split.x1, split.y1),
+            (1440.0, 60.0, 1480.0, 90.0)
+        );
+        assert_eq!(node(TAB_BASE + 1).bounds(), None);
+        assert_eq!(node(ARRANGE_BASE + 2).bounds(), None);
     }
 }

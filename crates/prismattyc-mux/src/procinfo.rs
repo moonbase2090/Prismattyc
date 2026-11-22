@@ -3108,19 +3108,34 @@ mod tests {
         assert!(!uses_ambiguous_latest_selector(&args(&["cargo", "watch"])));
     }
 
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    struct ChildGuard(std::process::Child);
+
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            drop(self.0.stdin.take());
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_replay_command_resolves_claude_and_fails_safe_on_ambiguous_latest() {
         use std::io::{BufRead, BufReader, Read, Write};
+        const READY_MARKER: &str = "PMUX_WIN_ENV_HELPER_READY";
         if std::env::var_os("PMUX_WIN_ENV_HELPER").is_some() {
             let mut out = std::io::stdout();
-            writeln!(out, "ready").unwrap();
+            writeln!(out, "\n{READY_MARKER}").unwrap();
             out.flush().unwrap();
             let _ = std::io::stdin().read(&mut [0u8; 1]);
             return;
         }
 
-        let _guard = FOREGROUND_ENV_LOCK.lock().unwrap();
+        let _guard = FOREGROUND_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = TestTempDir::new("win-replay-selector");
         let parent_dir = dir.path().join("parent-claude");
         let child_dir = dir.path().join("child-claude");
@@ -3194,32 +3209,35 @@ mod tests {
         // Live Claude session file resolves exact --resume <id> from a child process's
         // distinct CLAUDE_CONFIG_DIR via windows::env_var (not the parent's std::env fallback).
         let exe = std::env::current_exe().expect("current_exe");
-        let mut child = prismattyc_process::spawn(
-            std::process::Command::new(exe)
-                .args([
-                    "--exact",
-                    "procinfo::tests::windows_replay_command_resolves_claude_and_fails_safe_on_ambiguous_latest",
-                    "--nocapture",
-                ])
-                .env("PMUX_WIN_ENV_HELPER", "1")
-                .env("CLAUDE_CONFIG_DIR", &child_dir)
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped()),
-        )
-        .expect("spawn windows env helper");
+        let mut child = ChildGuard(
+            prismattyc_process::spawn(
+                std::process::Command::new(exe)
+                    .args([
+                        "--exact",
+                        "procinfo::tests::windows_replay_command_resolves_claude_and_fails_safe_on_ambiguous_latest",
+                        "--nocapture",
+                    ])
+                    .env("PMUX_WIN_ENV_HELPER", "1")
+                    .env("CLAUDE_CONFIG_DIR", &child_dir)
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null()),
+            )
+            .expect("spawn windows env helper"),
+        );
 
-        let mut reader = BufReader::new(child.stdout.take().unwrap());
+        let mut reader = BufReader::new(child.0.stdout.take().unwrap());
         let mut line = String::new();
         loop {
             line.clear();
             let n = reader.read_line(&mut line).expect("read helper ready");
             assert!(n > 0, "helper exited before printing ready");
-            if line.trim() == "ready" {
+            if line.trim() == READY_MARKER {
                 break;
             }
         }
 
-        let child_pid = child.id();
+        let child_pid = child.0.id();
         std::fs::write(
             parent_dir
                 .join("sessions")
@@ -3243,8 +3261,7 @@ mod tests {
             args(&["claude.exe", "--model", "opus", "Initial prompt"]),
         )
         .expect("live claude session");
-        drop(child.stdin.take());
-        let _ = child.wait();
+        drop(child);
 
         assert!(claude_live.contains("--resume"), "{claude_live}");
         assert!(claude_live.contains("claude-win-77"), "{claude_live}");
@@ -3258,6 +3275,7 @@ mod tests {
     #[test]
     fn live_fd_and_session_files_resolve_exact_agent_selectors() {
         use std::io::{BufRead, BufReader, Read, Write};
+        const READY_MARKER: &str = "PMUX_FD_HOLDER_READY";
         if let Ok(raw) = std::env::var("PMUX_FD_HOLDER_FILES") {
             let _held: Vec<_> = raw
                 .split('\n')
@@ -3265,7 +3283,7 @@ mod tests {
                 .map(|p| std::fs::File::open(p).expect("open fixture fd"))
                 .collect();
             let mut out = std::io::stdout();
-            writeln!(out, "ready").unwrap();
+            writeln!(out, "\n{READY_MARKER}").unwrap();
             out.flush().unwrap();
             let _ = std::io::stdin().read(&mut [0u8; 1]);
             return;
@@ -3306,31 +3324,34 @@ mod tests {
             grok_events.display()
         );
         let exe = std::env::current_exe().expect("current_exe");
-        let mut codex_child = prismattyc_process::spawn(
-            std::process::Command::new(exe)
-                .args([
-                    "--exact",
-                    "procinfo::tests::live_fd_and_session_files_resolve_exact_agent_selectors",
-                    "--nocapture",
-                ])
-                .env("PMUX_FD_HOLDER_FILES", files)
-                .env("CLAUDE_CONFIG_DIR", &claude_cfg)
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped()),
-        )
-        .expect("spawn fd holder");
+        let mut codex_child = ChildGuard(
+            prismattyc_process::spawn(
+                std::process::Command::new(exe)
+                    .args([
+                        "--exact",
+                        "procinfo::tests::live_fd_and_session_files_resolve_exact_agent_selectors",
+                        "--nocapture",
+                    ])
+                    .env("PMUX_FD_HOLDER_FILES", files)
+                    .env("CLAUDE_CONFIG_DIR", &claude_cfg)
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null()),
+            )
+            .expect("spawn fd holder"),
+        );
 
-        let mut reader = BufReader::new(codex_child.stdout.take().unwrap());
+        let mut reader = BufReader::new(codex_child.0.stdout.take().unwrap());
         let mut line = String::new();
         loop {
             line.clear();
             let n = reader.read_line(&mut line).unwrap();
             assert!(n > 0, "fixture closed before ready");
-            if line.trim() == "ready" {
+            if line.trim() == READY_MARKER {
                 break;
             }
         }
-        let pid = codex_child.id();
+        let pid = codex_child.0.id();
 
         std::fs::write(
             claude_cfg.join(format!("sessions/{pid}.json")),
@@ -3368,8 +3389,7 @@ mod tests {
             "grok --resume grok-exact-88 --model grok-4"
         );
 
-        let _ = codex_child.kill();
-        let _ = codex_child.wait();
+        drop(codex_child);
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

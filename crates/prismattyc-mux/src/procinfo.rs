@@ -588,11 +588,17 @@ pub(crate) fn interactive_shell(spawn: &crate::SpawnSpec) -> bool {
             .argv
             .iter()
             .all(|arg| matches!(arg.as_str(), "-l" | "--login" | "-i"));
-    let windows = cfg!(windows)
-        && spawn
+    #[cfg(windows)]
+    let windows = spawn.argv.is_empty()
+        && (spawn
             .program
             .eq_ignore_ascii_case(&crate::platform::default_shell())
-        && spawn.argv.is_empty();
+            || matches!(
+                executable_name(&spawn.program).as_str(),
+                "cmd" | "powershell" | "pwsh"
+            ));
+    #[cfg(not(windows))]
+    let windows = false;
     posix || windows
 }
 
@@ -606,7 +612,7 @@ pub(crate) fn replay_spawn_command(spawn: &crate::SpawnSpec, pid: Option<u32>) -
         .chain(spawn.argv.iter().cloned())
         .collect::<Vec<_>>();
     let mut owner = pid;
-    let spawn_is_shell = is_shell_argv(&args);
+    let spawn_is_shell = is_hook_shell_argv(&args);
     if !is_agent_argv(&args) {
         if let Some((foreground, live_args)) = pid
             .and_then(foreground_process_args)
@@ -654,7 +660,7 @@ pub(crate) fn spawn_needs_resume_rewrite(spawn: &crate::SpawnSpec, pid: u32) -> 
     if is_agent_argv(&spawn_args) {
         return true;
     }
-    if !is_shell_argv(&spawn_args) {
+    if !is_hook_shell_argv(&spawn_args) {
         return false;
     }
     if foreground_process_args(pid).is_some_and(|(_, args)| is_agent_argv(&args)) {
@@ -1309,10 +1315,23 @@ fn resolve_claude_session_id(pid: u32) -> Option<String> {
 }
 
 fn resolve_claude_session_id_in_dir(config_dir: &Path, pid: u32) -> Option<String> {
-    let mut candidates = vec![pid];
-    let mut children = children_of(pid);
-    children.sort_unstable();
-    candidates.extend(children);
+    let mut seen = HashSet::new();
+    let mut candidates = Vec::new();
+    let mut queue = VecDeque::from([pid]);
+    seen.insert(pid);
+    while let Some(current) = queue.pop_front() {
+        candidates.push(current);
+        if candidates.len() >= 64 {
+            break;
+        }
+        let mut children = children_of(current);
+        children.sort_unstable();
+        for child in children {
+            if seen.insert(child) {
+                queue.push_back(child);
+            }
+        }
+    }
     for candidate in candidates {
         let session_file = config_dir
             .join("sessions")
@@ -3106,6 +3125,83 @@ mod tests {
             "grok", "--resume", "conv-3", "--model", "grok-4"
         ])));
         assert!(!uses_ambiguous_latest_selector(&args(&["cargo", "watch"])));
+
+        // Windows executable paths and extensions must classify identically so
+        // resume rewriting, selector resolution, and fail-safe guards engage.
+        assert_eq!(
+            resume_args(args(&[
+                r"C:\w\agent\claude.exe",
+                "--model",
+                "opus",
+                "seat1",
+            ])),
+            args(&[r"C:\w\agent\claude.exe", "--continue", "--model", "opus"])
+        );
+        assert_eq!(
+            resume_args(args(&[
+                r"C:\w\agent\claude.exe",
+                "--resume",
+                "claude-exact-seat1",
+                "--model",
+                "opus",
+                "seat1",
+            ])),
+            args(&[
+                r"C:\w\agent\claude.exe",
+                "--resume",
+                "claude-exact-seat1",
+                "--model",
+                "opus",
+            ])
+        );
+        assert_eq!(
+            resume_args(args(&[r"C:\w\agent\codex.exe", "--model", "o3", "prompt"])),
+            args(&[r"C:\w\agent\codex.exe", "resume", "--last", "--model", "o3"])
+        );
+        assert_eq!(
+            resume_args(args(&[
+                r"C:\w\agent\grok.exe",
+                "--model",
+                "grok-4",
+                "-p",
+                "prompt",
+            ])),
+            args(&[r"C:\w\agent\grok.exe", "--continue", "--model", "grok-4"])
+        );
+        assert!(uses_ambiguous_latest_selector(&args(&[
+            r"C:\w\agent\claude.exe",
+            "--continue",
+            "--model",
+            "opus",
+        ])));
+        assert!(uses_ambiguous_latest_selector(&args(&[
+            r"C:\w\agent\codex.exe",
+            "resume",
+            "--last",
+            "--model",
+            "o3",
+        ])));
+        assert!(uses_ambiguous_latest_selector(&args(&[
+            r"C:\w\agent\grok.exe",
+            "--continue",
+            "--model",
+            "grok-4",
+        ])));
+        assert!(is_agent_argv(&args(&[
+            r"C:\w\agent\claude.exe",
+            "--model",
+            "opus",
+            "seat1",
+        ])));
+        assert!(spawn_needs_resume_rewrite(
+            &crate::SpawnSpec {
+                program: r"C:\w\agent\claude.exe".into(),
+                argv: args(&["--model", "opus", "seat1"]),
+                cwd: None,
+                env: Default::default(),
+            },
+            pid,
+        ));
     }
 
     #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
@@ -3258,7 +3354,12 @@ mod tests {
         );
         let claude_live = windows_replay_command(
             Some(child_pid),
-            args(&["claude.exe", "--model", "opus", "Initial prompt"]),
+            args(&[
+                r"C:\w\agent\claude.exe",
+                "--model",
+                "opus",
+                "Initial prompt",
+            ]),
         )
         .expect("live claude session");
         drop(child);

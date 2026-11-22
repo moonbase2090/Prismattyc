@@ -197,6 +197,9 @@ pub(super) struct Component {
     /// What the user does next, for a deferred or unanswered component.
     #[serde(skip_serializing_if = "Option::is_none")]
     next: Option<String>,
+    /// Plug-in reconciliation failures. Empty for every other component.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    failures: Vec<String>,
 }
 
 /// The restart step.
@@ -240,9 +243,17 @@ fn component_from(value: &Value) -> Component {
         value
     };
     let status = text(&source["status"]).unwrap_or_else(|| "unknown".into());
+    let failures = failure_lines(&value["failures"]);
     let detail = text(&source["detail"])
         .map(|detail| detail.trim().to_string())
         .filter(|detail| !detail.is_empty())
+        .or_else(|| {
+            if failures.is_empty() {
+                None
+            } else {
+                Some(failures.join("; "))
+            }
+        })
         .or_else(|| {
             value["sessions"]
                 .as_array()
@@ -255,7 +266,21 @@ fn component_from(value: &Value) -> Component {
         next,
         status,
         component: name,
+        failures,
     }
+}
+
+/// Strings from a restart report's `failures` array.
+fn failure_lines(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// The next action for a component that did not restart.
@@ -293,6 +318,7 @@ pub(super) fn with_idle_hosts(mut components: Vec<Component>, idle: &[u32]) -> V
             pid: Some(u64::from(pid)),
             detail: Some("open but idle, so it was not asked to restart".into()),
             next: next_action("host", "idle"),
+            failures: Vec::new(),
         });
     }
     components
@@ -356,7 +382,12 @@ pub(super) struct Receipt {
 
 impl Receipt {
     pub(super) fn new(previous: String, core: Core, launcher: Launcher, restart: Restart) -> Self {
-        let failed = !launcher.ok() || matches!(restart, Restart::Failed { .. });
+        let component_failed = matches!(
+            &restart,
+            Restart::Ran { components } if components.iter().any(|component| component.status == "failed")
+        );
+        let failed =
+            !launcher.ok() || matches!(restart, Restart::Failed { .. }) || component_failed;
         let deferred = match &restart {
             Restart::Ran { components } => components.iter().any(|c| c.next.is_some()),
             Restart::Skipped { stale } => !stale.is_empty(),
@@ -1022,6 +1053,62 @@ mod tests {
         assert_eq!(
             receipt.text().lines().next(),
             Some("Prismattyc 0.3.73 is up to date.")
+        );
+    }
+
+    #[test]
+    fn a_failed_plugin_reconciliation_is_incomplete_and_names_the_failures() {
+        let components = restart_from(
+            &json!({"status":"restart_results","components":[
+                {"component":"daemon","status":"restarted"},
+                {
+                    "component":"plugins",
+                    "status":"failed",
+                    "changed":["org.moonbase.activity-monitor"],
+                    "failures":["org.moonbase.activity-connector: could not start"],
+                },
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let plugins = components
+            .iter()
+            .find(|component| component.component == "plugins")
+            .unwrap();
+        assert_eq!(plugins.status, "failed");
+        assert_eq!(
+            plugins.detail.as_deref(),
+            Some("org.moonbase.activity-connector: could not start")
+        );
+        assert_eq!(
+            plugins.failures,
+            vec!["org.moonbase.activity-connector: could not start".to_string()]
+        );
+        let receipt = Receipt::new(
+            "0.3.72".into(),
+            installed(),
+            repaired(),
+            Restart::Ran { components },
+        );
+        assert_eq!(receipt.status, "incomplete");
+        assert!(!receipt.ok());
+        let text = receipt.text();
+        assert_eq!(
+            text.lines().next(),
+            Some("Update to 0.3.73 is incomplete (from 0.3.72)."),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "  Official plug-ins: failed (org.moonbase.activity-connector: could not start)"
+            ),
+            "{text}"
+        );
+        let value = serde_json::to_value(&receipt).unwrap();
+        assert_eq!(value["status"], "incomplete");
+        assert_eq!(
+            value["restart"]["components"][1]["failures"][0],
+            "org.moonbase.activity-connector: could not start"
         );
     }
 

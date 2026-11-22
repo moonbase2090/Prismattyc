@@ -3111,10 +3111,21 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_replay_command_resolves_claude_and_fails_safe_on_ambiguous_latest() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        if std::env::var_os("PMUX_WIN_ENV_HELPER").is_some() {
+            let mut out = std::io::stdout();
+            writeln!(out, "ready").unwrap();
+            out.flush().unwrap();
+            let _ = std::io::stdin().read(&mut [0u8; 1]);
+            return;
+        }
+
         let _guard = FOREGROUND_ENV_LOCK.lock().unwrap();
         let dir = TestTempDir::new("win-replay-selector");
-        let sessions = dir.path().join("sessions");
-        std::fs::create_dir_all(&sessions).unwrap();
+        let parent_dir = dir.path().join("parent-claude");
+        let child_dir = dir.path().join("child-claude");
+        std::fs::create_dir_all(parent_dir.join("sessions")).unwrap();
+        std::fs::create_dir_all(child_dir.join("sessions")).unwrap();
 
         let prev = std::env::var_os("CLAUDE_CONFIG_DIR");
         struct RestoreEnv(Option<OsString>);
@@ -3127,7 +3138,8 @@ mod tests {
             }
         }
         let _restore = RestoreEnv(prev);
-        std::env::set_var("CLAUDE_CONFIG_DIR", dir.path());
+        // Point the test process at a decoy directory so std::env fallback cannot pass the test.
+        std::env::set_var("CLAUDE_CONFIG_DIR", &parent_dir);
 
         let args = |items: &[&str]| items.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
 
@@ -3179,20 +3191,64 @@ mod tests {
         assert!(grok_explicit.contains("grok-4"), "{grok_explicit}");
         assert!(!grok_explicit.contains("Prompt"), "{grok_explicit}");
 
-        // Live Claude session file resolves exact --resume <id> on Windows.
-        let pid = std::process::id();
+        // Live Claude session file resolves exact --resume <id> from a child process's
+        // distinct CLAUDE_CONFIG_DIR via windows::env_var (not the parent's std::env fallback).
+        let exe = std::env::current_exe().expect("current_exe");
+        let mut child = prismattyc_process::spawn(
+            std::process::Command::new(exe)
+                .args([
+                    "--exact",
+                    "procinfo::tests::windows_replay_command_resolves_claude_and_fails_safe_on_ambiguous_latest",
+                    "--nocapture",
+                ])
+                .env("PMUX_WIN_ENV_HELPER", "1")
+                .env("CLAUDE_CONFIG_DIR", &child_dir)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped()),
+        )
+        .expect("spawn windows env helper");
+
+        let mut reader = BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let n = reader.read_line(&mut line).expect("read helper ready");
+            assert!(n > 0, "helper exited before printing ready");
+            if line.trim() == "ready" {
+                break;
+            }
+        }
+
+        let child_pid = child.id();
         std::fs::write(
-            sessions.join(format!("{pid}.json")),
-            format!(r#"{{"pid":{pid},"sessionId":"claude-win-77"}}"#),
+            parent_dir
+                .join("sessions")
+                .join(format!("{child_pid}.json")),
+            format!(r#"{{"pid":{child_pid},"sessionId":"decoy-parent-env"}}"#),
         )
         .unwrap();
+        std::fs::write(
+            child_dir.join("sessions").join(format!("{child_pid}.json")),
+            format!(r#"{{"pid":{child_pid},"sessionId":"claude-win-77"}}"#),
+        )
+        .unwrap();
+
+        assert_eq!(
+            windows::env_var(child_pid, b"CLAUDE_CONFIG_DIR"),
+            Some(child_dir.as_os_str().to_os_string()),
+            "windows::env_var must read the child process's distinct CLAUDE_CONFIG_DIR"
+        );
         let claude_live = windows_replay_command(
-            Some(pid),
+            Some(child_pid),
             args(&["claude.exe", "--model", "opus", "Initial prompt"]),
         )
         .expect("live claude session");
+        drop(child.stdin.take());
+        let _ = child.wait();
+
         assert!(claude_live.contains("--resume"), "{claude_live}");
         assert!(claude_live.contains("claude-win-77"), "{claude_live}");
+        assert!(!claude_live.contains("decoy-parent-env"), "{claude_live}");
         assert!(claude_live.contains("opus"), "{claude_live}");
         assert!(!claude_live.contains("--continue"), "{claude_live}");
         assert!(!claude_live.contains("Initial prompt"), "{claude_live}");

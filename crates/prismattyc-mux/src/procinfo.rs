@@ -4,9 +4,7 @@
 //! only. Inode-level socket ownership stays Linux-only.
 
 use std::collections::{HashSet, VecDeque};
-use std::ffi::OsStr;
-#[cfg(not(windows))]
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 /// Whether `/proc/<pid>` (Linux) or `kill(pid, 0)` says the pid exists.
@@ -638,8 +636,7 @@ pub(crate) fn replay_spawn_command(spawn: &crate::SpawnSpec, pid: Option<u32>) -
     }
     #[cfg(windows)]
     {
-        let _ = owner;
-        replay_command(&args)
+        windows_replay_command(owner, args)
     }
 }
 
@@ -693,7 +690,9 @@ pub fn live_foreground_command(root: u32) -> Option<String> {
     #[cfg(windows)]
     {
         match windows::foreground(root) {
-            windows::Foreground::Running { args, .. } => replay_command(&args),
+            windows::Foreground::Running { pid, args, .. } => {
+                windows_replay_command(Some(pid), args)
+            }
             _ => None,
         }
     }
@@ -1136,7 +1135,37 @@ fn unix_replay_command(pid: u32, args: Vec<String>) -> String {
     shell_join(&args)
 }
 
-#[cfg(not(windows))]
+#[cfg(windows)]
+fn windows_replay_command(pid: Option<u32>, args: Vec<String>) -> Option<String> {
+    let mut args = resume_args(args);
+    if let Some(pid) = pid {
+        resolve_live_agent_selector(pid, &mut args);
+    }
+    if uses_ambiguous_latest_selector(&args) {
+        return None;
+    }
+    windows::command(&args)
+}
+
+#[cfg(any(windows, test))]
+fn uses_ambiguous_latest_selector(args: &[String]) -> bool {
+    use crate::inject_submit::InjectAgent;
+
+    let Some(program) = args.first() else {
+        return false;
+    };
+    match crate::inject_submit::classify_agent_argv0(program) {
+        Some(InjectAgent::Codex) => {
+            args.get(1).map(String::as_str) == Some("resume")
+                && args.get(2).map(String::as_str) == Some("--last")
+        }
+        Some(InjectAgent::Claude | InjectAgent::Grok) => {
+            args.get(1).map(String::as_str) == Some("--continue")
+        }
+        _ => false,
+    }
+}
+
 fn resolve_live_agent_selector(pid: u32, args: &mut Vec<String>) {
     use crate::inject_submit::InjectAgent;
 
@@ -1167,7 +1196,6 @@ fn resolve_live_agent_selector(pid: u32, args: &mut Vec<String>) {
     }
 }
 
-#[cfg(not(windows))]
 fn valid_session_selector(id: &str) -> bool {
     !id.is_empty()
         && !id.starts_with('-')
@@ -1177,7 +1205,6 @@ fn valid_session_selector(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
 }
 
-#[cfg(not(windows))]
 fn resolve_codex_rollout_id(pid: u32) -> Option<String> {
     let mut candidates = vec![pid];
     let mut children = children_of(pid);
@@ -1195,7 +1222,6 @@ fn resolve_codex_rollout_id(pid: u32) -> Option<String> {
     None
 }
 
-#[cfg(not(windows))]
 fn codex_rollout_id_from_file(path: &Path) -> Option<String> {
     let name = path.file_name()?.to_str()?;
     if !(name.starts_with("rollout-") && name.ends_with(".jsonl")) {
@@ -1237,7 +1263,6 @@ fn codex_rollout_id_from_file(path: &Path) -> Option<String> {
     valid_session_selector(id).then(|| id.to_owned())
 }
 
-#[cfg(not(windows))]
 fn uuid_suffix_from_rollout_name(name: &str) -> Option<&str> {
     let stem = name.strip_suffix(".jsonl")?;
     let uuid = stem.len().checked_sub(36).map(|start| &stem[start..])?;
@@ -1254,7 +1279,6 @@ fn uuid_suffix_from_rollout_name(name: &str) -> Option<&str> {
     is_uuid.then_some(uuid)
 }
 
-#[cfg(not(windows))]
 fn read_first_line_bounded(path: &Path, max_bytes: usize) -> Option<String> {
     use std::io::{BufRead, BufReader, Read};
     let file = std::fs::File::open(path).ok()?;
@@ -1267,17 +1291,24 @@ fn read_first_line_bounded(path: &Path, max_bytes: usize) -> Option<String> {
     Some(line)
 }
 
-#[cfg(not(windows))]
 fn resolve_claude_session_id(pid: u32) -> Option<String> {
     let config_dir = process_env_var(pid, b"CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
         .or_else(|| {
             process_env_var(pid, b"HOME")
-                .map(PathBuf::from)
-                .map(|home| home.join(".claude"))
+                .or_else(|| process_env_var(pid, b"USERPROFILE"))
+                .map(|home| PathBuf::from(home).join(".claude"))
         })
         .or_else(|| std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from))
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")))?;
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(|home| PathBuf::from(home).join(".claude"))
+        })?;
+    resolve_claude_session_id_in_dir(&config_dir, pid)
+}
+
+fn resolve_claude_session_id_in_dir(config_dir: &Path, pid: u32) -> Option<String> {
     let mut candidates = vec![pid];
     let mut children = children_of(pid);
     children.sort_unstable();
@@ -1309,7 +1340,6 @@ fn resolve_claude_session_id(pid: u32) -> Option<String> {
     None
 }
 
-#[cfg(not(windows))]
 fn resolve_grok_session_id(pid: u32) -> Option<String> {
     let mut candidates = vec![pid];
     let mut children = children_of(pid);
@@ -1450,6 +1480,11 @@ fn process_path(_pid: u32) -> Option<OsString> {
     None
 }
 
+#[cfg(windows)]
+fn process_env_var(pid: u32, key: &[u8]) -> Option<OsString> {
+    windows::env_var(pid, key)
+}
+
 #[cfg(all(not(windows), not(any(target_os = "linux", target_os = "macos"))))]
 fn process_env_var(_pid: u32, _key: &[u8]) -> Option<OsString> {
     None
@@ -1471,7 +1506,7 @@ fn open_fd_paths(pid: u32) -> Vec<PathBuf> {
     macos::open_fd_paths(pid)
 }
 
-#[cfg(all(not(windows), not(any(target_os = "linux", target_os = "macos"))))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn open_fd_paths(_pid: u32) -> Vec<PathBuf> {
     Vec::new()
 }
@@ -2972,7 +3007,6 @@ mod tests {
         }
     }
 
-    #[cfg(not(windows))]
     #[test]
     fn codex_rollout_id_ignores_subagent_and_selects_main_rollout() {
         let dir = TestTempDir::new("codex-rollout");
@@ -3013,6 +3047,155 @@ mod tests {
             codex_rollout_id_from_file(&main_path).as_deref(),
             Some(main_id)
         );
+    }
+
+    #[test]
+    fn claude_session_file_resolver_and_ambiguous_selector_guard() {
+        let dir = TestTempDir::new("claude-session-file");
+        let sessions = dir.path().join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let pid = std::process::id();
+
+        std::fs::write(
+            sessions.join(format!("{pid}.json")),
+            format!(r#"{{"pid":{},"sessionId":"wrong-pid-id"}}"#, pid + 1),
+        )
+        .unwrap();
+        assert_eq!(resolve_claude_session_id_in_dir(dir.path(), pid), None);
+
+        std::fs::write(
+            sessions.join(format!("{pid}.json")),
+            format!(r#"{{"pid":{pid},"sessionId":"--bad-flag"}}"#),
+        )
+        .unwrap();
+        assert_eq!(resolve_claude_session_id_in_dir(dir.path(), pid), None);
+
+        std::fs::write(
+            sessions.join(format!("{pid}.json")),
+            format!(r#"{{"pid":{pid},"sessionId":"claude-exact-42"}}"#),
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_claude_session_id_in_dir(dir.path(), pid).as_deref(),
+            Some("claude-exact-42")
+        );
+
+        let args = |items: &[&str]| items.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        assert!(uses_ambiguous_latest_selector(&args(&[
+            "codex", "resume", "--last", "--model", "o3"
+        ])));
+        assert!(!uses_ambiguous_latest_selector(&args(&[
+            "codex", "resume", "conv-1", "--model", "o3"
+        ])));
+        assert!(uses_ambiguous_latest_selector(&args(&[
+            "claude",
+            "--continue",
+            "--model",
+            "opus"
+        ])));
+        assert!(!uses_ambiguous_latest_selector(&args(&[
+            "claude", "--resume", "conv-2", "--model", "opus"
+        ])));
+        assert!(uses_ambiguous_latest_selector(&args(&[
+            "grok",
+            "--continue",
+            "--model",
+            "grok-4"
+        ])));
+        assert!(!uses_ambiguous_latest_selector(&args(&[
+            "grok", "--resume", "conv-3", "--model", "grok-4"
+        ])));
+        assert!(!uses_ambiguous_latest_selector(&args(&["cargo", "watch"])));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_replay_command_resolves_claude_and_fails_safe_on_ambiguous_latest() {
+        let _guard = FOREGROUND_ENV_LOCK.lock().unwrap();
+        let dir = TestTempDir::new("win-replay-selector");
+        let sessions = dir.path().join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+
+        let prev = std::env::var_os("CLAUDE_CONFIG_DIR");
+        struct RestoreEnv(Option<OsString>);
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) {
+                match self.0.as_ref() {
+                    Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+                    None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+                }
+            }
+        }
+        let _restore = RestoreEnv(prev);
+        std::env::set_var("CLAUDE_CONFIG_DIR", dir.path());
+
+        let args = |items: &[&str]| items.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+
+        // Unselected launches without a resolvable live selector must fail safe (None)
+        // instead of falling back to --last / --continue.
+        assert_eq!(
+            windows_replay_command(None, args(&["codex.exe", "--model", "o3", "Read prompt"])),
+            None
+        );
+        assert_eq!(
+            windows_replay_command(None, args(&["grok.exe", "--model", "grok-4", "-p", "Task"])),
+            None
+        );
+        assert_eq!(
+            windows_replay_command(None, args(&["claude.exe", "--model", "opus", "Task"])),
+            None
+        );
+
+        // Explicit selectors are preserved without startup prompts.
+        let codex_explicit = windows_replay_command(
+            None,
+            args(&[
+                "codex.exe",
+                "resume",
+                "codex-win-1",
+                "--model",
+                "o3",
+                "Prompt",
+            ]),
+        )
+        .expect("explicit codex resume");
+        assert!(codex_explicit.contains("codex-win-1"), "{codex_explicit}");
+        assert!(!codex_explicit.contains("Prompt"), "{codex_explicit}");
+
+        let grok_explicit = windows_replay_command(
+            None,
+            args(&[
+                "grok.exe",
+                "--resume",
+                "grok-win-2",
+                "--model",
+                "grok-4",
+                "-p",
+                "Prompt",
+            ]),
+        )
+        .expect("explicit grok resume");
+        assert!(grok_explicit.contains("grok-win-2"), "{grok_explicit}");
+        assert!(grok_explicit.contains("grok-4"), "{grok_explicit}");
+        assert!(!grok_explicit.contains("Prompt"), "{grok_explicit}");
+
+        // Live Claude session file resolves exact --resume <id> on Windows.
+        let pid = std::process::id();
+        std::fs::write(
+            sessions.join(format!("{pid}.json")),
+            format!(r#"{{"pid":{pid},"sessionId":"claude-win-77"}}"#),
+        )
+        .unwrap();
+        let claude_live = windows_replay_command(
+            Some(pid),
+            args(&["claude.exe", "--model", "opus", "Initial prompt"]),
+        )
+        .expect("live claude session");
+        assert!(claude_live.contains("--resume"), "{claude_live}");
+        assert!(claude_live.contains("claude-win-77"), "{claude_live}");
+        assert!(claude_live.contains("opus"), "{claude_live}");
+        assert!(!claude_live.contains("--continue"), "{claude_live}");
+        assert!(!claude_live.contains("Initial prompt"), "{claude_live}");
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -3744,6 +3927,30 @@ mod windows {
                 .with_cwd(UpdateKind::Always),
         );
         system.process(pid).map(f)
+    }
+
+    pub(super) fn env_var(pid: u32, key: &[u8]) -> Option<OsString> {
+        let key = std::str::from_utf8(key).ok()?;
+        let mut system = System::new();
+        let pid = Pid::from_u32(pid);
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing().with_environ(UpdateKind::Always),
+        );
+        let process = system.process(pid)?;
+        for entry in process.environ() {
+            let Some(text) = entry.to_str() else {
+                continue;
+            };
+            let Some((name, value)) = text.split_once('=') else {
+                continue;
+            };
+            if name.eq_ignore_ascii_case(key) && !value.is_empty() {
+                return Some(OsString::from(value));
+            }
+        }
+        None
     }
     pub(super) fn process_tree() -> Option<Vec<(u32, u32)>> {
         use windows_sys::Win32::{Foundation::*, System::Diagnostics::ToolHelp::*};

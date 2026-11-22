@@ -322,11 +322,7 @@ fn private_key_end(words: &[&str], start: usize) -> Option<usize> {
 /// URL, a whole base64 secret key, and token-shaped pieces between
 /// punctuation (a query value, a header value, an argument).
 fn redacted_shapes(part: &str) -> String {
-    let token = part.trim_matches(['\'', '"']);
-    if base64_secret(token) {
-        return "[redacted]".to_owned();
-    }
-    let part = redacted_userinfo(part);
+    let part = redacted_base64_runs(&redacted_userinfo(part));
     let mut output = String::with_capacity(part.len());
     let mut piece = String::new();
     let flush = |piece: &mut String, output: &mut String| {
@@ -439,20 +435,59 @@ fn token_shape(piece: &str) -> bool {
         && piece
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
-        && mixed_case_and_digits(piece);
+        && mixed_case_and_digits(piece)
+        && random_looking(piece);
     prefixed || aws_key_id || jwt || opaque
 }
 
-/// A whole word that is a long base64 secret, such as an AWS secret access
-/// key, which can contain `/` and `+`. Paths start with `/` or carry `.`,
-/// `-` or `_`, so they do not match.
-fn base64_secret(token: &str) -> bool {
-    token.len() >= 40
-        && !token.starts_with('/')
-        && token
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '/' | '='))
-        && mixed_case_and_digits(token)
+/// Long base64 secrets anywhere in a word, such as an AWS secret access key
+/// or a signature in a query or header value, replaced with their padding.
+/// They can contain `/` and `+`, so they are found before the word is split
+/// at punctuation.
+fn redacted_base64_runs(part: &str) -> String {
+    let base64 = |ch: char| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '/');
+    let mut output = String::with_capacity(part.len());
+    let mut rest = part;
+    while let Some(start) = rest.find(base64) {
+        output.push_str(&rest[..start]);
+        rest = &rest[start..];
+        let end = rest.find(|ch| !base64(ch)).unwrap_or(rest.len());
+        let run = &rest[..end];
+        rest = &rest[end..];
+        if base64_secret(run) {
+            output.push_str("[redacted]");
+            rest = rest.trim_start_matches('=');
+        } else {
+            output.push_str(run);
+        }
+    }
+    output.push_str(rest);
+    output
+}
+
+/// A long run of base64 that reads as random: paths start with `/`, and path
+/// or camel-case words change between upper case, lower case and digits far
+/// less often than random keys do.
+fn base64_secret(run: &str) -> bool {
+    run.len() >= 40 && !run.starts_with('/') && mixed_case_and_digits(run) && random_looking(run)
+}
+
+/// Whether at least 35% of adjacent letters and digits switch class between
+/// upper case, lower case and digit. Random base64 switches about 60% of the
+/// time; words, paths and camel-case names about 30% or less.
+fn random_looking(value: &str) -> bool {
+    let classes: Vec<u8> = value
+        .chars()
+        .filter_map(|ch| match ch {
+            'A'..='Z' => Some(0),
+            'a'..='z' => Some(1),
+            '0'..='9' => Some(2),
+            _ => None,
+        })
+        .collect();
+    let pairs = classes.len().saturating_sub(1);
+    let switches = classes.windows(2).filter(|pair| pair[0] != pair[1]).count();
+    pairs > 0 && switches * 100 >= pairs * 35
 }
 
 fn mixed_case_and_digits(value: &str) -> bool {
@@ -1298,6 +1333,7 @@ mod tests {
         );
         let opaque = shaped("Zq8Lm2Np4Rt6Vx9B", "c3Df5Gh7Jk1Mw0Ys");
         let aws_secret = shaped("wJalrXUtnFEMI/K7MDENG/", "bPxRfiCY2EXAMPLEKEY");
+        let signed = shaped("Zk9vYmFy+QmF6/", "UXV4Q29yZ2VHcmF1bHQ5OAx7Kp2Wq");
         let key = |marker: &str| format!("-----{marker} {} PRIVATE KEY-----", "OPENSSH");
         let cases = [
             (
@@ -1336,6 +1372,22 @@ mod tests {
             (
                 format!("configure set signing_value {aws_secret}"),
                 "configure set signing_value [redacted]".to_owned(),
+            ),
+            (
+                format!("curl 'https://store.example.test/b?Signature={signed}&Expires=1'"),
+                "curl 'https://store.example.test/b?Signature=[redacted]&Expires=1'".to_owned(),
+            ),
+            (
+                format!("http example.test X-Signing:{signed},next"),
+                "http example.test X-Signing:[redacted],next".to_owned(),
+            ),
+            (
+                format!("deploy --sig {signed}=="),
+                "deploy --sig [redacted]".to_owned(),
+            ),
+            (
+                format!("deploy --sig=({aws_secret});"),
+                "deploy --sig=([redacted]);".to_owned(),
             ),
             (
                 format!("curl https://hooks.example.test/x?sig={slack}"),
@@ -1400,6 +1452,9 @@ mod tests {
             "rename ExampleCamelCaseIdentifierNameWithoutDigits",
             "ls crates/prismattyc-mux/src/bin/pmux/activity_emit.rs",
             "echo -----BEGIN CERTIFICATE----- MIIBszCCAVmgAwIBAgIU -----END CERTIFICATE-----",
+            "curl https://git.example.test/moonbase2090/Prismattyc/releases/tag/v0.3.73",
+            "open https://docs.example.test/guides/GettingStarted/InstallingOnLinux2",
+            "cat src/main/java/com/example/AccountService/RetryPolicy2.java",
         ] {
             assert_eq!(redacted_command(command), command);
         }

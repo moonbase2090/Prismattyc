@@ -6713,20 +6713,22 @@ mod tests {
             socket: socket.clone(),
             data: root,
         };
+        // The socket file appears when pmuxd binds it, a moment before it
+        // listens; wait until a client is accepted.
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
-            if socket.exists() {
+            if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
                 return guard;
             }
             if let Some(status) = guard.child.try_wait().expect("poll private pmuxd") {
                 panic!(
-                    "private pmuxd exited with {status} before publishing {}",
+                    "private pmuxd exited with {status} before accepting on {}",
                     socket.display()
                 );
             }
             thread::sleep(Duration::from_millis(10));
         }
-        panic!("private pmuxd did not publish {}", socket.display());
+        panic!("private pmuxd did not accept on {}", socket.display());
     }
 
     #[cfg(unix)]

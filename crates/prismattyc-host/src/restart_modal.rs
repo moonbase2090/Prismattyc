@@ -20,6 +20,8 @@ const OPTIONS: [(&str, &str, update_flow::Action); 3] = [
 ];
 /// Selection index of the Show and Hide toggle, after the three choices.
 const TOGGLE: usize = OPTIONS.len();
+/// The link to the new release's notes, on the title line.
+const NOTES_LINK: &str = "Release notes";
 const EXPLANATION: &str = "Save the session configuration to recreate your sessions after restart. Unsaved work inside programs is not saved.";
 const SAVED: &str = "names, directories, launch commands, pane layouts";
 const KEYS: &str = "Enter select · Esc close · ↑↓ move";
@@ -51,12 +53,15 @@ pub(super) struct RestartModal {
     running: Option<Running>,
     /// Close was chosen after a failure.
     dismissed: bool,
+    /// The release notes link was chosen and its page is not open yet.
+    open_notes: bool,
 }
 
 #[derive(Clone, Copy, Default)]
 struct Hits {
     options: [Option<Rect>; 3],
     toggle: Option<Rect>,
+    notes: Option<Rect>,
 }
 
 impl RestartModal {
@@ -71,6 +76,7 @@ impl RestartModal {
             hits: Hits::default(),
             running: None,
             dismissed: false,
+            open_notes: false,
         }
     }
 
@@ -133,12 +139,20 @@ impl RestartModal {
         }
     }
 
+    /// Selection index of the release notes link: the last row, present
+    /// only when a new release replaces the installed one.
+    fn notes_index(&self) -> Option<usize> {
+        self.available
+            .as_ref()
+            .map(|_| TOGGLE + usize::from(!self.sessions.is_empty()))
+    }
+
     fn last(&self) -> usize {
-        if self.sessions.is_empty() {
+        self.notes_index().unwrap_or(if self.sessions.is_empty() {
             TOGGLE - 1
         } else {
             TOGGLE
-        }
+        })
     }
 
     /// Act on the selected row: choose an option or fold the session list.
@@ -154,7 +168,9 @@ impl RestartModal {
             }
             return;
         }
-        if index == TOGGLE {
+        if Some(index) == self.notes_index() {
+            self.open_notes = true;
+        } else if index == TOGGLE {
             self.expanded = !self.expanded;
         } else if let Some((_, _, action)) = OPTIONS.get(index) {
             self.chosen = Some(*action);
@@ -198,6 +214,14 @@ impl RestartModal {
         }
     }
 
+    /// The release page to open, once, after the link was chosen.
+    fn take_notes_url(&mut self) -> Option<String> {
+        if !std::mem::take(&mut self.open_notes) {
+            return None;
+        }
+        Some(update_notes::release_notes_url(self.available.as_deref()?))
+    }
+
     fn hit(&self, x: usize, y: usize) -> Option<usize> {
         let inside =
             |rect: &Rect| x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h;
@@ -211,6 +235,13 @@ impl RestartModal {
                     .as_ref()
                     .filter(|r| inside(r))
                     .map(|_| TOGGLE)
+            })
+            .or_else(|| {
+                self.hits
+                    .notes
+                    .as_ref()
+                    .filter(|r| inside(r))
+                    .and(self.notes_index())
             })
     }
 
@@ -251,6 +282,9 @@ impl RestartModal {
             .collect();
         if let Some(toggle) = self.toggle_label() {
             rows.push(format!("{toggle}: {}", self.summary()));
+        }
+        if let Some(available) = &self.available {
+            rows.push(format!("{NOTES_LINK}: What's new in {available}"));
         }
         rows
     }
@@ -298,6 +332,7 @@ impl RestartModal {
             // Physical pixels of the last frame, for pointer drivers.
             "option_rects": self.hits.options.iter().map(|r| r.map(|r| [r.x, r.y, r.w, r.h])).collect::<Vec<_>>(),
             "toggle_rect": self.hits.toggle.map(|r| [r.x, r.y, r.w, r.h]),
+            "notes_rect": self.hits.notes.map(|r| [r.x, r.y, r.w, r.h]),
         })
     }
 
@@ -400,6 +435,9 @@ pub(super) fn dispatch_key(host: &mut HostState, key: &Key, repeat: bool) {
         if !(repeat && matches!(key, Key::Named(NamedKey::Enter | NamedKey::Escape))) {
             modal.key(key);
         }
+        if let Some(url) = modal.take_notes_url() {
+            open_url(&url);
+        }
         if modal.dismissed {
             host.restart_modal = None;
         }
@@ -433,6 +471,9 @@ pub(super) fn handle_pointer(host: &mut HostState, event: &WindowEvent) -> bool 
                 let modal = host.restart_modal.as_mut().unwrap();
                 modal.selected = row;
                 modal.activate(row);
+                if let Some(url) = modal.take_notes_url() {
+                    open_url(&url);
+                }
                 if modal.dismissed {
                     host.restart_modal = None;
                 }
@@ -611,6 +652,41 @@ pub(super) fn paint(host: &mut HostState, buffer: &mut [u32], width: usize, heig
         tok.muted,
         clip,
     );
+    let mut hits = Hits::default();
+    if let Some(notes) = modal.notes_index() {
+        // Right-aligned on the title line, drawn only where it clears the
+        // version; the row stays reachable from the keyboard either way.
+        let version_end = x
+            + pad
+            + title_w
+            + s(14.0)
+            + graphite::text_width(Face::Mono, body_px, &modal.version()).ceil() as usize;
+        let w = graphite::text_width(Face::Regular, body_px, NOTES_LINK).ceil() as usize;
+        let lx = right.saturating_sub(pad + w);
+        if lx > version_end + s(16.0) {
+            let link = Rect::new(
+                lx.saturating_sub(s(6.0)),
+                cy.saturating_sub(line_h / 2),
+                w + s(12.0),
+                line_h,
+            );
+            if modal.selected == notes {
+                graphite::fill_round_rect(buffer, width, link, s(5.0) as f32, tok.tab_hover, 255);
+            }
+            text(
+                buffer,
+                width,
+                lx,
+                cy,
+                Face::Regular,
+                body_px,
+                NOTES_LINK,
+                accent,
+                (clip.0, right),
+            );
+            hits.notes = Some(link);
+        }
+    }
     cy += s(13.0) + s(8.0) + line_h / 2;
     for line in &explanation {
         text(
@@ -636,7 +712,6 @@ pub(super) fn paint(host: &mut HostState, buffer: &mut [u32], width: usize, heig
         255,
     );
     ry += s(8.0);
-    let mut hits = Hits::default();
     for (index, (label, hint, _)) in OPTIONS.iter().enumerate() {
         let row = Rect::new(x + s(8.0), ry, panel_w.saturating_sub(s(16.0)), row_h);
         if ry + row_h > bottom {
@@ -1074,8 +1149,45 @@ mod tests {
                 "Restart without saving: Sessions are discarded",
                 "Cancel: Nothing changes now",
                 "Show: 44 sessions · names, directories, launch commands, pane layouts",
+                "Release notes: What's new in 0.3.70",
             ]
         );
+    }
+
+    #[test]
+    fn release_notes_open_the_new_release_page_and_keep_the_dialog() {
+        let notes = "https://github.com/moonbase2090/Prismattyc/releases/tag/v0.3.70";
+        for sessions in [0, 2] {
+            let mut m = modal(sessions);
+            for _ in 0..10 {
+                m.key(&Key::Named(NamedKey::ArrowDown));
+            }
+            assert_eq!(m.selected, m.rows().len() - 1, "the link is the last row");
+            assert_eq!(m.take_notes_url(), None, "moving selects, it opens nothing");
+            m.key(&Key::Named(NamedKey::Enter));
+            assert_eq!(m.take_notes_url().as_deref(), Some(notes));
+            assert_eq!(m.take_notes_url(), None, "one press opens the page once");
+            assert!(m.chosen.is_none() && !m.dismissed, "the review stays open");
+        }
+
+        let mut m = modal(2);
+        m.hits.notes = Some(Rect::new(500, 20, 90, 22));
+        assert_eq!(m.hit(510, 30), Some(m.rows().len() - 1));
+        m.activate(m.rows().len() - 1);
+        assert_eq!(m.take_notes_url().as_deref(), Some(notes));
+        assert!(!m.expanded, "the link is not the session toggle");
+    }
+
+    #[test]
+    fn a_restart_without_a_new_release_has_no_release_notes() {
+        let mut m = RestartModal::new("0.3.69", None, Vec::new());
+        assert!(m.rows().iter().all(|row| !row.starts_with("Release notes")));
+        for _ in 0..10 {
+            m.key(&Key::Named(NamedKey::ArrowDown));
+        }
+        assert_eq!(m.selected, 2);
+        m.activate(3);
+        assert_eq!(m.take_notes_url(), None);
     }
 
     #[test]
@@ -1180,9 +1292,10 @@ mod tests {
         for _ in 0..10 {
             m.key(&Key::Named(NamedKey::ArrowDown));
         }
-        assert_eq!(m.selected, 2, "no toggle when nothing runs");
+        assert_eq!(m.selected, 3, "no toggle when nothing runs");
         assert_eq!(m.summary(), "No sessions are running");
-        assert_eq!(m.rows().len(), 3);
+        assert_eq!(m.rows().len(), 4);
+        assert_eq!(m.rows()[3], "Release notes: What's new in 0.3.70");
     }
 
     #[test]

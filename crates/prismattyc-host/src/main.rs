@@ -5290,31 +5290,29 @@ fn chrome_bounds(host: &HostState, overlay: &a11y::OverlayKind) -> a11y::ChromeB
         ..Default::default()
     };
     if sidebar_mode(host) {
-        if !host.spacing.sidebar_collapsed {
-            let row_rect = |want: &dyn Fn(&sidebar::TreeRow, &sidebar::SpaceNode) -> bool| {
-                host.sidebar_rows.iter().find_map(|(slot, row)| {
-                    let space = host.sidebar_tree.spaces.get(row.space)?;
-                    want(row, space).then_some(*slot)
+        // The painted rows: list rows when expanded, the icon strip when
+        // collapsed. Both are what the sidebar hit test reads.
+        let row_rect = |want: &dyn Fn(&sidebar::TreeRow, &sidebar::SpaceNode) -> bool| {
+            host.sidebar_rows.iter().find_map(|(slot, row)| {
+                let space = host.sidebar_tree.spaces.get(row.space)?;
+                want(row, space).then_some(*slot)
+            })
+        };
+        bounds.tabs = (0..host.mux.tab_count())
+            .map(|i| {
+                row_rect(&|row, space| {
+                    row.kind == sidebar::RowKind::Tab && space.current && row.tab == Some(i)
                 })
-            };
-            bounds.tabs = (0..host.mux.tab_count())
-                .map(|i| {
-                    row_rect(&|row, space| {
-                        row.kind == sidebar::RowKind::Tab && space.current && row.tab == Some(i)
-                    })
-                })
-                .collect();
-            bounds.rail = host
-                .space_rail
-                .names
-                .iter()
-                .map(|name| {
-                    row_rect(&|row, space| {
-                        row.kind == sidebar::RowKind::Space && space.name == *name
-                    })
-                })
-                .collect();
-        }
+            })
+            .collect();
+        bounds.rail = host
+            .space_rail
+            .names
+            .iter()
+            .map(|name| {
+                row_rect(&|row, space| row.kind == sidebar::RowKind::Space && space.name == *name)
+            })
+            .collect();
     } else {
         if show_tab_strip(host) {
             bounds.tabs = host.mux.tab_rects(width);

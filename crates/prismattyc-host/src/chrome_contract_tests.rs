@@ -121,6 +121,94 @@ fn verify_accessibility_bounds(host: &mut HostState) {
     host.palette = None;
     host.palette_layout = None;
     App::paint(host).unwrap();
+    verify_sidebar_accessibility_bounds(host);
+}
+
+/// In the sidebar layout, expanded or collapsed to its icon strip, every
+/// painted tab and Space row gives its node a frame, and the frame's center
+/// is where the sidebar hit test finds that same tab or Space.
+fn verify_sidebar_accessibility_bounds(host: &mut HostState) {
+    let layout = host.spacing.layout;
+    let collapsed = host.spacing.sidebar_collapsed;
+    let current = host.space_rail.current.replace("alpha".into());
+    host.spacing.layout = config::LayoutMode::Sidebar;
+    for strip in [false, true] {
+        host.spacing.sidebar_collapsed = strip;
+        App::paint(host).unwrap();
+        let snap = chrome_snapshot(host, None);
+        let mode = if strip { "collapsed" } else { "expanded" };
+        let row_at = |rect: graphite::Rect| {
+            let (x, y) = center(rect);
+            match sidebar_hit_at(host, x, y) {
+                Some(graphite::SidebarHit::Row(index)) => {
+                    host.sidebar_rows.get(index).map(|(_, row)| row.clone())
+                }
+                _ => None,
+            }
+        };
+        let painted = |kind: sidebar::RowKind| {
+            host.sidebar_rows
+                .iter()
+                .filter(|(slot, row)| {
+                    slot.w > 0
+                        && slot.h > 0
+                        && row.kind == kind
+                        && (kind == sidebar::RowKind::Space
+                            || host.sidebar_tree.spaces[row.space].current)
+                })
+                .count()
+        };
+        let tabs: Vec<_> = snap
+            .bounds
+            .tabs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| r.map(|r| (i, r)))
+            .collect();
+        assert!(
+            !tabs.is_empty() && tabs.len() == painted(sidebar::RowKind::Tab),
+            "{mode} sidebar: {} painted tab rows in the current Space, {} tab frames",
+            painted(sidebar::RowKind::Tab),
+            tabs.len()
+        );
+        for (index, rect) in tabs {
+            let row = row_at(rect);
+            assert!(
+                row.as_ref()
+                    .is_some_and(|row| row.kind == sidebar::RowKind::Tab
+                        && row.tab == Some(index)
+                        && host.sidebar_tree.spaces[row.space].current),
+                "{mode} sidebar: tab {index} frame center hit {row:?}"
+            );
+        }
+        let spaces: Vec<_> = snap
+            .bounds
+            .rail
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| r.map(|r| (i, r)))
+            .collect();
+        assert!(
+            !spaces.is_empty() && spaces.len() == painted(sidebar::RowKind::Space),
+            "{mode} sidebar: {} painted Space rows, {} Space frames",
+            painted(sidebar::RowKind::Space),
+            spaces.len()
+        );
+        for (index, rect) in spaces {
+            let row = row_at(rect);
+            assert!(
+                row.as_ref()
+                    .is_some_and(|row| row.kind == sidebar::RowKind::Space
+                        && host.sidebar_tree.spaces[row.space].name
+                            == host.space_rail.names[index]),
+                "{mode} sidebar: Space {index} frame center hit {row:?}"
+            );
+        }
+    }
+    host.spacing.layout = layout;
+    host.spacing.sidebar_collapsed = collapsed;
+    host.space_rail.current = current;
+    App::paint(host).unwrap();
 }
 
 fn verify_find_and_theme_modals(host: &mut HostState) {

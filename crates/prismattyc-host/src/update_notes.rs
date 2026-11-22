@@ -1,11 +1,14 @@
 //! Short update notices: the version, a few one-line highlights from the
 //! release notes, and a link to the full notes. A notice never carries the
-//! whole changelog.
+//! whole changelog. The macOS alert shows a few highlights; the one-line
+//! notice on Linux and Windows shows the top one.
 
 const RELEASES: &str = "https://github.com/moonbase2090/Prismattyc/releases";
 /// Highlights a notice shows at most.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub const MAX_HIGHLIGHTS: usize = 3;
 /// Characters one highlight keeps, including the closing ellipsis.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub const MAX_HIGHLIGHT_CHARS: usize = 80;
 
 /// The release page with the full notes for `version`, or the releases list
@@ -34,6 +37,7 @@ pub struct Highlights {
 
 /// Pick the highlights from changelog Markdown: the first top-level bullets,
 /// in the order the notes list them.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn release_highlights(release_notes: &str) -> Highlights {
     highlights(release_notes, MAX_HIGHLIGHTS, MAX_HIGHLIGHT_CHARS)
 }
@@ -55,6 +59,7 @@ pub fn highlights(release_notes: &str, count: usize, max_chars: usize) -> Highli
 
 /// The body of the update alert: the highlights as bullets and where the
 /// rest is. Never the changelog itself.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn update_notice_text(release_notes: &str) -> String {
     let Highlights { items, more } = release_highlights(release_notes);
     if items.is_empty() {

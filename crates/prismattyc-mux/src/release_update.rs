@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+mod complete;
+pub use complete::{repair_monitor_launcher, Launcher};
 mod monitor_launcher;
 pub mod progress;
 use progress::Progress;
@@ -1082,7 +1084,13 @@ pub fn run(args: &[String]) -> Result<()> {
         print_update_help();
         return Ok(());
     }
-    let options = options(args)?;
+    let (complete, args) = complete::select(args)?;
+    if let Some(plan) = complete {
+        // Check the install's own flags before anything runs.
+        options(&args)?;
+        return complete::run(&plan);
+    }
+    let options = options(&args)?;
     if options.progress {
         progress::enable();
     }
@@ -1109,7 +1117,7 @@ fn is_help_flag(arg: &String) -> bool {
 }
 
 fn print_update_help() {
-    println!("pmux update [--check] [--json] [--pre] [--progress] [--bin-dir PATH]\nprismattyc update [--check] [--json] [--pre] [--progress] [--bin-dir PATH]\npmux update --rollback\npmux update --repair-monitor-launcher [--from-monitor-version VERSION] [--bin-dir PATH] [--check] [--json]\npmux update --source [--host|--mux|--all]\n\nDownload a complete stable release from {REPOSITORY} (0.2.0 onward).\n--pre includes immutable prereleases such as v0.3.0-rc.3. The default channel and the app menu stay on stable releases such as v0.3.0.\n--progress writes staged progress (download bytes, verify and install steps) to stderr as lines starting with \"pmux-progress \" followed by JSON, in place of the human download lines.\nVerify immutable release metadata, asset sizes, and SHA-256 digests.\nOn Linux and Windows, stage all six binaries, then activate them together. --rollback restores that previous installation.\nOn macOS, verify SHA256SUMS-macos, Developer ID Team ID S24C53PD3Y, and Gatekeeper notarization. Keep the previous verified app for --rollback.\nThe explicit --repair-monitor-launcher operation verifies only the frontend matching the installed managed core, with a backup and independent receipt. --from-monitor-version establishes ownership of an unreceipted legacy frontend by its immutable official asset digest. --check verifies the plan without replacing the launcher, receipt, or backup. Core rollback remains a six-binary transaction. macOS uses normal app replacement.\nprismattyc update is the same command as pmux update.\nUpdating does not stop sessions. The app menu restarts the host and safely restarts the daemon when it has no active sessions.\n--source is an explicit development-only source build.");
+    println!("pmux update [--no-restart] [--pre] [--progress] [--bin-dir PATH]\npmux update --check [--json] [--pre]\npmux update --json [--restart|--no-restart] [--pre] [--progress] [--bin-dir PATH]\nprismattyc update takes the same options.\npmux update --rollback\npmux update --repair-monitor-launcher [--from-monitor-version VERSION] [--bin-dir PATH] [--check] [--json]\npmux update --source [--host|--mux|--all]\n\nWith no options, install the newest release, include its official monitor launcher (Linux and Windows), restart what can restart without stopping sessions, and print one receipt naming anything that has to wait and what to do next. Sessions keep running. --no-restart installs without restarting. --json alone only installs the six core executables or the app (the contract apps use); add --restart or --no-restart for the complete update with a JSON receipt.\n\nDownload a complete stable release from {REPOSITORY} (0.2.0 onward).\n--pre includes immutable prereleases such as v0.3.0-rc.3. The default channel and the app menu stay on stable releases such as v0.3.0.\n--progress writes staged progress (download bytes, verify and install steps) to stderr as lines starting with \"pmux-progress \" followed by JSON, in place of the human download lines.\nVerify immutable release metadata, asset sizes, and SHA-256 digests.\nOn Linux and Windows, stage all six binaries, then activate them together. --rollback restores that previous installation.\nOn macOS, verify SHA256SUMS-macos, Developer ID Team ID S24C53PD3Y, and Gatekeeper notarization. Keep the previous verified app for --rollback.\nThe explicit --repair-monitor-launcher operation verifies only the frontend matching the installed managed core, with a backup and independent receipt. --from-monitor-version establishes ownership of an unreceipted legacy frontend by its immutable official asset digest. --check verifies the plan without replacing the launcher, receipt, or backup. Core rollback remains a six-binary transaction. macOS uses normal app replacement.\nprismattyc update is the same command as pmux update.\nUpdating does not stop sessions. The daemon restarts only when it has no sessions; the app's Update and restart saves, stops and restores them.\n--source is an explicit development-only source build.");
 }
 
 /// Fetch the latest release, compare versions, and either report or install.

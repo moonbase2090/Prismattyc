@@ -46,7 +46,7 @@ for name in pmux pmuxd pmux-attach pmux-mcp prismattyc prismattyc-host pmux-acti
     [[ -f "$prefix/bin/$name" && ! -L "$prefix/bin/$name" ]] &&
       cmp --silent "bin/$name" "$prefix/bin/$name" || {
       if [[ "$name" == pmux-activity-monitor ]]; then
-        echo "An existing monitor launcher is installed in $prefix/bin. Update the core first, then run pmux update --repair-monitor-launcher. For an unreceipted official launcher, supply --from-monitor-version VERSION. Preserve unknown files before changing them." >&2
+        echo "An existing monitor launcher is installed in $prefix/bin. Run pmux update for that installation; it includes the matching launcher. An updater from 0.3.72 or earlier installs only the core: then run pmux update --repair-monitor-launcher, with --from-monitor-version VERSION for an unreceipted official launcher. Preserve unknown files before changing them." >&2
       else
         echo "An existing $name is installed in $prefix/bin. Use pmux update for that installation." >&2
       fi

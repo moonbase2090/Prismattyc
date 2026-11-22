@@ -662,7 +662,6 @@ mod tests {
 
     #[cfg(unix)]
     fn fake_mux_bin() -> String {
-        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!(
             "pt161-fake-mux-{}-{}",
             std::process::id(),
@@ -673,8 +672,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(prismattyc_mux::platform::executable_name("pmux"));
-        std::fs::write(&path, "#!/bin/sh\nexec sleep 30\n").unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_script(&path, "#!/bin/sh\nexec sleep 30\n", "755");
         path.to_string_lossy().into_owned()
     }
 

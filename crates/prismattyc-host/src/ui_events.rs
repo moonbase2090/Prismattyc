@@ -3,10 +3,11 @@
 //!
 //! With `PRISMATTYC_UI_EVENTS=1`, the app prints one stderr line after a
 //! presented frame whenever the update panel, the Restart to update dialog,
-//! the open modal or its scrim is in a different state from the last line.
-//! A line names only states and positions (which page, which row index is
-//! selected, the dialog's state and step number, the kind of modal), never
-//! row text or session names. A driver reads the app's
+//! the open modal or its scrim, or the status toasts are in a different state
+//! from the last line. A line names only states and positions (which page,
+//! which row index is selected, the dialog's state and step number, the kind
+//! of modal, each toast's kind and chip rectangle), never row text, toast text
+//! or session names. A driver reads the app's
 //! stderr and waits for these lines instead of polling or sleeping, then reads
 //! the rendered rows from render status for its checks: before a line is
 //! printed, the app publishes render status and waits for that write, so a
@@ -24,15 +25,35 @@ pub(super) fn enabled() -> bool {
 }
 
 /// What a driver can wait for: the update panel's page and selected row
-/// index, the dialog's state, selection and step, which modal is open, and
-/// whether the scrim under it has finished fading in and blurs.
+/// index, the dialog's state, selection and step, which modal is open,
+/// whether the scrim under it has finished fading in and blurs, and the
+/// status toasts with where to click them.
 pub(super) fn snapshot(host: &HostState) -> serde_json::Value {
     serde_json::json!({
         "panel": space_panel::update_state(host),
         "dialog": host.restart_modal.as_ref().map(restart_modal::RestartModal::state),
         "modal": open_modal(host),
         "scrim": host.modal_scrim.painted(),
+        "toasts": toasts(host),
     })
+}
+
+/// The status toasts on screen: their kind, where their chip is (device
+/// pixels in the window) and whether a click opens the Update and restart
+/// review. Bell and paste chips are left out.
+fn toasts(host: &HostState) -> Vec<serde_json::Value> {
+    host.bell_toasts
+        .iter()
+        .filter_map(|toast| {
+            let kind = match toast.status? {
+                ToastKind::Info => "info",
+                ToastKind::Error => "error",
+                ToastKind::Notice => "notice",
+            };
+            let (x, y, w, h) = bell_toast_rect(host, toast)?;
+            Some(serde_json::json!({"kind": kind, "opens_update": toast.opens_update, "rect": [x, y, w, h]}))
+        })
+        .collect()
 }
 
 /// The line for `snapshot` when it differs from `last`.

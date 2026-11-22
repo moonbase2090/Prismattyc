@@ -577,8 +577,7 @@ fn verify_startup_restore(app: &mut App, event_loop: &ActiveEventLoop) {
     let bin_dir = path.parent().unwrap().join("fixture-bin");
     std::fs::create_dir_all(&bin_dir).unwrap();
     let pmux = bin_dir.join(prismattyc_mux::platform::executable_name("pmux"));
-    std::fs::write(&pmux, "#!/bin/sh\nexit 1\n").unwrap();
-    std::fs::set_permissions(&pmux, std::fs::Permissions::from_mode(0o700)).unwrap();
+    crate::test_support::write_script(&pmux, "#!/bin/sh\nexit 1\n", "700");
     std::env::set_var("PMUX", pmux);
     let saved = attach_tabs::AttachTabsFile {
         tabs: vec![
@@ -986,6 +985,7 @@ fn verify_pixels_and_overlays(host: &mut HostState) {
         until: Instant::now() + Duration::from_secs(10),
         label: " test bell ".into(),
         status: None,
+        opens_update: false,
     });
     assert_ne!(
         frame(host),
@@ -2483,12 +2483,11 @@ fn update_notice_appears_once_in_a_private_window() {
     }
     let runtime = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap());
     let fake = runtime.join("fake-pmux");
-    std::fs::write(
+    crate::test_support::write_script(
         &fake,
         "#!/bin/sh\nprintf '{\"installed\":\"0.3.67\",\"available\":\"9.9.9\",\"update_available\":true}'\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        "755",
+    );
     std::env::set_var("PMUX", &fake);
 
     struct NoticeProof {
@@ -2545,7 +2544,27 @@ fn update_notice_appears_once_in_a_private_window() {
                     )
                     .unwrap();
                 }
-                host.bell_toasts.clear();
+                // A click on the notice opens the Update and restart review.
+                let toast = &host.bell_toasts[0];
+                let (x, y, w, h) = bell_toast_rect(host, toast).expect("the notice has a chip");
+                // A driver finds the same chip in the app's change lines.
+                assert_eq!(
+                    ui_events::snapshot(host)["toasts"],
+                    serde_json::json!([{"kind": "notice", "opens_update": true, "rect": [x, y, w, h]}])
+                );
+                host.pointer_px = Some(((x + w / 2) as f64, (y + h / 2) as f64));
+                assert!(handle_bell_toast_click(host, MouseButton::Left));
+                assert!(
+                    host.bell_toasts.is_empty(),
+                    "the click dismisses the notice"
+                );
+                assert!(
+                    matches!(
+                        host.toast_update_action.take(),
+                        Some(update_flow::Action::Start)
+                    ),
+                    "the click asks for the Update and restart review"
+                );
                 update_check::start_check(self.proxy.clone());
             } else {
                 // The toast was cleared above, so a repeat announcement would bring it back.

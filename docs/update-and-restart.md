@@ -178,7 +178,7 @@ launcher and restarts only components still running an older release.
   release.
 - `pmux update --json` keeps the install-only report that apps use. Add
   `--restart` or `--no-restart` for the complete update with a JSON receipt.
-- The command exits non-zero when a step failed, after printing the receipt.
+- The command exits non-zero when a step failed, after printing the receipt. A failed official plug-in reconciliation is one of those steps: the receipt names each failure.
 
 The launcher step uses the new release's updater. An existing launcher is
 replaced only when it has a repair receipt or matches the official launcher

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.3.73] - 2026-11-21
+
+### Added
+
+- Experimental native terminal grids and uploaded images for direct local PTY applications on supported Linux and Apple Silicon macOS hosts, enabled with `--experimental-rich`. Native content supplies rendering and text readers; release, resize or lease expiry restores the retained ANSI terminal. The feature remains off by default.
+
 ### Changed
 
 - `pmux update` (and `prismattyc update`) is now the one update command: it installs the newest release, includes its official monitor launcher on Linux and Windows, restarts what can restart without stopping a session, and prints one receipt that names anything left waiting and what to do next. `--no-restart` installs without restarting. `pmux update --json` keeps its install-only report; add `--restart` or `--no-restart` for the complete update with a JSON receipt. On Linux and Windows, clicking the update notice opens the **Restart to update** review, and **Update and restart** in the app also includes the monitor launcher.
@@ -10,6 +16,7 @@
 
 ### Fixed
 
+- `pmux update` no longer says Updated and exits 0 when official plug-in reconciliation failed. The receipt names each failure and the command exits non-zero.
 - An open app window with nothing to draw stopped renewing its registration, so `pmux restart` and **Update and restart all components** skipped it as if no window were open. Windows now renew it while idle, and `pmux restart` reports a window from an older release that stopped answering as `idle` instead of leaving it out.
 - **Restart components** no longer fails with "expected" the newest release's version when the installed Prismattyc is newer than that release; it restarts on the installed version.
 - On Linux and Windows, a key held while a window gains focus is no longer applied twice. One Escape pressed as the app reopened after an update closed both the update dialog and the result notice under it.
@@ -20,7 +27,6 @@
 ### Added
 
 - **Update and restart** shows the update's progress in the Restart to update dialog: bytes downloaded of the whole release, each component as it is verified, the install step, and each component as it restarts, with what happens to your sessions. If the update fails, the dialog keeps the failed step and its error and offers **Check again** or **Close**. `pmux update --progress` reports the same stages on stderr for other tools.
-- Experimental native terminal grids and uploaded images for direct local PTY applications on supported Linux and Apple Silicon macOS hosts, enabled with `--experimental-rich`. Native content supplies rendering and text readers; release, resize or lease expiry restores the retained ANSI terminal. The feature remains off by default.
 
 ### Changed
 

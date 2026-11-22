@@ -35,7 +35,21 @@ or its scrim changed, carrying the frame's dump sequence
 (PRISMATTYC_DUMP_PRESENT with {seq}). Keys go to the host as in
 update-progress-e2e.py (Quartz events, XTEST, SendInput, or --key-relay).
 
+--system names what the operating system is set to when the drive starts: none
+(the default), reduce-motion, reduce-transparency or both. On macOS and Windows
+the operator sets it first (Accessibility > Display, or Settings); on Linux the
+drive writes GNOME's settings into a private key file itself. The drive then also requires what the setting changes. With reduce
+motion each scrim is already settled on the modal's first change line. With
+reduce transparency the scrim dims only: blur false and edge contrast kept.
+Reduce motion alone must still blur. The first change line's state is recorded
+as `settled_at_once`.
+
+--handover-system MODE (Linux only) changes the setting while the update panel is open, just before
+it hands over to the restart confirmation; the confirmation, a dialog that took the panel's place with no frame
+between, must follow the new setting (settled at once or fading, blurred or dimmed only).
+
   modal-scrim-e2e.py --bins target/release --out DIR [--key-relay DIR] [--screenshots]
+                     [--system none|reduce-motion|reduce-transparency|both]
 """
 import argparse
 import importlib.util
@@ -126,9 +140,9 @@ def band_metrics(rows, columns):
     return total / count, edges / count
 
 
-def free_margin(before, after):
-    """The widest band at the window's left or right edge that the modal
-    leaves uncovered. From the edge inward, in blocks of 1/128 of the width
+def free_margins(before, after):
+    """The bands at the window's left and right edges that the modal leaves
+    uncovered, widest first. Each is the widest band from its edge. From the edge inward, in blocks of 1/128 of the width
     (wider than the blur spreads a thin line), take the blocks whose mean
     brightness fell to between 40% and 85% of before, as only the scrim makes
     it, and leave out the last one, which may reach the modal."""
@@ -138,7 +152,7 @@ def free_margin(before, after):
     def mean(rows, columns):
         return sum(sum(row[x]) for row in rows for x in columns) / (3 * len(rows) * len(columns))
 
-    best = range(0)
+    bands = []
     for side in ('left', 'right'):
         taken = 0
         while (taken + 1) * step <= width // 4:
@@ -151,9 +165,8 @@ def free_margin(before, after):
             taken += 1
         taken = max(0, taken - 1)
         band = range(0, taken * step) if side == 'left' else range(width - taken * step, width)
-        if len(band) > len(best):
-            best = band
-    return best
+        bands.append(band)
+    return sorted(bands, key=len, reverse=True)
 
 
 def main():
@@ -162,7 +175,14 @@ def main():
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--key-relay', type=Path)
     parser.add_argument('--screenshots', action='store_true', help='also capture the whole screen')
+    parser.add_argument('--system', choices=['none', 'reduce-motion', 'reduce-transparency', 'both'], default='none',
+                        help='the system accessibility setting in force; the drive checks its effect')
+    parser.add_argument('--handover-system', choices=['none', 'reduce-motion', 'reduce-transparency', 'both'],
+                        help='change the system setting to this just before the update panel hands over to the '
+                             'restart confirmation (Linux only); the confirmation must follow the new setting')
     args = parser.parse_args()
+    expect_still = args.system in ('reduce-motion', 'both')
+    expect_flat = args.system in ('reduce-transparency', 'both')
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=False)
     frames = out / 'frames'
@@ -192,8 +212,19 @@ def main():
         env.update(HOME=str(out / 'home'), SHELL='/bin/sh', XDG_RUNTIME_DIR=str(runtime),
                    XDG_DATA_HOME=str(out / 'data'), XDG_CONFIG_HOME=str(out / 'config'),
                    XDG_STATE_HOME=str(out / 'state'))
+    if sys.platform.startswith('linux'):
+        # GNOME's settings come from a private key file, so the drive chooses
+        # them and the machine's own desktop settings do not matter.
+        schema = out / 'config' / 'glib-2.0' / 'settings'
+        schema.mkdir(parents=True)
+        (schema / 'keyfile').write_text(
+            '[org/gnome/desktop/interface]\n'
+            f'enable-animations={"false" if expect_still else "true"}\n'
+            '[org/gnome/desktop/a11y/interface]\n'
+            f'high-contrast={"true" if expect_flat else "false"}\n')
+        env['GSETTINGS_BACKEND'] = 'keyfile'
     env['PATH'] = str(bins) + os.pathsep + env['PATH']
-    result = {'status': 'FAIL', 'platform': sys.platform, 'checks': [], 'modals': {}}
+    result = {'status': 'FAIL', 'platform': sys.platform, 'system': args.system, 'checks': [], 'modals': {}}
     owned, readers = [], []
     keys = app = None
 
@@ -263,26 +294,54 @@ def main():
         return before_seq, settle(name, kind, before_seq, opened)
 
     def settle(name, kind, before_seq, opened):
-        settled = opened if (opened['ui'].get('scrim') or {}).get('settled') else change(
+        at_once = bool((opened['ui'].get('scrim') or {}).get('settled'))
+        assert at_once or not expect_still, f'{name}: the scrim faded in although the system asks for reduced motion'
+        settled = opened if at_once else change(
             lambda ui: ui.get('modal') == kind and (ui.get('scrim') or {}).get('settled'), f'{name} scrim settled')
         shutil.copy(frame(settled['seq']), out / f'{name}.png')
         screenshot(name)
         before_rows, after_rows = png_rgb(frame(before_seq)), png_rgb(frame(settled['seq']))
-        band = free_margin(before_rows, after_rows)
+        bands = [b for b in free_margins(before_rows, after_rows) if len(b) >= 8]
+        band = bands[0] if bands else range(0)
         assert len(band) >= 8, f'{name}: no dimmed margin beside the modal ({len(band)} columns)'
         before, after = band_metrics(before_rows, band), band_metrics(after_rows, band)
         assert before[1] > 0.3, f'{name}: the margin has no text to blur ({before[1]:.2f})'
         dim, edge = after[0] / before[0], after[1] / before[1]
+        # The widest band can reach the modal's own edge and keep contrast the
+        # blur removed elsewhere, so a blur is judged by the band that kept the
+        # least contrast; the absence of one by the widest band.
+        edges = [band_metrics(after_rows, b)[1] / band_metrics(before_rows, b)[1] for b in bands
+                 if band_metrics(before_rows, b)[1] > 0.3]
+        edge = min(edges) if not expect_flat and edges else edge
         side = 'left' if band.start == 0 else 'right'
         blur = settled['ui']['scrim']['blur']
         result['modals'][name] = {'modal': kind, 'margin': [band.start, band.stop], 'brightness': round(dim, 3),
-                                  'edges': round(edge, 3), 'blur': blur, 'before_seq': before_seq,
+                                  'edges': round(edge, 3), 'blur': blur, 'settled_at_once': at_once, 'before_seq': before_seq,
                                   'seq': settled['seq']}
         assert 0.45 <= dim <= 0.85, f'{name}: margin brightness went to {dim:.2f} of before'
+        if expect_flat:
+            assert not blur, f'{name}: the scrim blurred although the system asks for reduced transparency'
+            assert edge >= dim * 0.8, f'{name}: edges fell to {edge:.2f} against brightness {dim:.2f}; the frame was blurred'
+            record(f'{name}: {side} margin ({len(band)} px) dimmed to {dim:.2f}, not blurred (edges {edge:.2f}), '
+                   f'{"at once" if at_once else "faded in"} behind the {kind}')
+            return settled
         assert blur, f'{name}: the scrim fell back to dim only'
         assert edge < dim * 0.8, f'{name}: edges kept {edge:.2f} against brightness {dim:.2f}; no blur'
-        record(f'{name}: {side} margin ({len(band)} px) dimmed to {dim:.2f} and blurred (edges {edge:.2f}) behind the {kind}')
+        record(f'{name}: {side} margin ({len(band)} px) dimmed to {dim:.2f} and blurred (edges {edge:.2f}), '
+               f'{"at once" if at_once else "faded in"} behind the {kind}')
         return settled
+
+    def set_system(mode):
+        """Change the operating system's setting while the app runs."""
+        motion, transparency = mode in ('reduce-motion', 'both'), mode in ('reduce-transparency', 'both')
+        if sys.platform.startswith('linux'):
+            (out / 'config' / 'glib-2.0' / 'settings' / 'keyfile').write_text(
+                '[org/gnome/desktop/interface]\n'
+                f'enable-animations={"false" if motion else "true"}\n'
+                '[org/gnome/desktop/a11y/interface]\n'
+                f'high-contrast={"true" if transparency else "false"}\n')
+        else:
+            raise AssertionError('--handover-system needs Linux: a running macOS app does not see `defaults write` changes, only the Accessibility settings pane')
 
     def close_all(label):
         while True:
@@ -340,6 +399,13 @@ def main():
                     keys.press('Down' if target > selected else 'Up')
                     selected = (change(lambda ui: (ui.get('panel') or {}).get('selected') not in (None, selected),
                                        'panel selection')['ui'].get('panel') or {}).get('selected')
+                if args.handover_system:
+                    # The panel is open and settled; the setting changes now,
+                    # and the dialog that takes its place must follow it.
+                    set_system(args.handover_system)
+                    expect_still = args.handover_system in ('reduce-motion', 'both')
+                    expect_flat = args.handover_system in ('reduce-transparency', 'both')
+                    result['handover_system'] = args.handover_system
                 keys.press('Return')
                 confirm = change(lambda ui: ui.get('modal') == 'restart', 'restart confirmation', 120)
                 settle('restart-confirmation', 'restart', before_seq, confirm)

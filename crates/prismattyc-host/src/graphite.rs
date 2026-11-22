@@ -221,6 +221,13 @@ fn chrome_font() -> Option<&'static ChromeFont> {
     .as_ref()
 }
 
+/// Parse the bundled chrome faces before the first Graphite window enters the
+/// event loop. Fontdue indexes every glyph on construction; leaving this lazy
+/// would charge that one-time work to the first layout or paint.
+pub(crate) fn preload_chrome_font() {
+    let _ = chrome_font();
+}
+
 impl ChromeFont {
     fn face(&self, face: Face) -> &Font {
         match face {

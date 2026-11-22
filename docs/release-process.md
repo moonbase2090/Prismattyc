@@ -132,8 +132,9 @@ rollback. Releases from v0.2.21 onward can be installed this way.
 
 Linux and Windows packages also carry the separate thin
 `pmux-activity-monitor` frontend. Preserve the six-member core transaction
-for older updaters. After the core update finishes, a second process runs
-`pmux update --repair-monitor-launcher` for the exact installed tag.
+for older updaters. After the core update finishes, `pmux update` starts the
+newly installed `pmux`, which runs `pmux update --repair-monitor-launcher` for
+the exact installed tag (older updaters need that second command by hand).
 An unreceipted old launcher requires `--from-monitor-version VERSION` and
 must match that immutable official asset. Core rollback leaves the separate
 launcher and its repair history intact. See

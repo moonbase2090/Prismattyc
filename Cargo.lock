@@ -1490,9 +1490,9 @@ checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -3284,7 +3284,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "pmux-activity-connector-plugin"
-version = "0.3.72"
+version = "0.3.73"
 dependencies = [
  "anyhow",
  "jsonschema",
@@ -3296,7 +3296,7 @@ dependencies = [
 
 [[package]]
 name = "pmux-activity-monitor-plugin"
-version = "0.3.72"
+version = "0.3.73"
 dependencies = [
  "anyhow",
  "lunatui-core",
@@ -3312,7 +3312,7 @@ dependencies = [
 
 [[package]]
 name = "pmux-mcp"
-version = "0.3.72"
+version = "0.3.73"
 dependencies = [
  "http-body-util",
  "hyper",
@@ -3331,7 +3331,7 @@ dependencies = [
 
 [[package]]
 name = "pmux-plugin-api"
-version = "0.3.72"
+version = "0.3.73"
 dependencies = [
  "prismattyc-core",
  "schemars",
@@ -3346,7 +3346,7 @@ dependencies = [
 
 [[package]]
 name = "pmux-plugin-fixture"
-version = "0.3.72"
+version = "0.3.73"
 dependencies = [
  "anyhow",
  "pmux-plugin-api",
@@ -3357,7 +3357,7 @@ dependencies = [
 
 [[package]]
 name = "pmux-plugin-runtime"
-version = "0.3.72"
+version = "0.3.73"
 dependencies = [
  "anyhow",
  "pmux-plugin-api",
@@ -3491,7 +3491,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc"
-version = "0.3.72"
+version = "0.3.73"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -3509,14 +3509,14 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-cmd-forwarder"
-version = "0.3.72"
+version = "0.3.73"
 dependencies = [
  "prismattyc-process",
 ]
 
 [[package]]
 name = "prismattyc-core"
-version = "0.3.72"
+version = "0.3.73"
 dependencies = [
  "prismattyc-process",
  "serde",
@@ -3526,7 +3526,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-emulator"
-version = "0.3.72"
+version = "0.3.73"
 dependencies = [
  "anyhow",
  "flate2",
@@ -3544,7 +3544,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-host"
-version = "0.3.72"
+version = "0.3.73"
 dependencies = [
  "accesskit",
  "accesskit_winit",
@@ -3597,7 +3597,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-labs"
-version = "0.3.72"
+version = "0.3.73"
 dependencies = [
  "prismattyc-core",
  "serde",
@@ -3607,7 +3607,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-mux"
-version = "0.3.72"
+version = "0.3.73"
 dependencies = [
  "anyhow",
  "arboard",
@@ -3653,18 +3653,18 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-process"
-version = "0.3.72"
+version = "0.3.73"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "prismattyc-protocol"
-version = "0.3.72"
+version = "0.3.73"
 
 [[package]]
 name = "prismattyc-render"
-version = "0.3.72"
+version = "0.3.73"
 dependencies = [
  "prismattyc-core",
  "prismattyc-protocol",
@@ -3672,7 +3672,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-rich-client"
-version = "0.3.72"
+version = "0.3.73"
 dependencies = [
  "libc",
  "prismattyc-protocol",
@@ -3680,7 +3680,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-winres"
-version = "0.3.72"
+version = "0.3.73"
 dependencies = [
  "winresource",
 ]
@@ -5068,9 +5068,9 @@ dependencies = [
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",

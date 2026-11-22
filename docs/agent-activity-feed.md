@@ -102,7 +102,9 @@ Identifiers permit ASCII letters, digits, hyphens, underscores, periods, and
 colons. Seat identities follow the existing mailbox identity format. The
 optional `detail` record accepts only the named display fields, with printable
 values capped at 256 bytes. The hook adapter caps commands at 200 characters,
-redacts common credential flag/value patterns, and reports paths relative to
+redacts common credential flag/value patterns and unlabeled credentials (URL
+userinfo, basic-auth values, well-known token shapes and private key blocks),
+and reports paths relative to
 the hook cwd (or just a basename when the path is outside it). It discards
 prompts, responses, file contents, terminal output, and mail bodies. Upstream
 session and tool correlation values are hashed before publication. This format

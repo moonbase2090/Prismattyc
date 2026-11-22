@@ -12,14 +12,13 @@ use anyhow::{ensure, Context, Result};
 use serde::Deserialize;
 use winit::event_loop::EventLoopProxy;
 
-use crate::{find_mux_bin, UserAction};
+use crate::{find_mux_bin, update_notes, UserAction};
 
 #[derive(Debug, Deserialize)]
 pub(super) struct ReleaseCheck {
     pub available: String,
     pub update_available: bool,
     #[serde(default)]
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub release_notes: String,
 }
 
@@ -77,15 +76,26 @@ impl Announced {
             return None;
         }
         self.0 = Some(check.available.clone());
-        Some(notice_text(&check.available))
+        Some(notice_text(&check.available, &check.release_notes))
     }
 }
 
+/// Characters of the release's top change a one-line notice keeps.
+const NOTICE_HIGHLIGHT_CHARS: usize = 48;
+
+/// One line: the version, the release's top change, and where the full
+/// notes are. The click opens the review, which links the release notes.
 #[cfg_attr(target_os = "macos", allow(dead_code))]
-fn notice_text(version: &str) -> String {
-    format!(
-        "Prismattyc {version} is available. Your sessions keep running. Open the palette and choose Update and restart to review it."
-    )
+fn notice_text(version: &str, release_notes: &str) -> String {
+    const TAIL: &str = "Click for the update and release notes.";
+    let top = update_notes::highlights(release_notes, 1, NOTICE_HIGHLIGHT_CHARS);
+    match top.items.first() {
+        Some(change) if change.ends_with('…') => {
+            format!("Prismattyc {version} is available: {change} {TAIL}")
+        }
+        Some(change) => format!("Prismattyc {version} is available: {change}. {TAIL}"),
+        None => format!("Prismattyc {version} is available. {TAIL}"),
+    }
 }
 
 #[cfg(test)]
@@ -109,6 +119,40 @@ mod tests {
         );
         let newer = check(r#"{"available":"0.4.1","update_available":true}"#);
         assert!(seen.notice(&newer, true).expect("newer").contains("0.4.1"));
+    }
+
+    #[test]
+    fn the_notice_names_the_top_change_and_where_the_notes_are() {
+        let mut seen = Announced::default();
+        let release = ReleaseCheck {
+            available: "0.4.0".into(),
+            update_available: true,
+            release_notes: "## [0.4.0]\n\n### Added\n\n- **Faster** splits (all layouts). More detail.\n- Other.\n".into(),
+        };
+        assert_eq!(
+            seen.notice(&release, true).as_deref(),
+            Some("Prismattyc 0.4.0 is available: Faster splits. Click for the update and release notes.")
+        );
+        let bare = check(r#"{"available":"0.4.1","update_available":true}"#);
+        assert_eq!(
+            seen.notice(&bare, true).as_deref(),
+            Some("Prismattyc 0.4.1 is available. Click for the update and release notes.")
+        );
+    }
+
+    #[test]
+    fn a_full_changelog_still_gives_a_one_line_notice() {
+        let notes = include_str!("update_notes_0_3_73.md");
+        let release = ReleaseCheck {
+            available: "0.3.73".into(),
+            update_available: true,
+            release_notes: notes.into(),
+        };
+        let notice = Announced::default().notice(&release, true).expect("notice");
+        assert_eq!(
+            notice,
+            "Prismattyc 0.3.73 is available: Experimental native terminal grids and uploaded… Click for the update and release notes."
+        );
     }
 
     #[test]

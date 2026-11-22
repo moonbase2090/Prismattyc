@@ -160,7 +160,32 @@ pub fn register_version(socket: &Path, component: &str, version: &str) -> Result
     )
 }
 
+/// How long a registration stays current without a new heartbeat. A
+/// component that has not refreshed it within this is not asked to restart.
+pub const FRESH: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Registered components whose process is alive and whose registration is
+/// current.
 pub fn live_components(socket: &Path, component: &str) -> Vec<u32> {
+    registered(socket, component)
+        .into_iter()
+        .filter_map(|(pid, fresh)| fresh.then_some(pid))
+        .collect()
+}
+
+/// Registered components whose process is alive but whose registration is
+/// older than [`FRESH`]: open, but not answering (for example an idle window
+/// from a release that did not wake to renew its heartbeat).
+pub fn idle_components(socket: &Path, component: &str) -> Vec<u32> {
+    registered(socket, component)
+        .into_iter()
+        .filter_map(|(pid, fresh)| (!fresh).then_some(pid))
+        .collect()
+}
+
+/// Each registration of `component` whose process is alive, with whether it
+/// is current.
+fn registered(socket: &Path, component: &str) -> Vec<(u32, bool)> {
     let Ok(entries) = fs::read_dir(directory(socket)) else {
         return Vec::new();
     };
@@ -177,12 +202,13 @@ pub fn live_components(socket: &Path, component: &str) -> Vec<u32> {
             let value: serde_json::Value =
                 serde_json::from_slice(&read_bounded(&entry.path()).ok()?).ok()?;
             let sampled = value["sampled_ms"].as_u64()?;
-            (crate::procinfo::pid_alive(pid)
-                && value["pid"].as_u64() == Some(pid as u64)
-                && crate::host_render_status::unix_ms()
-                    .checked_sub(sampled)
-                    .is_some_and(|age| age < 5000))
-            .then_some(pid)
+            if !crate::procinfo::pid_alive(pid) || value["pid"].as_u64() != Some(pid as u64) {
+                return None;
+            }
+            let fresh = crate::host_render_status::unix_ms()
+                .checked_sub(sampled)
+                .is_some_and(|age| age < FRESH.as_millis() as u64);
+            Some((pid, fresh))
         })
         .collect()
 }
@@ -212,6 +238,34 @@ mod tests {
                 .unwrap();
         assert_eq!(response.status, "deferred");
         drop(lock);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_registration_older_than_fresh_is_idle_not_live() {
+        let root = std::env::temp_dir().join(format!("restart-idle-{}", generation()));
+        fs::create_dir_all(&root).unwrap();
+        let socket = root.join("mux.sock");
+        register(&socket, "host").unwrap();
+        let pid = std::process::id();
+        assert_eq!(idle_components(&socket, "host"), Vec::<u32>::new());
+        // The same live process, last heard from just over FRESH ago.
+        let path = directory(&socket).join(format!("host-{pid}.json"));
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let old = crate::host_render_status::unix_ms() - FRESH.as_millis() as u64 - 1;
+        value["sampled_ms"] = old.into();
+        atomic_json(&path, &value).unwrap();
+        assert_eq!(live_components(&socket, "host"), Vec::<u32>::new());
+        assert_eq!(idle_components(&socket, "host"), vec![pid]);
+        // A registration whose process is gone is neither.
+        let gone = directory(&socket).join("host-999999999.json");
+        atomic_json(
+            &gone,
+            &serde_json::json!({"pid": 999999999u64, "sampled_ms": old}),
+        )
+        .unwrap();
+        assert_eq!(idle_components(&socket, "host"), vec![pid]);
         fs::remove_dir_all(root).unwrap();
     }
 }

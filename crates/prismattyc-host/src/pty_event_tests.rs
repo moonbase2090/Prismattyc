@@ -157,6 +157,7 @@ fn verify_bell_presentation(host: &mut HostState) {
         until: Instant::now() + Duration::from_secs(10),
         label: "old".to_string(),
         status: None,
+        opens_update: false,
     });
     run_printf(host, r"\007OK%d\n", 5);
     assert_eq!(toast_labels(host), vec![" bell "]);
@@ -255,6 +256,7 @@ fn verify_timers_and_hover(host: &mut HostState) {
         until: Instant::now() - Duration::from_secs(1),
         label: " bell ".to_string(),
         status: None,
+        opens_update: false,
     });
     host.title_notice = Some(LiveTitleNotice {
         tab: 0,

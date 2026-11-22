@@ -111,6 +111,38 @@ mod skills;
 #[path = "pmux/spaces.rs"]
 mod space_commands;
 
+/// The daemon socket `pmux update` restarts components for, resolved like
+/// every other command (`--socket`, `--instance`, the `[mux]` config, the
+/// environment). An error is kept, not dropped: the complete update refuses
+/// to run with it, so an invalid target never falls back to the default
+/// daemon.
+fn update_socket(instance: Option<String>, socket: Option<PathBuf>) -> Result<PathBuf, String> {
+    let resolve = || -> Result<PathBuf> {
+        let file = load_mux_section(&prism_config_path())?;
+        let (instance, socket_override) = resolve_mux_target(instance, socket, &file)?;
+        Ok(Paths::resolve(&instance, socket_override)?.socket)
+    };
+    resolve().map_err(|error| format!("{error:#}"))
+}
+
+/// `pmux update` arguments with the daemon socket appended, so the complete
+/// update restarts that daemon's components and finds its idle windows. A
+/// target that could not be resolved is passed as `--target-error`, which
+/// only the complete update acts on. Source builds take no target.
+fn update_args(mut rest: Vec<String>, socket: Result<PathBuf, String>) -> Vec<String> {
+    if rest.iter().any(|arg| arg == "--source") {
+        return rest;
+    }
+    match socket {
+        Ok(socket) => rest.extend([
+            "--socket".to_string(),
+            socket.to_string_lossy().into_owned(),
+        ]),
+        Err(error) => rest.extend(["--target-error".to_string(), error]),
+    }
+    rest
+}
+
 fn print_help() {
     println!(
         "\
@@ -538,7 +570,8 @@ fn main() -> Result<()> {
         }
         Verb::Update => {
             reject_session_flag(cli_session.as_deref(), "update")?;
-            return prismattyc_mux::run_update(rest);
+            let socket = update_socket(cli_instance, cli_socket);
+            return prismattyc_mux::run_update(update_args(rest, socket));
         }
         Verb::Uninstall => {
             reject_session_flag(cli_session.as_deref(), "uninstall")?;
@@ -851,7 +884,7 @@ _prismattyc_mux() {
     arrange) COMPREPLY=( $(compgen -W "main-vertical main-horizontal even-h even-v grid" -- "$cur") ); return ;;
     stop|kick|doctor) COMPREPLY=( $(compgen -W "--session" -- "$cur") ); return ;;
     restart) COMPREPLY=( $(compgen -W "--all --host --daemon --mcp --plan --stop-sessions --json --help" -- "$cur") ); return ;;
-    update) COMPREPLY=( $(compgen -W "--check --rollback --pre --bin-dir --repair-monitor-launcher --from-monitor-version --json --source --host --mux --all --help" -- "$cur") ); return ;;
+    update) COMPREPLY=( $(compgen -W "--restart --no-restart --check --rollback --pre --bin-dir --repair-monitor-launcher --from-monitor-version --json --source --host --mux --all --help" -- "$cur") ); return ;;
   esac
   if [[ "$cur" == -* ]]; then
     COMPREPLY=( $(compgen -W "--instance --socket --session --help" -- "$cur") )
@@ -925,7 +958,7 @@ case $state in
       join-pane) _arguments '--to[Window id]:id:' '-h' '-v' '1:pane:' ;;
       arrange) _arguments '1:session:' '2:kind:(main-vertical main-horizontal even-h even-v grid)' ;;
       restart) _arguments '--all' '--host' '--daemon' '--mcp' '--plan' '--stop-sessions' '--json' '--help' ;;
-      update) _arguments '--check' '--rollback' '--pre' '--repair-monitor-launcher' '--from-monitor-version[Existing monitor release]:version:' '--bin-dir[Install directory]:directory:_files -/' '--json' '--source' '--host' '--mux' '--all' '--help' ;;
+      update) _arguments '--restart' '--no-restart' '--check' '--rollback' '--pre' '--repair-monitor-launcher' '--from-monitor-version[Existing monitor release]:version:' '--bin-dir[Install directory]:directory:_files -/' '--json' '--source' '--host' '--mux' '--all' '--help' ;;
     esac
     ;;
 esac
@@ -1028,6 +1061,8 @@ complete -c pmux -n '__fish_seen_subcommand_from apply' -l tty
 complete -c pmux -n '__fish_seen_subcommand_from sync' -a 'on off status'
 complete -c pmux -n '__fish_seen_subcommand_from new' -l attach -d 'Attach after create'
 complete -c pmux -n '__fish_seen_subcommand_from new' -l no-attach -d 'Create without attaching'
+complete -c pmux -n '__fish_seen_subcommand_from update' -l restart -d 'Install, include the launcher, restart safely (default)'
+complete -c pmux -n '__fish_seen_subcommand_from update' -l no-restart -d 'Install and include the launcher without restarting'
 complete -c pmux -n '__fish_seen_subcommand_from update' -l host
 complete -c pmux -n '__fish_seen_subcommand_from update' -l mux
 complete -c pmux -n '__fish_seen_subcommand_from update' -l all
@@ -9536,6 +9571,37 @@ mod tests {
 
     /// Serializes tests that mutate `$PRISMATTYC_REPO`.
     static REPO_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn update_takes_the_daemon_socket_except_for_source_builds() {
+        let rest = |list: &[&str]| list.iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert_eq!(
+            update_args(rest(&["--json"]), Ok(PathBuf::from("/run/p.sock"))),
+            rest(&["--json", "--socket", "/run/p.sock"])
+        );
+        assert_eq!(
+            update_args(rest(&["--source"]), Ok(PathBuf::from("/run/p.sock"))),
+            rest(&["--source"])
+        );
+        assert_eq!(
+            update_socket(None, Some(PathBuf::from("/run/explicit.sock"))),
+            Ok(PathBuf::from("/run/explicit.sock"))
+        );
+    }
+
+    #[test]
+    fn an_invalid_update_target_is_passed_on_not_replaced_by_the_default() {
+        let rest = |list: &[&str]| list.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let relative = update_socket(None, Some(PathBuf::from("relative.sock")));
+        let error = relative.clone().unwrap_err();
+        assert!(error.contains("absolute"), "{error}");
+        assert_eq!(
+            update_args(rest(&[]), relative),
+            rest(&["--target-error", error.as_str()])
+        );
+        let named = update_socket(Some("a/b".into()), None).unwrap_err();
+        assert!(named.contains("instance"), "{named}");
+    }
 
     #[test]
     fn run_update_refuses_bad_prismattyc_repo() {

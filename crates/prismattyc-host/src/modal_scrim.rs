@@ -3,7 +3,9 @@
 //!
 //! The frame paints the scrim once, after the panes and chrome and before
 //! the first modal, so every dialog, picker and modal menu gets the same one.
-//! It fades in when a modal opens; with reduced motion it appears at once.
+//! It fades in when a modal opens; with reduced motion, from the app's
+//! `reduced_motion` setting or the system's, it appears at once. When the
+//! system asks for reduced transparency the scrim dims without blurring.
 //! The blur runs on a copy of the frame four logical pixels to the pixel.
 //! Where that would cost too much the scrim dims only: on a very large
 //! window, and for the next modal after a blurred frame took longer than the
@@ -12,6 +14,7 @@
 use std::time::{Duration, Instant};
 
 use crate::raster::{alpha_of, pack_argb, unpack_rgb};
+use crate::system_accessibility::Preferences;
 use crate::theme::ThemeVariant;
 
 /// Fade-in when a modal opens.
@@ -54,6 +57,14 @@ impl Look {
     }
 }
 
+/// One dialog as opened: its kind, and which opening of that kind. A menu
+/// replacing another menu has the same kind but a new opening.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Dialog {
+    pub(crate) name: &'static str,
+    pub(crate) opening: u64,
+}
+
 /// Fade and cost state, kept across frames while a modal is open.
 #[derive(Debug, Default)]
 pub(crate) struct Scrim {
@@ -64,8 +75,16 @@ pub(crate) struct Scrim {
     /// The open modal's scrim blurs. Chosen when it opens, from `slow`, and
     /// kept until it closes, so a dialog never changes look while it is up.
     blur: bool,
+    /// The blur was affordable when the scrim opened. A dialog handed over to
+    /// keeps this, so only the system's choice can change its look.
+    blur_fits: bool,
     /// What the last frame painted.
     painted: Option<Painted>,
+    /// The system's reduce-motion and reduce-transparency choices, read when
+    /// the open modal opened.
+    system: Preferences,
+    /// Which modal the choices above belong to.
+    modal: Option<Dialog>,
 }
 
 /// The scrim a frame painted, for native drivers' change lines.
@@ -78,18 +97,37 @@ pub(crate) struct Painted {
 }
 
 impl Scrim {
+    /// Whether `modal` is a dialog the system choices have not been read for:
+    /// one opening, or one handed over to by another without a frame between
+    /// (the palette's Transparency command).
+    pub(crate) fn opens_with(&self, modal: Option<Dialog>) -> bool {
+        modal.is_some() && modal != self.modal
+    }
+
+    /// The system choices `modal` follows. A dialog taking over from another
+    /// keeps the fade already under way but chooses its own look.
+    pub(crate) fn follow_system(&mut self, modal: Option<Dialog>, system: Preferences) {
+        self.modal = modal;
+        self.system = system;
+        if self.opened_at.is_some() {
+            self.blur = self.blur_fits && !self.system.reduce_transparency;
+        }
+    }
+
     /// How far the scrim has faded in, from 0 to 1, or `None` with no modal.
     pub(crate) fn level(&mut self, open: bool, now: Instant, reduced_motion: bool) -> Option<f32> {
         if !open {
             self.opened_at = None;
             self.painted = None;
+            self.modal = None;
             return None;
         }
         let opened = *self.opened_at.get_or_insert_with(|| {
-            self.blur = !self.slow;
+            self.blur_fits = !self.slow;
+            self.blur = self.blur_fits && !self.system.reduce_transparency;
             now
         });
-        if reduced_motion {
+        if reduced_motion || self.system.reduce_motion {
             return Some(1.0);
         }
         let t = (now.saturating_duration_since(opened).as_secs_f32() / FADE.as_secs_f32()).min(1.0);
@@ -377,6 +415,10 @@ fn axis(i: usize, n: usize, step: usize) -> (usize, usize, u32) {
 mod tests {
     use super::*;
 
+    fn dialog(name: &'static str, opening: u64) -> Option<Dialog> {
+        Some(Dialog { name, opening })
+    }
+
     const DARK: Look = Look {
         dim: DIM_DARK,
         step: 4,
@@ -496,6 +538,135 @@ mod tests {
         scrim.level(false, t0, true);
         scrim.level(true, t0, true);
         assert_eq!(edge(&mut scrim), 0, "the next modal dims only");
+        assert_eq!(scrim.painted().map(|p| p.blur), Some(false));
+    }
+
+    #[test]
+    fn the_system_reduce_motion_setting_shows_the_scrim_at_once() {
+        let mut scrim = Scrim::default();
+        scrim.follow_system(
+            dialog("palette", 0),
+            Preferences {
+                reduce_motion: true,
+                reduce_transparency: false,
+            },
+        );
+        assert_eq!(scrim.level(true, Instant::now(), false), Some(1.0));
+        let mut fading = Scrim::default();
+        let t0 = Instant::now();
+        fading.level(true, t0, false);
+        assert!(fading.level(true, t0, false).unwrap() < 1.0);
+    }
+
+    #[test]
+    fn the_system_reduce_transparency_setting_dims_without_blur() {
+        let look = Look::new(ThemeVariant::Dark, 1.0);
+        let painted = |system: Preferences| {
+            let mut scrim = Scrim::default();
+            scrim.follow_system(dialog("palette", 0), system);
+            scrim.level(true, Instant::now(), true);
+            let mut frame = vec![pack_argb(255, [100; 3]); 32 * 8];
+            scrim.paint(&mut frame, 32, 8, look, 1.0);
+            scrim.painted().unwrap()
+        };
+        let reduced = painted(Preferences {
+            reduce_motion: false,
+            reduce_transparency: true,
+        });
+        assert!(reduced.settled && !reduced.blur);
+        assert!(painted(Preferences::default()).blur);
+    }
+
+    #[test]
+    fn a_modal_opens_once_until_it_closes() {
+        let mut scrim = Scrim::default();
+        assert!(!scrim.opens_with(None));
+        assert!(scrim.opens_with(dialog("palette", 0)));
+        scrim.follow_system(dialog("palette", 0), Preferences::default());
+        scrim.level(true, Instant::now(), false);
+        assert!(!scrim.opens_with(dialog("palette", 0)));
+        scrim.level(false, Instant::now(), false);
+        assert!(scrim.opens_with(dialog("palette", 0)));
+    }
+
+    #[test]
+    fn a_dialog_handed_over_to_reads_the_system_choices_again() {
+        let look = Look::new(ThemeVariant::Dark, 1.0);
+        let mut scrim = Scrim::default();
+        let t0 = Instant::now();
+        // The palette opens with the system asking for nothing.
+        scrim.follow_system(dialog("palette", 0), Preferences::default());
+        scrim.level(true, t0, false);
+        let mut frame = vec![pack_argb(255, [100; 3]); 32 * 8];
+        scrim.paint(&mut frame, 32, 8, look, 0.5);
+        assert_eq!(scrim.painted().map(|p| p.blur), Some(true));
+        // The person turns Reduce transparency and Reduce motion on, then
+        // picks Transparency from the palette: no frame has no modal.
+        assert!(scrim.opens_with(dialog("transparency", 0)));
+        scrim.follow_system(
+            dialog("transparency", 0),
+            Preferences {
+                reduce_motion: true,
+                reduce_transparency: true,
+            },
+        );
+        assert!(!scrim.opens_with(dialog("transparency", 0)));
+        assert_eq!(
+            scrim.level(true, t0, false),
+            Some(1.0),
+            "the new dialog follows the new reduce-motion choice"
+        );
+        scrim.paint(&mut frame, 32, 8, look, 1.0);
+        assert_eq!(
+            scrim.painted().map(|p| p.blur),
+            Some(false),
+            "and the new reduce-transparency choice"
+        );
+    }
+
+    #[test]
+    fn a_handover_keeps_the_blur_chosen_when_the_scrim_opened() {
+        let look = Look::new(ThemeVariant::Dark, 1.0);
+        let mut scrim = Scrim::default();
+        let t0 = Instant::now();
+        scrim.follow_system(dialog("restore prompt", 0), Preferences::default());
+        scrim.level(true, t0, true);
+        let mut frame = vec![pack_argb(255, [100; 3]); 32 * 8];
+        // A slow blur while the first dialog is up must not strip the blur
+        // from the dialog that takes over, nor from the one that returns.
+        scrim.slow = true;
+        for modal in ["session prompt", "restore prompt"] {
+            scrim.follow_system(dialog(modal, 0), Preferences::default());
+            scrim.paint(&mut frame, 32, 8, look, 1.0);
+            assert_eq!(scrim.painted().map(|p| p.blur), Some(true), "{modal}");
+            scrim.slow = true;
+        }
+    }
+
+    #[test]
+    fn a_menu_replacing_a_menu_of_the_same_kind_reads_the_system_choices_again() {
+        let mut scrim = Scrim::default();
+        let t0 = Instant::now();
+        scrim.follow_system(dialog("menu", 1), Preferences::default());
+        scrim.level(true, t0, false);
+        assert!(
+            !scrim.opens_with(dialog("menu", 1)),
+            "the same menu is not new"
+        );
+        assert!(
+            scrim.opens_with(dialog("menu", 2)),
+            "a second menu of the same kind is a new opening"
+        );
+        scrim.follow_system(
+            dialog("menu", 2),
+            Preferences {
+                reduce_motion: true,
+                reduce_transparency: true,
+            },
+        );
+        assert_eq!(scrim.level(true, t0, false), Some(1.0));
+        let mut frame = vec![pack_argb(255, [100; 3]); 32 * 8];
+        scrim.paint(&mut frame, 32, 8, Look::new(ThemeVariant::Dark, 1.0), 1.0);
         assert_eq!(scrim.painted().map(|p| p.blur), Some(false));
     }
 }

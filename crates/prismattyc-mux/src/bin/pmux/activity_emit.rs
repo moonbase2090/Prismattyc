@@ -226,15 +226,24 @@ fn secret_label(value: &str) -> bool {
 }
 
 fn redacted_command(value: &str) -> String {
+    let words: Vec<&str> = value.split_whitespace().collect();
     let mut output = Vec::new();
     let mut redact_next = false;
-    for part in value.split_whitespace() {
+    let mut index = 0;
+    while index < words.len() {
+        let part = words[index];
         let token = part.trim_matches(['\'', '"']);
+        if let Some(end) = private_key_end(&words, index) {
+            output.push("[redacted private key]".to_owned());
+            redact_next = false;
+            index = end + 1;
+            continue;
+        }
         if redact_next {
             output.push("[redacted]".to_owned());
-            redact_next = token.eq_ignore_ascii_case("bearer");
-        } else if token.eq_ignore_ascii_case("bearer") {
-            output.push("Bearer".to_owned());
+            redact_next = auth_scheme(token);
+        } else if auth_scheme(token) {
+            output.push(token.to_owned());
             redact_next = true;
         } else if secret_label(token) {
             if token.contains(['=', ':']) {
@@ -245,11 +254,246 @@ fn redacted_command(value: &str) -> String {
                 output.push(part.to_owned());
                 redact_next = true;
             }
-        } else {
+        } else if matches!(token, "-u" | "--user")
+            && words.get(index + 1).is_some_and(|next| next.contains(':'))
+        {
+            // `user:password` after a basic-auth flag.
             output.push(part.to_owned());
+            output.push("[redacted]".to_owned());
+            index += 1;
+        } else if token
+            .strip_prefix("--user=")
+            .is_some_and(|value| value.contains(':'))
+        {
+            output.push("--user=[redacted]".to_owned());
+        } else {
+            output.push(redacted_shapes(part));
         }
+        index += 1;
     }
     display_text(&output.join(" "), 200)
+}
+
+/// An HTTP authorization scheme whose next word is the credential.
+fn auth_scheme(token: &str) -> bool {
+    ["bearer", "basic", "digest"]
+        .iter()
+        .any(|scheme| token.eq_ignore_ascii_case(scheme))
+}
+
+/// When `words[start]` opens a PEM private key block, the index of the last
+/// word of the block: the end of its END line, or the last word when the
+/// block is not closed. Certificates and public keys are left alone.
+fn private_key_end(words: &[&str], start: usize) -> Option<usize> {
+    let opens = |word: &str, marker: &str| {
+        word.find(marker)
+            .map(|at| word[at + marker.len()..].contains("-----"))
+    };
+    opens(words[start], "-----BEGIN")?;
+    // The BEGIN line runs to the word that closes it with `-----`.
+    let header_end = (start..words.len().min(start + 6)).find(|&at| {
+        if at == start {
+            opens(words[at], "-----BEGIN") == Some(true)
+        } else {
+            words[at].contains("-----")
+        }
+    })?;
+    if !words[start..=header_end].join(" ").contains("PRIVATE KEY") {
+        return None;
+    }
+    let last = words.len() - 1;
+    let Some(end) = (header_end + 1..words.len()).find(|&at| words[at].contains("-----END")) else {
+        return Some(last);
+    };
+    Some(
+        (end..words.len())
+            .find(|&at| {
+                if at == end {
+                    opens(words[at], "-----END") == Some(true)
+                } else {
+                    words[at].contains("-----")
+                }
+            })
+            .unwrap_or(last),
+    )
+}
+
+/// One command word with credential-shaped values replaced: the userinfo of a
+/// URL, a whole base64 secret key, and token-shaped pieces between
+/// punctuation (a query value, a header value, an argument).
+fn redacted_shapes(part: &str) -> String {
+    let part = redacted_base64_runs(&redacted_userinfo(part));
+    let mut output = String::with_capacity(part.len());
+    let mut piece = String::new();
+    let flush = |piece: &mut String, output: &mut String| {
+        if piece != "[redacted]" && token_shape(piece) {
+            output.push_str("[redacted]");
+        } else {
+            output.push_str(piece);
+        }
+        piece.clear();
+    };
+    for ch in part.chars() {
+        if matches!(
+            ch,
+            '=' | ':'
+                | '/'
+                | '@'
+                | ','
+                | ';'
+                | '&'
+                | '?'
+                | '#'
+                | '\''
+                | '"'
+                | '('
+                | ')'
+                | '<'
+                | '>'
+                | '|'
+        ) {
+            flush(&mut piece, &mut output);
+            output.push(ch);
+        } else {
+            piece.push(ch);
+        }
+    }
+    flush(&mut piece, &mut output);
+    output
+}
+
+/// `scheme://user:password@host/...` with the userinfo replaced.
+fn redacted_userinfo(part: &str) -> String {
+    let Some(scheme_end) = part.find("://") else {
+        return part.to_owned();
+    };
+    let authority_start = scheme_end + 3;
+    let authority_end = part[authority_start..]
+        .find(['/', '?', '#'])
+        .map_or(part.len(), |at| authority_start + at);
+    match part[authority_start..authority_end].rfind('@') {
+        Some(at) => format!(
+            "{}[redacted]{}",
+            &part[..authority_start],
+            &part[authority_start + at..]
+        ),
+        None => part.to_owned(),
+    }
+}
+
+/// A value shaped like an access token: a well-known provider prefix, an AWS
+/// access key ID, a JSON Web Token, or a long opaque mix of upper case, lower
+/// case and digits. Plain hex, such as a commit hash, is not a token.
+fn token_shape(piece: &str) -> bool {
+    let token_char = |ch: char| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.');
+    const PREFIXES: [&str; 20] = [
+        "ghp_",
+        "gho_",
+        "ghu_",
+        "ghs_",
+        "ghr_",
+        "github_pat_",
+        "glpat-",
+        "xoxb-",
+        "xoxp-",
+        "xoxa-",
+        "xoxs-",
+        "xoxr-",
+        "xapp-",
+        "sk-",
+        "sk_live_",
+        "sk_test_",
+        "rk_live_",
+        "npm_",
+        "hf_",
+        "AIza",
+    ];
+    let prefixed = PREFIXES.iter().any(|prefix| {
+        piece
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.len() >= 16 && rest.chars().all(token_char))
+    });
+    let aws_key_id = ["AKIA", "ASIA"].iter().any(|prefix| {
+        piece.strip_prefix(prefix).is_some_and(|rest| {
+            rest.len() == 16
+                && rest
+                    .chars()
+                    .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
+        })
+    });
+    let jwt = piece.starts_with("eyJ") && {
+        let parts: Vec<&str> = piece.split('.').collect();
+        parts.len() == 3
+            && parts.iter().all(|part| {
+                part.len() >= 8
+                    && part
+                        .chars()
+                        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+            })
+    };
+    let opaque = piece.len() >= 32
+        && piece
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+        && mixed_case_and_digits(piece)
+        && random_looking(piece);
+    prefixed || aws_key_id || jwt || opaque
+}
+
+/// Long base64 secrets anywhere in a word, such as an AWS secret access key
+/// or a signature in a query or header value, replaced with their padding.
+/// They can contain `/` and `+`, so they are found before the word is split
+/// at punctuation.
+fn redacted_base64_runs(part: &str) -> String {
+    let base64 = |ch: char| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '/');
+    let mut output = String::with_capacity(part.len());
+    let mut rest = part;
+    while let Some(start) = rest.find(base64) {
+        output.push_str(&rest[..start]);
+        rest = &rest[start..];
+        let end = rest.find(|ch| !base64(ch)).unwrap_or(rest.len());
+        let run = &rest[..end];
+        rest = &rest[end..];
+        if base64_secret(run) {
+            output.push_str("[redacted]");
+            rest = rest.trim_start_matches('=');
+        } else {
+            output.push_str(run);
+        }
+    }
+    output.push_str(rest);
+    output
+}
+
+/// A long run of base64 that reads as random: paths start with `/`, and path
+/// or camel-case words change between upper case, lower case and digits far
+/// less often than random keys do.
+fn base64_secret(run: &str) -> bool {
+    run.len() >= 40 && !run.starts_with('/') && mixed_case_and_digits(run) && random_looking(run)
+}
+
+/// Whether at least 35% of adjacent letters and digits switch class between
+/// upper case, lower case and digit. Random base64 switches about 60% of the
+/// time; words, paths and camel-case names about 30% or less.
+fn random_looking(value: &str) -> bool {
+    let classes: Vec<u8> = value
+        .chars()
+        .filter_map(|ch| match ch {
+            'A'..='Z' => Some(0),
+            'a'..='z' => Some(1),
+            '0'..='9' => Some(2),
+            _ => None,
+        })
+        .collect();
+    let pairs = classes.len().saturating_sub(1);
+    let switches = classes.windows(2).filter(|pair| pair[0] != pair[1]).count();
+    pairs > 0 && switches * 100 >= pairs * 35
+}
+
+fn mixed_case_and_digits(value: &str) -> bool {
+    value.chars().any(|ch| ch.is_ascii_uppercase())
+        && value.chars().any(|ch| ch.is_ascii_lowercase())
+        && value.chars().any(|ch| ch.is_ascii_digit())
 }
 
 fn relative_file(value: &str, cwd: Option<&str>) -> Option<String> {
@@ -1066,5 +1310,153 @@ mod tests {
             None
         );
         let _ = std::fs::remove_dir_all(socket.parent().unwrap());
+    }
+
+    /// Secret-shaped values built at run time, so no literal in this file
+    /// looks like a real credential.
+    fn shaped(prefix: &str, body: &str) -> String {
+        format!("{prefix}{body}")
+    }
+
+    #[test]
+    fn commands_hide_unlabeled_secrets() {
+        let pw = shaped("hunter", "2-private");
+        let basic = shaped("YWRtaW46", "aHVudGVyMg==");
+        let github = shaped("ghp_", &"Ab1".repeat(12));
+        let aws = shaped("AKIA", "Q7ZK3M2XN4PL8RTW");
+        let slack = shaped("xoxb-", "1234567890-abcdefABCDEF");
+        let jwt = format!(
+            "{}.{}.{}",
+            shaped("eyJ", "hbGciOiJIUzI1NiJ9"),
+            shaped("eyJ", "zdWIiOiIxIn0"),
+            "c2lnbmF0dXJlLXZhbHVl"
+        );
+        let opaque = shaped("Zq8Lm2Np4Rt6Vx9B", "c3Df5Gh7Jk1Mw0Ys");
+        let aws_secret = shaped("wJalrXUtnFEMI/K7MDENG/", "bPxRfiCY2EXAMPLEKEY");
+        let signed = shaped("Zk9vYmFy+QmF6/", "UXV4Q29yZ2VHcmF1bHQ5OAx7Kp2Wq");
+        let key = |marker: &str| format!("-----{marker} {} PRIVATE KEY-----", "OPENSSH");
+        let cases = [
+            (
+                format!("git clone https://deploy:{pw}@git.example.test/org/repo.git"),
+                "git clone https://[redacted]@git.example.test/org/repo.git".to_owned(),
+            ),
+            (
+                format!("git clone https://{github}@git.example.test/org/repo.git"),
+                "git clone https://[redacted]@git.example.test/org/repo.git".to_owned(),
+            ),
+            (
+                format!("curl -u admin:{pw} https://example.test/api"),
+                "curl -u [redacted] https://example.test/api".to_owned(),
+            ),
+            (
+                format!("curl --user=admin:{pw} https://example.test"),
+                "curl --user=[redacted] https://example.test".to_owned(),
+            ),
+            (
+                format!("curl -H 'Authorization: Basic {basic}' https://example.test"),
+                "curl -H Authorization=[redacted] [redacted] [redacted] https://example.test"
+                    .to_owned(),
+            ),
+            (
+                format!("http example.test Basic {basic}"),
+                "http example.test Basic [redacted]".to_owned(),
+            ),
+            (
+                format!("deploy --registry example.test {github}"),
+                "deploy --registry example.test [redacted]".to_owned(),
+            ),
+            (
+                format!("aws configure set aws_access_key_id {aws}"),
+                "aws configure set aws_access_key_id [redacted]".to_owned(),
+            ),
+            (
+                format!("configure set signing_value {aws_secret}"),
+                "configure set signing_value [redacted]".to_owned(),
+            ),
+            (
+                format!("curl 'https://store.example.test/b?Signature={signed}&Expires=1'"),
+                "curl 'https://store.example.test/b?Signature=[redacted]&Expires=1'".to_owned(),
+            ),
+            (
+                format!("http example.test X-Signing:{signed},next"),
+                "http example.test X-Signing:[redacted],next".to_owned(),
+            ),
+            (
+                format!("deploy --sig {signed}=="),
+                "deploy --sig [redacted]".to_owned(),
+            ),
+            (
+                format!("deploy --sig=({aws_secret});"),
+                "deploy --sig=([redacted]);".to_owned(),
+            ),
+            (
+                format!("curl https://hooks.example.test/x?sig={slack}"),
+                "curl https://hooks.example.test/x?sig=[redacted]".to_owned(),
+            ),
+            (
+                format!("http example.test X-Session:{jwt}"),
+                "http example.test X-Session:[redacted]".to_owned(),
+            ),
+            (
+                format!("deploy --ref {opaque}"),
+                "deploy --ref [redacted]".to_owned(),
+            ),
+            (
+                format!(
+                    "printf '%s' '{}\nb3BlbnNzaC1rZXktdjEAAAAA\nAAAABG5vbmU=\n{}' > id_test && chmod 600 id_test",
+                    key("BEGIN"),
+                    key("END")
+                ),
+                "printf '%s' [redacted private key] > id_test && chmod 600 id_test".to_owned(),
+            ),
+            (
+                format!("cat <<EOF\n{}\nb3BlbnNzaC1rZXktdjEAAAAA", key("BEGIN")),
+                "cat <<EOF [redacted private key]".to_owned(),
+            ),
+        ];
+        for (command, expected) in &cases {
+            assert_eq!(&redacted_command(command), expected, "{command}");
+        }
+        for secret in [
+            &pw,
+            &basic,
+            &github,
+            &aws,
+            &slack,
+            &jwt,
+            &opaque,
+            &aws_secret,
+        ] {
+            for (command, _) in &cases {
+                assert!(
+                    !redacted_command(command).contains(secret.as_str()),
+                    "{secret} leaked from {command}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_commands_are_not_redacted() {
+        for command in [
+            "git checkout 3bd2b933a1f0c4e5d6b7a8c9d0e1f2a3b4c5d6e7",
+            "cargo test -p prismattyc-mux --test pane_log_restart -- --nocapture",
+            "python -u scripts/build_release_notes.py --out dist/notes.md",
+            "sort -u names.txt",
+            "curl -fsSL https://example.test/install.sh",
+            "git log --format=%H origin/main..HEAD",
+            "rm cache/123e4567-e89b-12d3-a456-426614174000.json",
+            "ssh deploy@build.example.test uptime",
+            "git clone git@git.example.test:org/repo.git",
+            "npm install @scope/package@1.2.3 sk-learn",
+            "rename ExampleCamelCaseIdentifierNameWithoutDigits",
+            "ls crates/prismattyc-mux/src/bin/pmux/activity_emit.rs",
+            "echo -----BEGIN CERTIFICATE----- MIIBszCCAVmgAwIBAgIU -----END CERTIFICATE-----",
+            "curl https://git.example.test/moonbase2090/Prismattyc/releases/tag/v0.3.73",
+            "open https://docs.example.test/guides/GettingStarted/InstallingOnLinux2",
+            "cat src/main/java/com/example/AccountService/RetryPolicy2.java",
+        ] {
+            assert_eq!(redacted_command(command), command);
+        }
     }
 }

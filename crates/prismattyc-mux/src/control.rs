@@ -13220,44 +13220,34 @@ function Read-Exact([int]$Count) {
         (plane, window.get(), pane.get())
     }
 
-    /// The console host of a Windows process, from the process information
-    /// class that names it. The low two bits of the value are flags.
+    /// Pseudoconsole hosts this process started for a console `cols` wide.
+    /// The width is part of each headless host's command line.
     #[cfg(windows)]
-    fn console_host_of(pid: u32) -> Option<u32> {
-        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
-        use windows_sys::Win32::System::Threading::{
-            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-        };
-        #[link(name = "ntdll")]
-        extern "system" {
-            fn NtQueryInformationProcess(
-                process: HANDLE,
-                class: u32,
-                information: *mut std::ffi::c_void,
-                length: u32,
-                returned: *mut u32,
-            ) -> i32;
-        }
-        const PROCESS_CONSOLE_HOST_PROCESS: u32 = 49;
-        // SAFETY: the handle is checked, the output buffer is a live usize of
-        // the stated length, and the handle is closed before returning.
-        unsafe {
-            let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-            if process.is_null() {
-                return None;
-            }
-            let mut host: usize = 0;
-            let status = NtQueryInformationProcess(
-                process,
-                PROCESS_CONSOLE_HOST_PROCESS,
-                (&mut host as *mut usize).cast(),
-                std::mem::size_of::<usize>() as u32,
-                std::ptr::null_mut(),
-            );
-            CloseHandle(process);
-            let host = host & !3;
-            (status == 0 && host != 0).then_some(host as u32)
-        }
+    fn pseudoconsole_hosts(cols: u16) -> Vec<u32> {
+        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+        let me = sysinfo::Pid::from_u32(std::process::id());
+        let mut system = System::new();
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+        );
+        let width = format!("--width {cols} ");
+        system
+            .processes()
+            .values()
+            .filter(|process| process.parent() == Some(me))
+            .filter(|process| {
+                let line = process
+                    .cmd()
+                    .iter()
+                    .map(|part| part.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                line.contains("--headless") && line.contains(&width)
+            })
+            .map(|process| process.pid().as_u32())
+            .collect()
     }
 
     /// A connected client keeps its connection thread, and with it the plane,
@@ -13271,13 +13261,28 @@ function Read-Exact([int]$Count) {
         use windows_sys::Win32::System::Threading::{
             OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
         };
-        let (plane, _, pane) = live_fixture("console-host");
-        let child = plane
-            .live
-            .as_ref()
-            .and_then(|live| live.child_pid(pane))
-            .expect("pane child pid");
-        let host = console_host_of(child).expect("pane console host");
+        // An unusual width tells this pane's console host apart from those
+        // of other tests.
+        const COLS: u16 = 101;
+        let domain = Domain::bootstrap("live").unwrap();
+        let session = domain.sessions().next().unwrap();
+        let window = session.windows[0];
+        let pane = domain.window(window).unwrap().layout.panes()[0];
+        let plane = ControlPlane::new_live(
+            domain,
+            [WindowBounds {
+                window_id: window.get(),
+                cols: COLS.into(),
+                rows: 24,
+            }],
+            Some(32),
+            [(pane.get(), live_shell_spawn("console-host"))],
+            None,
+        )
+        .unwrap();
+        let hosts = pseudoconsole_hosts(COLS);
+        assert_eq!(hosts.len(), 1, "one console host for the pane: {hosts:?}");
+        let host = hosts[0];
         // SAFETY: a plain open of a process id for waiting; checked below.
         let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, host) };
         assert!(!handle.is_null(), "open console host {host}");

@@ -118,8 +118,10 @@ the sender id for readers that only see the original detail fields. A room push
 hint uses `kind: room_message`, `run_id` and `detail.room_id` set to the room id,
 and `event_id` set to the message id. Neither event carries subject, body, or
 display text. The daemon records mail when the feed is enabled. A room producer
-publishes the same request on the activity socket. `pmux_activity_wait` reads
-these events through the existing `activity.read` grant. Its `timeout_ms` is at
+publishes the same request on the activity socket. The published read page
+keeps its existing event kinds, so a room arrival is not rewritten as another
+kind. `pmux_activity_wait` reads these events through the arrivals contract and
+the existing `activity.read` grant. Its `timeout_ms` is at
 most 60000, and a plug-in call returns within 750 ms. A match already in the
 feed returns on the first read.
 

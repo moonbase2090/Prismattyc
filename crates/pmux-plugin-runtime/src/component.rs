@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, ensure, Context as _, Result};
 use pmux_plugin_api::host::pmux::{
-    activity::{manage, read},
+    activity::{arrivals, manage, read},
     plugin::host,
     plugin::lifecycle,
     view::frame,
@@ -373,14 +373,16 @@ impl read::Host for HostState {
     ) -> Result<read::Page, read::Error> {
         Ok(convert_page(self.activity_page(endpoint, after, limit)?))
     }
+}
 
+impl arrivals::Host for HostState {
     fn wait(
         &mut self,
         endpoint: u64,
         seat: String,
         kinds: Vec<String>,
         timeout_ms: u32,
-    ) -> Result<read::Page, read::Error> {
+    ) -> Result<arrivals::Batch, read::Error> {
         self.admit_read()?;
         let seat = prismattyc_core::AgentId::new(seat).map_err(|_| read::Error::InvalidRequest)?;
         let kinds = kinds
@@ -436,7 +438,7 @@ impl read::Host for HostState {
         {
             return Err(read::Error::InvalidRequest);
         }
-        Ok(convert_page(page))
+        Ok(convert_batch(page))
     }
 }
 
@@ -576,6 +578,7 @@ fn convert_page(page: domain::ActivityPage) -> read::Page {
         records: page
             .records
             .into_iter()
+            .filter(|record| record.event.kind != domain::ActivityKind::RoomMessage)
             .map(|record| read::ActivityRecord {
                 sequence: record.sequence,
                 received_at_ms: record.received_at_ms,
@@ -640,7 +643,70 @@ fn convert_kind(kind: domain::ActivityKind) -> read::Kind {
         K::Stopped => read::Kind::Stopped,
         K::MailSent => read::Kind::MailSent,
         K::MailReceived => read::Kind::MailReceived,
-        K::RoomMessage => read::Kind::RoomMessage,
+        // Room arrivals stay on the arrivals contract. A published reader
+        // cannot represent that kind, and this arm is not reached for them.
+        K::RoomMessage => read::Kind::MailReceived,
+    }
+}
+
+fn convert_source(source: domain::ActivitySource) -> read::Source {
+    match source {
+        domain::ActivitySource::Notify => read::Source::Notify,
+        domain::ActivitySource::Hooks => read::Source::Hooks,
+        domain::ActivitySource::Runtime => read::Source::Runtime,
+    }
+}
+
+fn convert_reset(reset: domain::ActivityReset) -> read::Reset {
+    match reset {
+        domain::ActivityReset::Restarted => read::Reset::Restarted,
+        domain::ActivityReset::RetentionGap => read::Reset::RetentionGap,
+        domain::ActivityReset::AheadOfFeed => read::Reset::AheadOfFeed,
+    }
+}
+
+fn convert_batch(page: domain::ActivityPage) -> arrivals::Batch {
+    arrivals::Batch {
+        epoch: page.epoch.clone(),
+        oldest_sequence: page.oldest_sequence,
+        current_sequence: page.current_sequence,
+        cursor_sequence: page.cursor.sequence,
+        has_more: page.has_more,
+        reset: page.reset.map(convert_reset),
+        notices: page
+            .records
+            .into_iter()
+            .map(|record| {
+                let kind = serde_json::to_value(record.event.kind)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .unwrap_or_default();
+                arrivals::Notice {
+                    sequence: record.sequence,
+                    received_at_ms: record.received_at_ms,
+                    schema_version: record.event.schema_version,
+                    seat: record.event.seat.to_string(),
+                    run_id: record.event.run_id,
+                    event_id: record.event.event_id,
+                    source: convert_source(record.event.source),
+                    kind,
+                    detail: record.event.detail.map(|detail| arrivals::Detail {
+                        tool: detail.tool,
+                        file: detail.file,
+                        command: detail.command,
+                        duration_ms: detail.duration_ms,
+                        exit_code: detail.exit_code,
+                        task: detail.task,
+                        operation_id: detail.operation_id,
+                        model: detail.model,
+                        sender_id: detail.sender_id,
+                        room_id: detail.room_id,
+                        message_id: detail.message_id,
+                        count: detail.count,
+                    }),
+                }
+            })
+            .collect(),
     }
 }
 
@@ -733,6 +799,86 @@ mod tests {
     use pmux_plugin_fixture::{component, module};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    #[test]
+    fn published_read_page_omits_room_arrivals_and_the_batch_keeps_event_metadata() {
+        let seat = prismattyc_core::AgentId::new("worker-a").unwrap();
+        let room = domain::ActivityInput::arrival(
+            seat.clone(),
+            domain::ActivityKind::RoomMessage,
+            "m-1",
+            Some("room-7"),
+            Some("operator-b"),
+            None,
+        )
+        .unwrap();
+        let tool = domain::ActivityInput {
+            schema_version: 1,
+            seat,
+            run_id: "run-1".into(),
+            event_id: "event-9".into(),
+            source: domain::ActivitySource::Hooks,
+            kind: domain::ActivityKind::ToolFinished,
+            detail: Some(domain::ActivityDetail {
+                tool: Some("cargo".into()),
+                ..domain::ActivityDetail::default()
+            }),
+            process_ids: Vec::new(),
+        };
+        let page = domain::ActivityPage {
+            epoch: "e0".into(),
+            oldest_sequence: 1,
+            current_sequence: 2,
+            records: vec![
+                domain::ActivityRecord {
+                    sequence: 1,
+                    received_at_ms: 10,
+                    event: room,
+                },
+                domain::ActivityRecord {
+                    sequence: 2,
+                    received_at_ms: 11,
+                    event: tool,
+                },
+            ],
+            cursor: domain::ActivityCursor {
+                epoch: "e0".into(),
+                sequence: 2,
+            },
+            has_more: false,
+            reset: Some(domain::ActivityReset::Restarted),
+            sessions: None,
+        };
+        let published = convert_page(page.clone());
+        assert_eq!(published.records.len(), 1);
+        assert_eq!(published.records[0].sequence, 2);
+        assert_eq!(published.records[0].event.kind, read::Kind::ToolFinished);
+        assert_eq!(
+            published.records[0]
+                .event
+                .detail
+                .as_ref()
+                .unwrap()
+                .tool
+                .as_deref(),
+            Some("cargo")
+        );
+        let batch = convert_batch(page);
+        assert_eq!(batch.notices.len(), 2);
+        assert!(matches!(batch.reset, Some(read::Reset::Restarted)));
+        assert_eq!(batch.notices[0].kind, "room_message");
+        assert_eq!(batch.notices[0].schema_version, 1);
+        let room_detail = batch.notices[0].detail.as_ref().unwrap();
+        assert_eq!(room_detail.room_id.as_deref(), Some("room-7"));
+        assert_eq!(room_detail.sender_id.as_deref(), Some("operator-b"));
+        assert_eq!(room_detail.message_id.as_deref(), Some("m-1"));
+        assert_eq!(batch.notices[1].kind, "tool_finished");
+        assert!(matches!(batch.notices[1].source, read::Source::Hooks));
+        assert_eq!(
+            batch.notices[1].detail.as_ref().unwrap().tool.as_deref(),
+            Some("cargo")
+        );
+    }
 
     #[test]
     fn static_validation_does_not_run_a_core_start_function() {

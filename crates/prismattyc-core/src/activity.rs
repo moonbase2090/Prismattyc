@@ -351,7 +351,7 @@ pub fn wait_for_activity<E>(
             return Ok(page);
         }
         let remaining = deadline.saturating_sub(now_ms());
-        let slice = remaining.min(WAIT_SLICE_MS).max(1);
+        let slice = remaining.clamp(1, WAIT_SLICE_MS);
         sleep(slice);
         spins += 1;
     }

@@ -10,7 +10,7 @@ interface read {
         command-started, command-finished, command-failed,
         edit-started, edit-finished, edit-failed,
         test-started, test-passed, test-failed,
-        working, waiting, stopped, mail-sent, mail-received, room-message,
+        working, waiting, stopped, mail-sent, mail-received,
     }
     record detail {
         tool: option<string>,
@@ -72,9 +72,49 @@ interface read {
     sessions: func(endpoint: u64) -> result<option<session-snapshot>, error>;
     endpoints: func() -> result<list<endpoint>, error>;
     poll: func(endpoint: u64, after: option<cursor>, limit: u16) -> result<page, error>;
+}
+
+/// Mail and room arrivals, plus the wait used by newer readers.
+/// Kept off `read` so an already published reader still links against that interface.
+interface arrivals {
+    use read.{error, source, reset};
+    record detail {
+        tool: option<string>,
+        file: option<string>,
+        command: option<string>,
+        duration-ms: option<u64>,
+        exit-code: option<s32>,
+        task: option<string>,
+        operation-id: option<string>,
+        model: option<string>,
+        sender-id: option<string>,
+        room-id: option<string>,
+        message-id: option<string>,
+        count: option<u32>,
+    }
+    record notice {
+        sequence: u64,
+        received-at-ms: u64,
+        schema-version: u16,
+        seat: string,
+        run-id: string,
+        event-id: string,
+        source: source,
+        kind: string,
+        detail: option<detail>,
+    }
+    record batch {
+        epoch: string,
+        oldest-sequence: u64,
+        current-sequence: u64,
+        cursor-sequence: u64,
+        has-more: bool,
+        reset: option<reset>,
+        notices: list<notice>,
+    }
     /// Blocks on the host until `seat` has an event of `kinds`, or `timeout-ms` elapses.
     /// `timeout-ms` is capped by the host. A match already in the feed returns on the first read.
-    wait: func(endpoint: u64, seat: string, kinds: list<string>, timeout-ms: u32) -> result<page, error>;
+    wait: func(endpoint: u64, seat: string, kinds: list<string>, timeout-ms: u32) -> result<batch, error>;
 }
 
 interface manage {

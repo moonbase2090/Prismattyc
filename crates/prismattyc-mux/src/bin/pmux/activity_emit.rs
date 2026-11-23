@@ -381,37 +381,24 @@ fn redacted_userinfo(part: &str) -> String {
     }
 }
 
+/// Provider prefixes separated by NUL. Adjacent prefixes would read as one
+/// token-shaped value in a built binary.
+const PREFIX_BYTES: &[u8] =
+    b"ghp_\0gho_\0ghu_\0ghs_\0ghr_\0github_pat_\0glpat-\0xoxb-\0xoxp-\0xoxa-\0xoxs-\0xoxr-\0xapp-\0sk-\0sk_live_\0sk_test_\0rk_live_\0npm_\0hf_\0AIza\0";
+
 /// A value shaped like an access token: a well-known provider prefix, an AWS
 /// access key ID, a JSON Web Token, or a long opaque mix of upper case, lower
 /// case and digits. Plain hex, such as a commit hash, is not a token.
 fn token_shape(piece: &str) -> bool {
     let token_char = |ch: char| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.');
-    const PREFIXES: [&str; 20] = [
-        "ghp_",
-        "gho_",
-        "ghu_",
-        "ghs_",
-        "ghr_",
-        "github_pat_",
-        "glpat-",
-        "xoxb-",
-        "xoxp-",
-        "xoxa-",
-        "xoxs-",
-        "xoxr-",
-        "xapp-",
-        "sk-",
-        "sk_live_",
-        "sk_test_",
-        "rk_live_",
-        "npm_",
-        "hf_",
-        "AIza",
-    ];
-    let prefixed = PREFIXES.iter().any(|prefix| {
-        piece
-            .strip_prefix(prefix)
-            .is_some_and(|rest| rest.len() >= 16 && rest.chars().all(token_char))
+    let prefixed = PREFIX_BYTES.split(|byte| *byte == 0).any(|prefix| {
+        let Ok(prefix) = std::str::from_utf8(prefix) else {
+            return false;
+        };
+        !prefix.is_empty()
+            && piece
+                .strip_prefix(prefix)
+                .is_some_and(|rest| rest.len() >= 16 && rest.chars().all(token_char))
     });
     let aws_key_id = ["AKIA", "ASIA"].iter().any(|prefix| {
         piece.strip_prefix(prefix).is_some_and(|rest| {
@@ -1316,6 +1303,33 @@ mod tests {
     /// looks like a real credential.
     fn shaped(prefix: &str, body: &str) -> String {
         format!("{prefix}{body}")
+    }
+
+    #[test]
+    fn stored_prefixes_stay_separate_strings() {
+        let parts: Vec<&str> = PREFIX_BYTES
+            .split(|byte| *byte == 0)
+            .filter(|part| !part.is_empty())
+            .map(|part| std::str::from_utf8(part).unwrap())
+            .collect();
+        assert_eq!(parts.len(), 20);
+        let release_token = |text: &str| {
+            ["ghp_", "gho_", "ghs_", "ghu_", "github_pat_"]
+                .iter()
+                .any(|head| {
+                    text.match_indices(head).any(|(at, _)| {
+                        text[at + head.len()..]
+                            .chars()
+                            .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+                            .count()
+                            >= 20
+                    })
+                })
+        };
+        for part in &parts {
+            assert!(!release_token(part), "{part}");
+        }
+        assert!(release_token(&parts.join("")));
     }
 
     #[test]

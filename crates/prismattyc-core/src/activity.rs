@@ -316,12 +316,15 @@ pub const MAX_ACTIVITY_WAIT_MS: u64 = 60_000;
 pub const PLUGIN_ACTIVITY_WAIT_MS: u64 = 750;
 pub const WAIT_SLICE_MS: u64 = 50;
 
+/// One retained feed is at most this many pages when each page holds one record.
+const MAX_BACKLOG_PAGES: u32 = 512;
+
 /// Poll until `seat` has an event of `kinds`, or the timeout elapses.
-/// A match already in the first page returns without sleeping.
-/// Each sleep is at most [`WAIT_SLICE_MS`]. A stuck clock still stops:
-/// the poll count cannot exceed `timeout / WAIT_SLICE_MS + 1`.
+/// A match already retained returns without sleeping, including one past the
+/// first page. Each sleep is at most [`WAIT_SLICE_MS`]. A stuck clock still
+/// stops: the wait count cannot exceed `timeout / WAIT_SLICE_MS + 1`.
 pub fn wait_for_activity<E>(
-    mut poll: impl FnMut() -> Result<ActivityPage, E>,
+    mut poll: impl FnMut(Option<&ActivityCursor>) -> Result<ActivityPage, E>,
     mut sleep: impl FnMut(u64),
     mut now_ms: impl FnMut() -> u64,
     seat: &crate::AgentId,
@@ -335,17 +338,29 @@ pub fn wait_for_activity<E>(
         .saturating_add(1);
     let mut spins = 0u32;
     loop {
-        let mut page = poll()?;
-        let matched = page
-            .records
-            .iter()
-            .filter(|record| &record.event.seat == seat && kinds.contains(&record.event.kind))
-            .cloned()
-            .collect::<Vec<_>>();
-        if !matched.is_empty() {
-            page.records = matched;
-            return Ok(page);
-        }
+        let mut after = None;
+        let mut pages = 0u32;
+        let mut page = loop {
+            let mut page = poll(after.as_ref())?;
+            pages += 1;
+            let matched = page
+                .records
+                .iter()
+                .filter(|record| &record.event.seat == seat && kinds.contains(&record.event.kind))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !matched.is_empty() {
+                page.records = matched;
+                return Ok(page);
+            }
+            let stalled = after.as_ref().is_some_and(|cursor| {
+                cursor.epoch == page.cursor.epoch && cursor.sequence >= page.cursor.sequence
+            });
+            if !page.has_more || stalled || pages >= MAX_BACKLOG_PAGES {
+                break page;
+            }
+            after = Some(page.cursor.clone());
+        };
         if timeout_ms == 0 || now_ms() >= deadline || spins >= max_spins {
             page.records.clear();
             return Ok(page);
@@ -523,7 +538,7 @@ mod tests {
         let mut polls = 0;
         let mut slept = 0u64;
         let found = wait_for_activity(
-            || {
+            |_| {
                 polls += 1;
                 Ok::<_, &'static str>(page.clone())
             },
@@ -545,7 +560,7 @@ mod tests {
         empty.records.clear();
         empty.current_sequence = 0;
         let timed_out = wait_for_activity(
-            || {
+            |_| {
                 polls += 1;
                 Ok::<_, &'static str>(empty.clone())
             },
@@ -560,5 +575,79 @@ mod tests {
         assert!(polls <= 22, "{polls}");
         assert!(slices.iter().all(|slice| *slice <= WAIT_SLICE_MS));
         assert!(slices.len() < polls);
+    }
+
+    #[test]
+    fn wait_returns_a_match_after_the_first_retained_page() {
+        let seat = crate::AgentId::new("worker-a").unwrap();
+        let mut polls = 0u32;
+        let mut slept = 0u64;
+        let found = wait_for_activity(
+            |after| {
+                polls += 1;
+                let start = after.map(|cursor| cursor.sequence).unwrap_or(0);
+                let records = (start + 1..=257)
+                    .take(256)
+                    .map(|sequence| {
+                        let event_id = format!("event-{sequence}");
+                        let event = if sequence == 257 {
+                            ActivityInput::arrival(
+                                seat.clone(),
+                                ActivityKind::MailReceived,
+                                &event_id,
+                                None,
+                                Some("operator-b"),
+                                None,
+                            )
+                            .unwrap()
+                        } else {
+                            ActivityInput {
+                                schema_version: 1,
+                                seat: seat.clone(),
+                                run_id: "run-1".into(),
+                                event_id,
+                                source: ActivitySource::Runtime,
+                                kind: ActivityKind::Working,
+                                detail: None,
+                                process_ids: Vec::new(),
+                            }
+                        };
+                        ActivityRecord {
+                            sequence,
+                            received_at_ms: sequence,
+                            event,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let through = records
+                    .last()
+                    .map(|record| record.sequence)
+                    .unwrap_or(start);
+                Ok::<_, &'static str>(ActivityPage {
+                    epoch: "e0".into(),
+                    oldest_sequence: 1,
+                    current_sequence: 257,
+                    records,
+                    cursor: ActivityCursor {
+                        epoch: "e0".into(),
+                        sequence: through,
+                    },
+                    has_more: through < 257,
+                    reset: None,
+                    sessions: None,
+                })
+            },
+            |slice| slept += slice,
+            || 0,
+            &seat,
+            &[ActivityKind::MailReceived],
+            0,
+        )
+        .unwrap();
+        assert_eq!(polls, 2);
+        assert_eq!(slept, 0);
+        assert_eq!(found.records.len(), 1);
+        assert_eq!(found.records[0].sequence, 257);
+        assert_eq!(found.records[0].event.event_id, "event-257");
     }
 }

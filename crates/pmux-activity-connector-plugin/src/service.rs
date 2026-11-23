@@ -27,7 +27,7 @@ pub trait Metadata {
         timeout_ms: u64,
     ) -> Result<ActivityPage, read::Error> {
         prismattyc_core::activity::wait_for_activity(
-            || self.poll(endpoint, None, 256),
+            |after| self.poll(endpoint, after.cloned(), 256),
             |slice| std::thread::sleep(std::time::Duration::from_millis(slice)),
             || {
                 std::time::SystemTime::now()
@@ -370,7 +370,7 @@ mod tests {
             let clock = std::cell::Cell::new(0u64);
             let slept = std::cell::Cell::new(0u64);
             let page = prismattyc_core::activity::wait_for_activity(
-                || self.poll(endpoint, None, 256),
+                |after| self.poll(endpoint, after.cloned(), 256),
                 |slice| {
                     slept.set(slept.get() + slice);
                     clock.set(clock.get() + slice);

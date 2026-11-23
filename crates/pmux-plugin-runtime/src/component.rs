@@ -402,18 +402,19 @@ impl arrivals::Host for HostState {
         let started = std::time::Instant::now();
         let mut last_page: Option<domain::ActivityPage> = None;
         let page = prismattyc_core::activity::wait_for_activity(
-            || loop {
-                if started.elapsed() >= std::time::Duration::from_millis(timeout_ms) {
-                    return match last_page.take() {
-                        Some(mut page) => {
-                            page.records.clear();
-                            Ok(page)
-                        }
-                        None => self.provider.poll(endpoint, None, 256),
-                    };
-                }
-                match self.provider.poll(endpoint, None, 256) {
+            |after| loop {
+                match self.provider.poll(endpoint, after.cloned(), 256) {
                     Err(read::Error::RateLimited) => {
+                        if started.elapsed() >= std::time::Duration::from_millis(timeout_ms) {
+                            return match last_page.take() {
+                                Some(mut page) => {
+                                    page.records.clear();
+                                    page.has_more = false;
+                                    Ok(page)
+                                }
+                                None => self.provider.poll(endpoint, after.cloned(), 256),
+                            };
+                        }
                         std::thread::sleep(std::time::Duration::from_millis(
                             prismattyc_core::activity::WAIT_SLICE_MS,
                         ));
@@ -878,6 +879,109 @@ mod tests {
             batch.notices[1].detail.as_ref().unwrap().tool.as_deref(),
             Some("cargo")
         );
+    }
+
+    #[test]
+    fn host_wait_returns_a_match_past_the_first_page() {
+        struct Backlog {
+            calls: Arc<AtomicUsize>,
+        }
+        impl ActivityProvider for Backlog {
+            fn endpoints(&mut self) -> Result<Vec<read::Endpoint>, read::Error> {
+                Ok(Vec::new())
+            }
+            fn remove_stopped(&mut self, _: u64, _: u64) -> Result<manage::Removal, String> {
+                Ok(manage::Removal::Missing)
+            }
+            fn poll(
+                &mut self,
+                endpoint: u64,
+                after: Option<domain::ActivityCursor>,
+                limit: u16,
+            ) -> Result<domain::ActivityPage, read::Error> {
+                assert_eq!(endpoint, 7);
+                assert_eq!(limit, 256);
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                let start = after.as_ref().map(|cursor| cursor.sequence).unwrap_or(0);
+                let seat = prismattyc_core::AgentId::new("worker-a").unwrap();
+                let records = (start + 1..=257)
+                    .take(256)
+                    .map(|sequence| {
+                        let event_id = format!("event-{sequence}");
+                        let event = if sequence == 257 {
+                            domain::ActivityInput::arrival(
+                                seat.clone(),
+                                domain::ActivityKind::MailReceived,
+                                &event_id,
+                                None,
+                                Some("operator-b"),
+                                None,
+                            )
+                            .unwrap()
+                        } else {
+                            domain::ActivityInput {
+                                schema_version: 1,
+                                seat: seat.clone(),
+                                run_id: "run-1".into(),
+                                event_id,
+                                source: domain::ActivitySource::Runtime,
+                                kind: domain::ActivityKind::Working,
+                                detail: None,
+                                process_ids: Vec::new(),
+                            }
+                        };
+                        domain::ActivityRecord {
+                            sequence,
+                            received_at_ms: sequence,
+                            event,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let through = records
+                    .last()
+                    .map(|record| record.sequence)
+                    .unwrap_or(start);
+                Ok(domain::ActivityPage {
+                    epoch: "e0".into(),
+                    oldest_sequence: 1,
+                    current_sequence: 257,
+                    records,
+                    cursor: domain::ActivityCursor {
+                        epoch: "e0".into(),
+                        sequence: through,
+                    },
+                    has_more: through < 257,
+                    reset: None,
+                    sessions: None,
+                })
+            }
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut host = HostState {
+            limits: StoreLimitsBuilder::new().build(),
+            phase: Phase::Active,
+            activity: true,
+            session_manage: false,
+            provider: Box::new(Backlog {
+                calls: calls.clone(),
+            }),
+            assets: BTreeMap::new(),
+            started: Instant::now(),
+            imports: BTreeMap::new(),
+            calls: 0,
+        };
+        let batch = arrivals::Host::wait(
+            &mut host,
+            7,
+            "worker-a".into(),
+            vec!["mail_received".into()],
+            0,
+        )
+        .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        assert_eq!(batch.notices.len(), 1);
+        assert_eq!(batch.notices[0].event_id, "event-257");
+        assert_eq!(batch.notices[0].kind, "mail_received");
     }
 
     #[test]

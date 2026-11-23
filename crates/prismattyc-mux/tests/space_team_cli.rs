@@ -71,7 +71,7 @@ fn start_server(socket: &Path, data: &Path) -> ServerGuard {
         data: data.to_path_buf(),
     };
     for _ in 0..100 {
-        if socket.exists() {
+        if support::accepts_connections(socket) {
             return guard;
         }
         std::thread::sleep(Duration::from_millis(20));

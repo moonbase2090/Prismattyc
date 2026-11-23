@@ -3250,6 +3250,15 @@ impl ControlPlane {
         Ok(())
     }
 
+    /// End every live pane at daemon shutdown. Call after `flush_pane_logs`,
+    /// which records the scrollback the next daemon restores.
+    #[cfg(windows)]
+    pub(crate) fn close_live_panes(&mut self) {
+        if let Some(live) = self.live.as_mut() {
+            live.close_all();
+        }
+    }
+
     pub(crate) fn flush_pane_logs(&mut self) {
         // Shutdown must finish the older write before publishing the final state.
         self.pane_log_worker.take();
@@ -7711,10 +7720,17 @@ impl Drop for ControlServer {
         if let Some(thread) = self.attention_thread.take() {
             let _ = thread.join();
         }
-        self.plane
+        let mut plane = self
+            .plane
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .flush_pane_logs();
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        plane.flush_pane_logs();
+        // A connection thread can still hold the plane after this drop, and
+        // the process exit that follows skips its destructors. On Windows a
+        // pane's console host then outlives the daemon, so close them here.
+        #[cfg(windows)]
+        plane.close_live_panes();
+        drop(plane);
         remove_owned_socket(&self.path);
     }
 }
@@ -13202,6 +13218,93 @@ function Read-Exact([int]$Count) {
         // The fixture child is a shell; inject tests model an agent pane.
         plane.set_inject_agent_override(Some(crate::InjectAgent::Claude));
         (plane, window.get(), pane.get())
+    }
+
+    /// The console host of a Windows process, from the process information
+    /// class that names it. The low two bits of the value are flags.
+    #[cfg(windows)]
+    fn console_host_of(pid: u32) -> Option<u32> {
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        #[link(name = "ntdll")]
+        extern "system" {
+            fn NtQueryInformationProcess(
+                process: HANDLE,
+                class: u32,
+                information: *mut std::ffi::c_void,
+                length: u32,
+                returned: *mut u32,
+            ) -> i32;
+        }
+        const PROCESS_CONSOLE_HOST_PROCESS: u32 = 49;
+        // SAFETY: the handle is checked, the output buffer is a live usize of
+        // the stated length, and the handle is closed before returning.
+        unsafe {
+            let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if process.is_null() {
+                return None;
+            }
+            let mut host: usize = 0;
+            let status = NtQueryInformationProcess(
+                process,
+                PROCESS_CONSOLE_HOST_PROCESS,
+                (&mut host as *mut usize).cast(),
+                std::mem::size_of::<usize>() as u32,
+                std::ptr::null_mut(),
+            );
+            CloseHandle(process);
+            let host = host & !3;
+            (status == 0 && host != 0).then_some(host as u32)
+        }
+    }
+
+    /// A connected client keeps its connection thread, and with it the plane,
+    /// alive after the server drops, and the daemon's exit then skips the
+    /// plane's destructors. The pane's console host must exit anyway, or it
+    /// outlives the daemon and keeps its working directory in use.
+    #[cfg(windows)]
+    #[test]
+    fn server_drop_closes_console_hosts_while_a_client_is_connected() {
+        use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+        };
+        let (plane, _, pane) = live_fixture("console-host");
+        let child = plane
+            .live
+            .as_ref()
+            .and_then(|live| live.child_pid(pane))
+            .expect("pane child pid");
+        let host = console_host_of(child).expect("pane console host");
+        // SAFETY: a plain open of a process id for waiting; checked below.
+        let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, host) };
+        assert!(!handle.is_null(), "open console host {host}");
+        let path = socket_path();
+        let server = ControlServer::bind(&path, plane).unwrap();
+        let mut client = UnixStream::connect(server.path()).unwrap();
+        let ping = request(
+            &mut client,
+            &ControlRequest::Ping {
+                version: PROTOCOL_VERSION,
+                request_id: 1,
+            },
+        );
+        assert!(
+            matches!(ping.body, ControlResponseBody::Ok { .. }),
+            "{ping:?}"
+        );
+        drop(server);
+        // SAFETY: `handle` is the open process handle from above.
+        let waited = unsafe { WaitForSingleObject(handle, 30_000) };
+        // SAFETY: closed once, after the wait.
+        unsafe { CloseHandle(handle) };
+        assert_eq!(
+            waited, WAIT_OBJECT_0,
+            "console host {host} still runs after the server stopped"
+        );
+        drop(client);
     }
 
     fn pane_content(response: ControlResponse) -> PaneContent {

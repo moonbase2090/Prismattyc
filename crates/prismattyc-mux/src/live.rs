@@ -193,6 +193,21 @@ struct LivePane {
     size_owner: Option<crate::remote_size::SizeOwner>,
 }
 
+#[cfg(windows)]
+impl Drop for LivePane {
+    fn drop(&mut self) {
+        // Dropping `session` ends the child and closes the pseudoconsole.
+        // The close waits until the console host has written its last frame,
+        // so keep the reader's channel drained until the host exits. The
+        // reader thread then sees end of file and this thread ends with it.
+        let (_, closed) = mpsc::sync_channel(0);
+        let output = std::mem::replace(&mut self.from_pty_rx, closed);
+        let _ = thread::Builder::new()
+            .name("prism-server-pane-close".into())
+            .spawn(move || while output.recv().is_ok() {});
+    }
+}
+
 /// Discovery values stamped into the pane child environment.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct GuestStamp<'a> {
@@ -898,6 +913,17 @@ impl LiveRuntime {
         if self.panes.remove(&pane_id).is_some() {
             self.watch.note();
         }
+    }
+
+    /// End every pane: stop its program and close its pseudoconsole, so its
+    /// console host exits with the daemon instead of outliving it.
+    #[cfg(windows)]
+    pub(crate) fn close_all(&mut self) {
+        if self.panes.is_empty() {
+            return;
+        }
+        self.panes.clear();
+        self.watch.note();
     }
 
     pub(crate) fn apply_geometry(

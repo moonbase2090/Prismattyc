@@ -653,6 +653,10 @@ fn hook_detail(input: &Value) -> Option<prismattyc_mux::activity::ActivityDetail
         task,
         operation_id,
         model,
+        message_id: None,
+        room_id: None,
+        sender_id: None,
+        count: None,
     };
     (detail.tool.is_some()
         || detail.file.is_some()

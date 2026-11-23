@@ -10,7 +10,7 @@ interface read {
         command-started, command-finished, command-failed,
         edit-started, edit-finished, edit-failed,
         test-started, test-passed, test-failed,
-        working, waiting, stopped, mail-sent, mail-received,
+        working, waiting, stopped, mail-sent, mail-received, room-message,
     }
     record detail {
         tool: option<string>,
@@ -72,6 +72,9 @@ interface read {
     sessions: func(endpoint: u64) -> result<option<session-snapshot>, error>;
     endpoints: func() -> result<list<endpoint>, error>;
     poll: func(endpoint: u64, after: option<cursor>, limit: u16) -> result<page, error>;
+    /// Blocks on the host until `seat` has an event of `kinds`, or `timeout-ms` elapses.
+    /// `timeout-ms` is capped by the host. A match already in the feed returns on the first read.
+    wait: func(endpoint: u64, seat: string, kinds: list<string>, timeout-ms: u32) -> result<page, error>;
 }
 
 interface manage {

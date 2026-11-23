@@ -1615,6 +1615,7 @@ fn kind_glyph(kind: ActivityKind) -> (char, SeatState) {
         SessionStarted => ('○', SeatState::Waiting),
         MailSent => ('»', SeatState::Unknown),
         MailReceived => ('«', SeatState::Unknown),
+        RoomMessage => ('«', SeatState::Unknown),
     }
 }
 
@@ -3472,6 +3473,10 @@ mod tests {
                 exit_code,
                 operation_id: Some(format!("op-{}", record.sequence)),
                 model: None,
+                message_id: None,
+                room_id: None,
+                sender_id: None,
+                count: None,
             });
         }
         press(&mut monitor, KeyCode::End);

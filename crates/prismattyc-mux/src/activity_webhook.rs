@@ -129,6 +129,16 @@ pub struct WebhookPayload<'a> {
     pub pane_id: Option<&'a str>,
     pub space: Option<&'a str>,
     pub timestamp: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub room_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<u32>,
 }
 
 pub fn encode_payload(payload: &WebhookPayload<'_>) -> Result<Vec<u8>> {
@@ -219,6 +229,40 @@ impl Debouncer {
 
 fn retry_delay(attempt: u8) -> Duration {
     Duration::from_millis(500u64.saturating_mul(1u64 << attempt.min(6)).min(30_000))
+}
+
+fn is_arrival(kind: ActivityKind) -> bool {
+    matches!(
+        kind,
+        ActivityKind::MailReceived | ActivityKind::MailSent | ActivityKind::RoomMessage
+    )
+}
+
+fn arrival_name(kind: ActivityKind) -> &'static str {
+    match kind {
+        ActivityKind::RoomMessage => "room",
+        ActivityKind::MailSent => "mail",
+        _ => "mail",
+    }
+}
+
+/// Mail and room arrivals enqueue immediately so two messages for one seat
+/// both leave. Other activity still collapses to one body per seat.
+fn stage_delivery(
+    pending: &mut Debouncer,
+    queue: &mut VecDeque<Delivery>,
+    now: Instant,
+    kind: ActivityKind,
+    seat: String,
+    body: Vec<u8>,
+    terminal: bool,
+    runtime: bool,
+) {
+    if is_arrival(kind) {
+        enqueue(queue, body, now);
+    } else {
+        pending.record(now, seat, body, terminal, runtime);
+    }
 }
 
 fn enqueue(queue: &mut VecDeque<Delivery>, body: Vec<u8>, now: Instant) {
@@ -365,6 +409,11 @@ fn run_worker(socket: &Path, config_path: &Path, stopped: mpsc::Receiver<()>) {
                 if let Some((state, reason)) = state_for(record.event.kind) {
                     let timestamp = record.received_at_ms.to_string();
                     let context = session_context.get(record.event.seat.as_str());
+                    let detail = record.event.detail.as_ref();
+                    let message_id = detail
+                        .and_then(|detail| detail.message_id.as_deref())
+                        .or(Some(record.event.event_id.as_str()));
+                    let arrival = is_arrival(record.event.kind);
                     let payload = WebhookPayload {
                         seat: record.event.seat.as_str(),
                         state,
@@ -372,6 +421,11 @@ fn run_worker(socket: &Path, config_path: &Path, stopped: mpsc::Receiver<()>) {
                         pane_id: context.and_then(|context| context.pane_id.as_deref()),
                         space: context.and_then(|context| context.space.as_deref()),
                         timestamp: &timestamp,
+                        event: arrival.then_some(arrival_name(record.event.kind)),
+                        message_id: arrival.then_some(message_id).flatten(),
+                        room_id: detail.and_then(|detail| detail.room_id.as_deref()),
+                        sender_id: detail.and_then(|detail| detail.sender_id.as_deref()),
+                        count: detail.and_then(|detail| detail.count),
                     };
                     if let Ok(body) = encode_payload(&payload) {
                         let terminal = match record.event.source {
@@ -382,8 +436,11 @@ fn run_worker(socket: &Path, config_path: &Path, stopped: mpsc::Receiver<()>) {
                             ActivitySource::Runtime => record.event.kind == ActivityKind::Stopped,
                             ActivitySource::Notify => false,
                         };
-                        pending.record(
+                        stage_delivery(
+                            &mut pending,
+                            &mut queue,
                             Instant::now(),
+                            record.event.kind,
                             record.event.seat.to_string(),
                             body,
                             terminal,
@@ -917,7 +974,8 @@ fn state_for(kind: ActivityKind) -> Option<(&'static str, &'static str)> {
     use ActivityKind::*;
     match kind {
         Waiting => Some(("waiting", "waiting")),
-        MailReceived => Some(("needs-you", "mail received")),
+        MailReceived | MailSent => Some(("needs-you", "mail received")),
+        RoomMessage => Some(("needs-you", "room message")),
         ToolFailed | CommandFailed | EditFailed | TestFailed => Some(("failed", "activity failed")),
         Stopped | SessionFinished | TurnFinished => Some(("stopped", "activity stopped")),
         _ => Some(("working", "activity updated")),
@@ -1028,6 +1086,104 @@ mod tests {
             config.sign("1700000000", body)
         )));
         assert!(request.contains(std::str::from_utf8(body).unwrap()));
+    }
+
+    #[test]
+    fn unchanged_status_payload_omits_arrival_fields() {
+        let payload = WebhookPayload {
+            seat: "worker-a",
+            state: "working",
+            reason: None,
+            pane_id: None,
+            space: None,
+            timestamp: "1700000000",
+            event: None,
+            message_id: None,
+            room_id: None,
+            sender_id: None,
+            count: None,
+        };
+        assert_eq!(
+            encode_payload(&payload).unwrap(),
+            br#"{"seat":"worker-a","state":"working","reason":null,"pane_id":null,"space":null,"timestamp":"1700000000"}"#
+        );
+    }
+
+    #[test]
+    fn arrival_payload_is_signed_metadata_and_distinct_messages_are_not_collapsed() {
+        let payload = WebhookPayload {
+            seat: "worker-a",
+            state: "needs-you",
+            reason: Some("mail received"),
+            pane_id: None,
+            space: None,
+            timestamp: "1700000000",
+            event: Some("mail"),
+            message_id: Some("msg:00000000000000000007"),
+            room_id: None,
+            sender_id: Some("operator-b"),
+            count: Some(1),
+        };
+        let body = encode_payload(&payload).unwrap();
+        let text = std::str::from_utf8(&body).unwrap();
+        assert!(text.contains("msg:00000000000000000007"));
+        assert!(text.contains("operator-b"));
+        assert!(!text.contains("secret-subject"));
+        assert!(!text.contains("secret-body"));
+        let config = WebhookConfig {
+            endpoint: Url::parse("https://example.invalid/hook").unwrap(),
+            secret: b"01234567890123456789012345678901".to_vec(),
+        };
+        let signature = config.sign("1700000000", &body);
+        assert!(signature.starts_with("sha256="));
+        assert_eq!(signature.len(), "sha256=".len() + 64);
+        assert_ne!(signature, config.sign("1700000000", b"{}"));
+
+        let now = Instant::now();
+        let mut pending = Debouncer::default();
+        let mut queue = VecDeque::new();
+        stage_delivery(
+            &mut pending,
+            &mut queue,
+            now,
+            ActivityKind::MailReceived,
+            "worker-a".into(),
+            b"first-letter".to_vec(),
+            false,
+            false,
+        );
+        stage_delivery(
+            &mut pending,
+            &mut queue,
+            now,
+            ActivityKind::RoomMessage,
+            "worker-a".into(),
+            b"room-hint".to_vec(),
+            false,
+            false,
+        );
+        stage_delivery(
+            &mut pending,
+            &mut queue,
+            now,
+            ActivityKind::Working,
+            "worker-a".into(),
+            b"working".to_vec(),
+            false,
+            false,
+        );
+        assert_eq!(
+            queue
+                .iter()
+                .map(|delivery| delivery.body.as_slice())
+                .collect::<Vec<_>>(),
+            vec![b"first-letter".as_slice(), b"room-hint".as_slice()]
+        );
+        assert!(pending.take_ready(now).is_empty());
+        assert_eq!(
+            pending.take_ready(now + DEBOUNCE),
+            vec![b"working".to_vec()]
+        );
     }
 
     #[test]

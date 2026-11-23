@@ -61,6 +61,18 @@ pub struct ActivityDetail {
     /// Opaque correlation key; the UI hides it unless diagnostic IDs are on.
     pub operation_id: Option<String>,
     pub model: Option<String>,
+    /// Letter or room message id. Same character rules as `event_id`.
+    #[serde(default)]
+    pub message_id: Option<String>,
+    /// Room id for a room arrival. Same character rules as `event_id`.
+    #[serde(default)]
+    pub room_id: Option<String>,
+    /// Sender mailbox id. Never a display name or address label.
+    #[serde(default)]
+    pub sender_id: Option<String>,
+    /// Open letters for the recipient after this letter was stored.
+    #[serde(default)]
+    pub count: Option<u32>,
 }
 
 impl ActivityInput {
@@ -96,8 +108,63 @@ impl ActivityInput {
             {
                 return Err("activity operation identifier is invalid");
             }
+            for value in [
+                detail.message_id.as_deref(),
+                detail.room_id.as_deref(),
+                detail.sender_id.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if !valid_identifier(value) {
+                    return Err(
+                        "activity arrival identifiers must be 1..128 ASCII identifier characters",
+                    );
+                }
+            }
         }
         Ok(())
+    }
+
+    /// Metadata for a stored letter or a room push hint.
+    /// `message_id` is also the event id. A room id becomes `run_id`.
+    /// The sender id is copied into `operation_id` so a portable reader that
+    /// only has the original detail fields still sees an id, not display text.
+    pub fn arrival(
+        seat: crate::AgentId,
+        kind: ActivityKind,
+        message_id: &str,
+        room_id: Option<&str>,
+        sender_id: Option<&str>,
+        count: Option<u32>,
+    ) -> Result<Self, &'static str> {
+        let run_id = match kind {
+            ActivityKind::MailReceived | ActivityKind::MailSent => "mail".to_string(),
+            ActivityKind::RoomMessage => room_id
+                .filter(|id| valid_identifier(id))
+                .ok_or("room arrival requires a room id")?
+                .to_string(),
+            _ => return Err("arrival events are mail or room only"),
+        };
+        let event = Self {
+            schema_version: 1,
+            seat,
+            run_id,
+            event_id: message_id.to_string(),
+            source: ActivitySource::Notify,
+            kind,
+            process_ids: Vec::new(),
+            detail: Some(ActivityDetail {
+                message_id: Some(message_id.to_string()),
+                room_id: room_id.map(str::to_string),
+                sender_id: sender_id.map(str::to_string),
+                count,
+                operation_id: sender_id.map(str::to_string),
+                ..ActivityDetail::default()
+            }),
+        };
+        event.validate_metadata()?;
+        Ok(event)
     }
 }
 
@@ -140,6 +207,7 @@ pub enum ActivityKind {
     Stopped,
     MailSent,
     MailReceived,
+    RoomMessage,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,6 +310,53 @@ pub struct ActivityAck {
     pub duplicate: bool,
 }
 
+/// Upper bound for one activity wait, including a clock that never advances.
+pub const MAX_ACTIVITY_WAIT_MS: u64 = 60_000;
+/// Plug-in calls return before the host epoch budget. A longer watch repeats the wait.
+pub const PLUGIN_ACTIVITY_WAIT_MS: u64 = 750;
+pub const WAIT_SLICE_MS: u64 = 50;
+
+/// Poll until `seat` has an event of `kinds`, or the timeout elapses.
+/// A match already in the first page returns without sleeping.
+/// Each sleep is at most [`WAIT_SLICE_MS`]. A stuck clock still stops:
+/// the poll count cannot exceed `timeout / WAIT_SLICE_MS + 1`.
+pub fn wait_for_activity<E>(
+    mut poll: impl FnMut() -> Result<ActivityPage, E>,
+    mut sleep: impl FnMut(u64),
+    mut now_ms: impl FnMut() -> u64,
+    seat: &crate::AgentId,
+    kinds: &[ActivityKind],
+    timeout_ms: u64,
+) -> Result<ActivityPage, E> {
+    let timeout_ms = timeout_ms.min(MAX_ACTIVITY_WAIT_MS);
+    let deadline = now_ms().saturating_add(timeout_ms);
+    let max_spins = u32::try_from(timeout_ms / WAIT_SLICE_MS)
+        .unwrap_or(u32::MAX)
+        .saturating_add(1);
+    let mut spins = 0u32;
+    loop {
+        let mut page = poll()?;
+        let matched = page
+            .records
+            .iter()
+            .filter(|record| &record.event.seat == seat && kinds.contains(&record.event.kind))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !matched.is_empty() {
+            page.records = matched;
+            return Ok(page);
+        }
+        if timeout_ms == 0 || now_ms() >= deadline || spins >= max_spins {
+            page.records.clear();
+            return Ok(page);
+        }
+        let remaining = deadline.saturating_sub(now_ms());
+        let slice = remaining.min(WAIT_SLICE_MS).max(1);
+        sleep(slice);
+        spins += 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,5 +427,138 @@ mod tests {
         assert!(event.validate_metadata().is_err());
         event.detail.as_mut().unwrap().command = Some("x".repeat(257));
         assert!(event.validate_metadata().is_err());
+    }
+
+    #[test]
+    fn arrival_metadata_keeps_ids_and_rejects_content_and_display_text() {
+        let seat = crate::AgentId::new("worker-a").unwrap();
+        let mail = ActivityInput::arrival(
+            seat.clone(),
+            ActivityKind::MailReceived,
+            "msg:00000000000000000042",
+            None,
+            Some("operator-b"),
+            Some(2),
+        )
+        .unwrap();
+        assert_eq!(mail.kind, ActivityKind::MailReceived);
+        assert_eq!(mail.run_id, "mail");
+        assert_eq!(mail.event_id, "msg:00000000000000000042");
+        assert_eq!(mail.source, ActivitySource::Notify);
+        let detail = mail.detail.as_ref().unwrap();
+        assert_eq!(detail.sender_id.as_deref(), Some("operator-b"));
+        assert_eq!(detail.operation_id.as_deref(), Some("operator-b"));
+        assert_eq!(detail.count, Some(2));
+        assert!(detail.tool.is_none() && detail.command.is_none() && detail.file.is_none());
+        let encoded = serde_json::to_string(&mail).unwrap();
+        assert!(!encoded.contains("subject"));
+        assert!(!encoded.contains("hello"));
+
+        let with_body = r#"{"schema_version":1,"seat":"worker-a","run_id":"mail","event_id":"msg:00000000000000000042","source":"notify","kind":"mail_received","detail":{"message_id":"msg:00000000000000000042","body":"hello"}}"#;
+        assert!(serde_json::from_str::<ActivityInput>(with_body).is_err());
+        let with_subject = r#"{"schema_version":1,"seat":"worker-a","run_id":"mail","event_id":"msg:00000000000000000042","source":"notify","kind":"mail_received","detail":{"subject":"hello"}}"#;
+        assert!(serde_json::from_str::<ActivityInput>(with_subject).is_err());
+
+        assert!(ActivityInput::arrival(
+            seat.clone(),
+            ActivityKind::MailReceived,
+            "msg:00000000000000000042",
+            None,
+            Some("not a name"),
+            None,
+        )
+        .is_err());
+        assert!(ActivityInput::arrival(
+            seat.clone(),
+            ActivityKind::RoomMessage,
+            "m-1",
+            None,
+            Some("operator-b"),
+            None,
+        )
+        .is_err());
+        let room = ActivityInput::arrival(
+            seat,
+            ActivityKind::RoomMessage,
+            "m-1",
+            Some("room-7"),
+            Some("operator-b"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(room.run_id, "room-7");
+        assert_eq!(room.kind, ActivityKind::RoomMessage);
+        assert_eq!(room.detail.unwrap().room_id.as_deref(), Some("room-7"));
+    }
+
+    #[test]
+    fn wait_returns_a_queued_match_without_sleeping_and_stops_when_the_clock_does_not_move() {
+        let seat = crate::AgentId::new("worker-a").unwrap();
+        let queued = ActivityInput::arrival(
+            seat.clone(),
+            ActivityKind::MailReceived,
+            "msg:00000000000000000007",
+            None,
+            Some("operator-b"),
+            Some(1),
+        )
+        .unwrap();
+        let page = ActivityPage {
+            epoch: "e0".into(),
+            oldest_sequence: 1,
+            current_sequence: 1,
+            records: vec![ActivityRecord {
+                sequence: 1,
+                received_at_ms: 10,
+                event: queued,
+            }],
+            cursor: ActivityCursor {
+                epoch: "e0".into(),
+                sequence: 1,
+            },
+            has_more: false,
+            reset: None,
+            sessions: None,
+        };
+        let mut polls = 0;
+        let mut slept = 0u64;
+        let found = wait_for_activity(
+            || {
+                polls += 1;
+                Ok::<_, &'static str>(page.clone())
+            },
+            |slice| slept += slice,
+            || 0,
+            &seat,
+            &[ActivityKind::MailReceived],
+            60_000,
+        )
+        .unwrap();
+        assert_eq!(polls, 1);
+        assert_eq!(slept, 0);
+        assert_eq!(found.records.len(), 1);
+        assert_eq!(found.records[0].event.event_id, "msg:00000000000000000007");
+
+        let mut polls = 0;
+        let mut slices = Vec::new();
+        let mut empty = page.clone();
+        empty.records.clear();
+        empty.current_sequence = 0;
+        let timed_out = wait_for_activity(
+            || {
+                polls += 1;
+                Ok::<_, &'static str>(empty.clone())
+            },
+            |slice| slices.push(slice),
+            || 0,
+            &seat,
+            &[ActivityKind::RoomMessage],
+            1_000,
+        )
+        .unwrap();
+        assert!(timed_out.records.is_empty());
+        assert!(polls <= 22, "{polls}");
+        assert!(slices.iter().all(|slice| *slice <= WAIT_SLICE_MS));
+        assert!(slices.len() < polls);
     }
 }

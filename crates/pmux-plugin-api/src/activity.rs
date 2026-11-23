@@ -30,6 +30,10 @@ pub fn page(page: read::Page) -> Result<domain::ActivityPage, read::Error> {
                     task: detail.task,
                     operation_id: detail.operation_id,
                     model: detail.model,
+                    message_id: None,
+                    room_id: None,
+                    sender_id: None,
+                    count: None,
                 }),
                 process_ids: Vec::new(),
             };
@@ -86,6 +90,7 @@ fn kind(kind: read::Kind) -> domain::ActivityKind {
         read::Kind::Stopped => K::Stopped,
         read::Kind::MailSent => K::MailSent,
         read::Kind::MailReceived => K::MailReceived,
+        read::Kind::RoomMessage => K::RoomMessage,
     }
 }
 
@@ -97,6 +102,15 @@ pub fn poll(
     let mut result = page(read::poll(endpoint, after, limit)?)?;
     result.sessions = session_snapshot(read::sessions(endpoint)?)?;
     Ok(result)
+}
+
+pub fn wait(
+    endpoint: u64,
+    seat: &str,
+    kinds: &[String],
+    timeout_ms: u32,
+) -> Result<domain::ActivityPage, read::Error> {
+    page(read::wait(endpoint, seat, kinds, timeout_ms)?)
 }
 
 fn session_snapshot(

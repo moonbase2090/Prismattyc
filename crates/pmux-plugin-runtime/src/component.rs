@@ -373,6 +373,71 @@ impl read::Host for HostState {
     ) -> Result<read::Page, read::Error> {
         Ok(convert_page(self.activity_page(endpoint, after, limit)?))
     }
+
+    fn wait(
+        &mut self,
+        endpoint: u64,
+        seat: String,
+        kinds: Vec<String>,
+        timeout_ms: u32,
+    ) -> Result<read::Page, read::Error> {
+        self.admit_read()?;
+        let seat = prismattyc_core::AgentId::new(seat).map_err(|_| read::Error::InvalidRequest)?;
+        let kinds = kinds
+            .iter()
+            .map(|kind| {
+                serde_json::from_value::<domain::ActivityKind>(serde_json::Value::String(
+                    kind.clone(),
+                ))
+                .map_err(|_| read::Error::InvalidRequest)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if kinds.is_empty() {
+            return Err(read::Error::InvalidRequest);
+        }
+        let timeout_ms =
+            u64::from(timeout_ms).min(prismattyc_core::activity::PLUGIN_ACTIVITY_WAIT_MS);
+        let started = std::time::Instant::now();
+        let mut last_page: Option<domain::ActivityPage> = None;
+        let page = prismattyc_core::activity::wait_for_activity(
+            || loop {
+                if started.elapsed() >= std::time::Duration::from_millis(timeout_ms) {
+                    return match last_page.take() {
+                        Some(mut page) => {
+                            page.records.clear();
+                            Ok(page)
+                        }
+                        None => self.provider.poll(endpoint, None, 256),
+                    };
+                }
+                match self.provider.poll(endpoint, None, 256) {
+                    Err(read::Error::RateLimited) => {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            prismattyc_core::activity::WAIT_SLICE_MS,
+                        ));
+                    }
+                    Ok(page) => {
+                        last_page = Some(page.clone());
+                        return Ok(page);
+                    }
+                    Err(error) => return Err(error),
+                }
+            },
+            |slice| std::thread::sleep(std::time::Duration::from_millis(slice)),
+            || started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+            &seat,
+            &kinds,
+            timeout_ms,
+        )?;
+        if page
+            .records
+            .iter()
+            .any(|record| record.event.validate_metadata().is_err())
+        {
+            return Err(read::Error::InvalidRequest);
+        }
+        Ok(convert_page(page))
+    }
 }
 
 impl host::Host for HostState {
@@ -532,7 +597,7 @@ fn convert_page(page: domain::ActivityPage) -> read::Page {
                         duration_ms: detail.duration_ms,
                         exit_code: detail.exit_code,
                         task: detail.task,
-                        operation_id: detail.operation_id,
+                        operation_id: detail.operation_id.or(detail.sender_id),
                         model: detail.model,
                     }),
                 },
@@ -575,6 +640,7 @@ fn convert_kind(kind: domain::ActivityKind) -> read::Kind {
         K::Stopped => read::Kind::Stopped,
         K::MailSent => read::Kind::MailSent,
         K::MailReceived => read::Kind::MailReceived,
+        K::RoomMessage => read::Kind::RoomMessage,
     }
 }
 

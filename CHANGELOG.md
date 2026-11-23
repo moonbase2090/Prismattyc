@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- The activity feed records a metadata-only mail event when a letter is stored, and it accepts a metadata-only room event on the existing publish path. The signed webhook delivers each of those events immediately. The activity connector adds `pmux_activity_wait`, which returns as soon as a matching event is already queued and otherwise waits at most one bounded timeout. The read grant still covers these events. Letter and room text stay out of the feed.
+
 ## [0.3.75] - 2026-11-23
 
 ### Changed

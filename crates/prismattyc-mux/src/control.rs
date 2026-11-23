@@ -13250,13 +13250,13 @@ function Read-Exact([int]$Count) {
             .collect()
     }
 
-    /// A connected client keeps its connection thread, and with it the plane,
-    /// alive after the server drops, and the daemon's exit then skips the
-    /// plane's destructors. The pane's console host must exit anyway, or it
-    /// outlives the daemon and keeps its working directory in use.
+    /// The daemon exits right after its server drops, while a connection
+    /// thread can still hold the plane, so the plane's destructors never run.
+    /// The pane's console host must exit anyway, or it outlives the daemon and
+    /// keeps its working directory in use.
     #[cfg(windows)]
     #[test]
-    fn server_drop_closes_console_hosts_while_a_client_is_connected() {
+    fn server_drop_closes_console_hosts_while_the_plane_is_still_held() {
         use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
         use windows_sys::Win32::System::Threading::{
             OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
@@ -13288,18 +13288,8 @@ function Read-Exact([int]$Count) {
         assert!(!handle.is_null(), "open console host {host}");
         let path = socket_path();
         let server = ControlServer::bind(&path, plane).unwrap();
-        let mut client = UnixStream::connect(server.path()).unwrap();
-        let ping = request(
-            &mut client,
-            &ControlRequest::Ping {
-                version: PROTOCOL_VERSION,
-                request_id: 1,
-            },
-        );
-        assert!(
-            matches!(ping.body, ControlResponseBody::Ok { .. }),
-            "{ping:?}"
-        );
+        // Stands in for the connection thread that still holds the plane.
+        let held = server.plane();
         drop(server);
         // SAFETY: `handle` is the open process handle from above.
         let waited = unsafe { WaitForSingleObject(handle, 30_000) };
@@ -13309,7 +13299,7 @@ function Read-Exact([int]$Count) {
             waited, WAIT_OBJECT_0,
             "console host {host} still runs after the server stopped"
         );
-        drop(client);
+        drop(held);
     }
 
     fn pane_content(response: ControlResponse) -> PaneContent {

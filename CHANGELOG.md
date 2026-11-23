@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- On Windows, uninstalling after **Update and restart** no longer leaves an empty `bin` folder in the install location. Stopping the daemon now closes each session's console, so its console host exits too, and the daemon no longer keeps the folder it was started from in use. A new daemon started from the install folder opens its first session in your home folder.
+
 ## [0.3.74] - 2026-11-22
 
 ### Changed

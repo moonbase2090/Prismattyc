@@ -173,6 +173,21 @@ fn main() -> Result<()> {
     prismattyc_mux::release_update::forward_installed("pmuxd")?;
 
     let cli = Cli::parse(std::env::args().skip(1))?;
+    let home = prismattyc_mux::platform::home_dir().map(PathBuf::from);
+    let first_pane_dir = prismattyc_mux::platform::first_pane_dir(
+        std::env::current_dir().context("current directory")?,
+        &std::env::current_exe().context("current executable")?,
+        home.clone(),
+    );
+    // Each pane's console host starts in the daemon's folder and keeps it in
+    // use while it runs, so the daemon never stays in the folder it was
+    // started from (often the install folder).
+    #[cfg(windows)]
+    if let Some(home) = &home {
+        if let Err(error) = std::env::set_current_dir(home) {
+            eprintln!("pmuxd: staying in the start folder: {error}");
+        }
+    }
     if cli.experimental_rich {
         std::env::set_var("PRISMATTYC_EXPERIMENTAL_RICH", "1");
     }
@@ -198,7 +213,7 @@ fn main() -> Result<()> {
     let adopt = saved.is_none().then_some(BOOTSTRAP_SESSION);
     let (mut plane, deferred_resumes) = match saved.as_ref() {
         Some(saved) => saved.restore_plane(&cli.socket)?,
-        None => (bootstrap_plane(&cli)?, Vec::new()),
+        None => (bootstrap_plane(&cli, first_pane_dir)?, Vec::new()),
     };
     if let Some(saved) = &saved {
         saved.checkpoint(&cli.socket)?;
@@ -317,7 +332,7 @@ fn activity_enabled(cli: &Cli, file: Option<&prismattyc_mux::MuxSection>) -> boo
         })
 }
 
-fn bootstrap_plane(cli: &Cli) -> Result<ControlPlane> {
+fn bootstrap_plane(cli: &Cli, first_pane_dir: PathBuf) -> Result<ControlPlane> {
     let domain = Domain::bootstrap(BOOTSTRAP_SESSION)?;
     let session = domain
         .sessions()
@@ -342,7 +357,7 @@ fn bootstrap_plane(cli: &Cli) -> Result<ControlPlane> {
     let spawn = SpawnSpec {
         program: cli.program.clone(),
         argv: cli.argv.clone(),
-        cwd: Some(std::env::current_dir().context("current directory")?),
+        cwd: Some(first_pane_dir),
         env: fold_hive_seat_env(),
     };
     let plane = ControlPlane::new_live(

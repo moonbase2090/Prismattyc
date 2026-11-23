@@ -3250,6 +3250,15 @@ impl ControlPlane {
         Ok(())
     }
 
+    /// End every live pane at daemon shutdown. Call after `flush_pane_logs`,
+    /// which records the scrollback the next daemon restores.
+    #[cfg(windows)]
+    pub(crate) fn close_live_panes(&mut self) {
+        if let Some(live) = self.live.as_mut() {
+            live.close_all();
+        }
+    }
+
     pub(crate) fn flush_pane_logs(&mut self) {
         // Shutdown must finish the older write before publishing the final state.
         self.pane_log_worker.take();
@@ -7711,10 +7720,17 @@ impl Drop for ControlServer {
         if let Some(thread) = self.attention_thread.take() {
             let _ = thread.join();
         }
-        self.plane
+        let mut plane = self
+            .plane
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .flush_pane_logs();
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        plane.flush_pane_logs();
+        // A connection thread can still hold the plane after this drop, and
+        // the process exit that follows skips its destructors. On Windows a
+        // pane's console host then outlives the daemon, so close them here.
+        #[cfg(windows)]
+        plane.close_live_panes();
+        drop(plane);
         remove_owned_socket(&self.path);
     }
 }
@@ -13202,6 +13218,99 @@ function Read-Exact([int]$Count) {
         // The fixture child is a shell; inject tests model an agent pane.
         plane.set_inject_agent_override(Some(crate::InjectAgent::Claude));
         (plane, window.get(), pane.get())
+    }
+
+    /// Pseudoconsole hosts this process started for a console `cols` wide.
+    /// The width is part of each headless host's command line.
+    #[cfg(windows)]
+    fn pseudoconsole_hosts(cols: u16) -> Vec<u32> {
+        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+        let me = sysinfo::Pid::from_u32(std::process::id());
+        let mut system = System::new();
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+        );
+        let width = format!("--width {cols} ");
+        system
+            .processes()
+            .values()
+            .filter(|process| process.parent() == Some(me))
+            .filter(|process| {
+                let line = process
+                    .cmd()
+                    .iter()
+                    .map(|part| part.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                line.contains("--headless") && line.contains(&width)
+            })
+            .map(|process| process.pid().as_u32())
+            .collect()
+    }
+
+    /// The daemon exits right after its server drops, while a connection
+    /// thread can still hold the plane, so the plane's destructors never run.
+    /// The pane's console host must exit anyway, or it outlives the daemon and
+    /// keeps its working directory in use.
+    #[cfg(windows)]
+    #[test]
+    fn server_drop_closes_console_hosts_while_the_plane_is_still_held() {
+        use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+        };
+        // An unusual width tells this pane's console host apart from those
+        // of other tests.
+        const COLS: u16 = 101;
+        let domain = Domain::bootstrap("live").unwrap();
+        let session = domain.sessions().next().unwrap();
+        let window = session.windows[0];
+        let pane = domain.window(window).unwrap().layout.panes()[0];
+        let plane = ControlPlane::new_live(
+            domain,
+            [WindowBounds {
+                window_id: window.get(),
+                cols: COLS.into(),
+                rows: 24,
+            }],
+            Some(32),
+            [(pane.get(), live_shell_spawn("console-host"))],
+            None,
+        )
+        .unwrap();
+        let hosts = pseudoconsole_hosts(COLS);
+        assert_eq!(hosts.len(), 1, "one console host for the pane: {hosts:?}");
+        let host = hosts[0];
+        // SAFETY: a plain open of a process id for waiting; checked below.
+        let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, host) };
+        assert!(!handle.is_null(), "open console host {host}");
+        let path = socket_path();
+        let server = ControlServer::bind(&path, plane).unwrap();
+        // Stands in for the connection thread that still holds the plane.
+        let held = server.plane();
+        // Nothing has read the pane yet, so its console host is still waiting
+        // for an answer to its cursor position request. Stopping must not
+        // wait on that host forever.
+        let (stopped_tx, stopped) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            drop(server);
+            let _ = stopped_tx.send(());
+        });
+        assert!(
+            stopped.recv_timeout(Duration::from_secs(30)).is_ok(),
+            "the server did not finish stopping"
+        );
+        // SAFETY: `handle` is the open process handle from above.
+        let waited = unsafe { WaitForSingleObject(handle, 30_000) };
+        // SAFETY: closed once, after the wait.
+        unsafe { CloseHandle(handle) };
+        assert_eq!(
+            waited, WAIT_OBJECT_0,
+            "console host {host} still runs after the server stopped"
+        );
+        drop(held);
     }
 
     fn pane_content(response: ControlResponse) -> PaneContent {

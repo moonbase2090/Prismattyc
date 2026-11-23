@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- On Windows, uninstalling after **Update and restart** no longer leaves an empty `bin` folder in the install location. Stopping the daemon now closes each session's console, so its console host exits too, and the daemon no longer keeps the folder it was started from in use. A new daemon started from the install folder opens its first session in your home folder.
 - Credential prefixes used to hide access tokens in command summaries are stored as separate strings. A release build no longer contains one token-shaped value made by placing those prefixes next to each other. The recognized token formats are unchanged.
 
 ## [0.3.74] - 2026-11-22

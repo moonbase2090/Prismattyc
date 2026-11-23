@@ -77,7 +77,7 @@ interface read {
 /// Mail and room arrivals, plus the wait used by newer readers.
 /// Kept off `read` so an already published reader still links against that interface.
 interface arrivals {
-    use read.{error, source, reset};
+    use read.{error, source, reset, cursor};
     record detail {
         tool: option<string>,
         file: option<string>,
@@ -114,7 +114,9 @@ interface arrivals {
     }
     /// Blocks on the host until `seat` has an event of `kinds`, or `timeout-ms` elapses.
     /// `timeout-ms` is capped by the host. A match already in the feed returns on the first read.
-    wait: func(endpoint: u64, seat: string, kinds: list<string>, timeout-ms: u32) -> result<batch, error>;
+    /// `after` is the caller's progress. None starts at the oldest retained record.
+    /// A later call passes the returned cursor so that match is not delivered again.
+    wait: func(endpoint: u64, seat: string, kinds: list<string>, timeout-ms: u32, after: option<cursor>) -> result<batch, error>;
 }
 
 interface manage {

@@ -57,6 +57,7 @@ pmux plugin install org.moonbase.activity-connector@1.1.0
 pmux plugin enable org.moonbase.activity-connector --allow activity.read:local
 pmux plugin invoke org.moonbase.activity-connector:seats --json '{}'
 pmux plugin invoke org.moonbase.activity-connector:wait --json '{"seat":"worker-a","kinds":["mail_received","room_message"],"timeout_ms":750}'
+pmux plugin invoke org.moonbase.activity-connector:wait --json '{"seat":"worker-a","kinds":["mail_received"],"timeout_ms":0,"cursor":"a0:7"}'
 pmux-mcp --activity-only
 ```
 

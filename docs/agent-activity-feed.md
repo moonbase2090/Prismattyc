@@ -123,7 +123,8 @@ keeps its existing event kinds, so a room arrival is not rewritten as another
 kind. `pmux_activity_wait` reads these events through the arrivals contract and
 the existing `activity.read` grant. Its `timeout_ms` is at
 most 60000, and a plug-in call returns within 750 ms. A match already in the
-feed returns on the first read.
+feed returns on the first read. The caller passes that result's `next_cursor`
+as `cursor` on the next wait, which then starts after the delivered record.
 
 `process_ids` is a bounded list of process IDs: hook adapters report their
 nearest non-shell owner, and runtime projection reports the foreground or

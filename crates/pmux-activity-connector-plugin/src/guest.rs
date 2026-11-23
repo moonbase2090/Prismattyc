@@ -38,6 +38,7 @@ impl Metadata for NativeMetadata {
         endpoint: u64,
         seat: &AgentId,
         kinds: &[ActivityKind],
+        after: Option<&ActivityCursor>,
         timeout_ms: u64,
     ) -> Result<ActivityPage, read::Error> {
         let names = kinds
@@ -52,7 +53,11 @@ impl Metadata for NativeMetadata {
         let timeout =
             u32::try_from(timeout_ms.min(prismattyc_core::activity::PLUGIN_ACTIVITY_WAIT_MS))
                 .unwrap_or(u32::MAX);
-        activity::wait(endpoint, seat.as_str(), &names, timeout)
+        let cursor = after.map(|cursor| read::Cursor {
+            epoch: cursor.epoch.clone(),
+            sequence: cursor.sequence,
+        });
+        activity::wait(endpoint, seat.as_str(), &names, timeout, cursor.as_ref())
     }
 }
 

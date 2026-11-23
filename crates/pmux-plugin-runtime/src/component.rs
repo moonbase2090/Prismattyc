@@ -382,6 +382,7 @@ impl arrivals::Host for HostState {
         seat: String,
         kinds: Vec<String>,
         timeout_ms: u32,
+        after: Option<read::Cursor>,
     ) -> Result<arrivals::Batch, read::Error> {
         self.admit_read()?;
         let seat = prismattyc_core::AgentId::new(seat).map_err(|_| read::Error::InvalidRequest)?;
@@ -401,6 +402,10 @@ impl arrivals::Host for HostState {
             u64::from(timeout_ms).min(prismattyc_core::activity::PLUGIN_ACTIVITY_WAIT_MS);
         let started = std::time::Instant::now();
         let mut last_page: Option<domain::ActivityPage> = None;
+        let resume = after.map(|cursor| domain::ActivityCursor {
+            epoch: cursor.epoch,
+            sequence: cursor.sequence,
+        });
         let page = prismattyc_core::activity::wait_for_activity(
             |after| loop {
                 match self.provider.poll(endpoint, after.cloned(), 256) {
@@ -430,6 +435,7 @@ impl arrivals::Host for HostState {
             || started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
             &seat,
             &kinds,
+            resume.as_ref(),
             timeout_ms,
         )?;
         if page
@@ -976,12 +982,27 @@ mod tests {
             "worker-a".into(),
             vec!["mail_received".into()],
             0,
+            None,
         )
         .unwrap();
         assert_eq!(calls.load(Ordering::Relaxed), 2);
         assert_eq!(batch.notices.len(), 1);
         assert_eq!(batch.notices[0].event_id, "event-257");
         assert_eq!(batch.notices[0].kind, "mail_received");
+
+        let again = arrivals::Host::wait(
+            &mut host,
+            7,
+            "worker-a".into(),
+            vec!["mail_received".into()],
+            0,
+            Some(read::Cursor {
+                epoch: batch.epoch,
+                sequence: batch.cursor_sequence,
+            }),
+        )
+        .unwrap();
+        assert!(again.notices.is_empty());
     }
 
     #[test]

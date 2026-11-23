@@ -24,6 +24,7 @@ pub trait Metadata {
         endpoint: u64,
         seat: &AgentId,
         kinds: &[ActivityKind],
+        resume: Option<&ActivityCursor>,
         timeout_ms: u64,
     ) -> Result<ActivityPage, read::Error> {
         prismattyc_core::activity::wait_for_activity(
@@ -37,6 +38,7 @@ pub trait Metadata {
             },
             seat,
             kinds,
+            resume,
             timeout_ms.min(prismattyc_core::activity::PLUGIN_ACTIVITY_WAIT_MS),
         )
     }
@@ -145,8 +147,7 @@ pub fn execute(metadata: &mut impl Metadata, contribution: &str, arguments: &str
             || (contribution == "recent"
                 && (args.cursor.is_some() || args.since_ms.is_some() || arrival_args))
             || (contribution == "poll" && arrival_args)
-            || (contribution == "wait"
-                && (args.cursor.is_some() || args.since_ms.is_some() || args.limit.is_some()))
+            || (contribution == "wait" && (args.since_ms.is_some() || args.limit.is_some()))
             || (args.cursor.is_some() && args.since_ms.is_some())
             || args.limit.is_some_and(|limit| !(1..=256).contains(&limit))
             || args
@@ -246,6 +247,7 @@ pub fn execute(metadata: &mut impl Metadata, contribution: &str, arguments: &str
                     handle,
                     seat.as_ref().expect("wait seat was checked"),
                     &kinds,
+                    cursor.as_ref(),
                     args.timeout_ms.expect("wait timeout was checked"),
                 )
                 .map_err(|error| Failure::read(error, interval))?;
@@ -362,6 +364,7 @@ mod tests {
             endpoint: u64,
             seat: &AgentId,
             kinds: &[ActivityKind],
+            resume: Option<&ActivityCursor>,
             timeout_ms: u64,
         ) -> Result<ActivityPage, read::Error> {
             if let Some(error) = self.failure {
@@ -378,6 +381,7 @@ mod tests {
                 || clock.get(),
                 seat,
                 kinds,
+                resume,
                 timeout_ms,
             )?;
             self.slept = slept.get();
@@ -648,5 +652,78 @@ mod tests {
         assert!(failed);
         assert_eq!(value["error"]["code"], "invalid_argument");
         assert_eq!(fixture.calls, 0);
+    }
+
+    struct TwoArrivals {
+        calls: Vec<Option<u64>>,
+    }
+    impl Metadata for TwoArrivals {
+        fn endpoints(&mut self) -> Result<Vec<read::Endpoint>, read::Error> {
+            Ok(vec![read::Endpoint {
+                handle: 1,
+                label: "local".into(),
+                kind: read::EndpointKind::Local,
+                min_interval_ms: 250,
+            }])
+        }
+        fn poll(
+            &mut self,
+            _: u64,
+            cursor: Option<ActivityCursor>,
+            _: u16,
+        ) -> Result<ActivityPage, read::Error> {
+            self.calls
+                .push(cursor.as_ref().map(|cursor| cursor.sequence));
+            let start = cursor.as_ref().map(|cursor| cursor.sequence).unwrap_or(0);
+            let records = (start + 1..=2)
+                .map(|sequence| {
+                    json!({
+                        "sequence": sequence,
+                        "received_at_ms": sequence,
+                        "event": {
+                            "schema_version": 1,
+                            "seat": "worker-a",
+                            "run_id": "mail",
+                            "event_id": format!("event-{sequence}"),
+                            "source": "notify",
+                            "kind": "mail_received"
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+            let through = start + records.len() as u64;
+            Ok(serde_json::from_value(json!({
+                "epoch": "a0",
+                "oldest_sequence": 1,
+                "current_sequence": 2,
+                "records": records,
+                "cursor": {"epoch": "a0", "sequence": through},
+                "has_more": false,
+                "reset": null
+            }))
+            .unwrap())
+        }
+    }
+
+    #[test]
+    fn a_second_wait_with_a_cursor_does_not_replay_the_delivered_match() {
+        let mut feed = TwoArrivals { calls: Vec::new() };
+        let (first, failed) = execute(
+            &mut feed,
+            "wait",
+            r#"{"seat":"worker-a","kinds":["mail_received"],"timeout_ms":0}"#,
+        );
+        assert!(!failed, "{first}");
+        assert_eq!(first["page"]["records"][0]["event"]["event_id"], "event-1");
+        let (second, failed) = execute(
+            &mut feed,
+            "wait",
+            r#"{"seat":"worker-a","kinds":["mail_received"],"timeout_ms":0,"cursor":"a0:1"}"#,
+        );
+        assert!(!failed, "{second}");
+        assert_eq!(second["timed_out"], false);
+        assert_eq!(second["page"]["records"].as_array().unwrap().len(), 1);
+        assert_eq!(second["page"]["records"][0]["event"]["event_id"], "event-2");
+        assert_eq!(feed.calls.last().copied(), Some(Some(1)));
     }
 }

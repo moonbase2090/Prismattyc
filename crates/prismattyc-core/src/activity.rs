@@ -321,14 +321,17 @@ const MAX_BACKLOG_PAGES: u32 = 512;
 
 /// Poll until `seat` has an event of `kinds`, or the timeout elapses.
 /// A match already retained returns without sleeping, including one past the
-/// first page. Each sleep is at most [`WAIT_SLICE_MS`]. A stuck clock still
-/// stops: the wait count cannot exceed `timeout / WAIT_SLICE_MS + 1`.
+/// first page. `after` is the caller's progress: `None` starts at the oldest
+/// retained record, and a later call passes the returned cursor so that match
+/// is not delivered again. Each sleep is at most [`WAIT_SLICE_MS`]. A stuck
+/// clock still stops: the wait count cannot exceed `timeout / WAIT_SLICE_MS + 1`.
 pub fn wait_for_activity<E>(
     mut poll: impl FnMut(Option<&ActivityCursor>) -> Result<ActivityPage, E>,
     mut sleep: impl FnMut(u64),
     mut now_ms: impl FnMut() -> u64,
     seat: &crate::AgentId,
     kinds: &[ActivityKind],
+    after: Option<&ActivityCursor>,
     timeout_ms: u64,
 ) -> Result<ActivityPage, E> {
     let timeout_ms = timeout_ms.min(MAX_ACTIVITY_WAIT_MS);
@@ -337,8 +340,9 @@ pub fn wait_for_activity<E>(
         .unwrap_or(u32::MAX)
         .saturating_add(1);
     let mut spins = 0u32;
+    let resume = after.cloned();
     loop {
-        let mut after = None;
+        let mut after = resume.clone();
         let mut pages = 0u32;
         let mut page = loop {
             let mut page = poll(after.as_ref())?;
@@ -546,6 +550,7 @@ mod tests {
             || 0,
             &seat,
             &[ActivityKind::MailReceived],
+            None,
             60_000,
         )
         .unwrap();
@@ -568,6 +573,7 @@ mod tests {
             || 0,
             &seat,
             &[ActivityKind::RoomMessage],
+            None,
             1_000,
         )
         .unwrap();
@@ -641,6 +647,7 @@ mod tests {
             || 0,
             &seat,
             &[ActivityKind::MailReceived],
+            None,
             0,
         )
         .unwrap();
@@ -649,5 +656,81 @@ mod tests {
         assert_eq!(found.records.len(), 1);
         assert_eq!(found.records[0].sequence, 257);
         assert_eq!(found.records[0].event.event_id, "event-257");
+    }
+
+    #[test]
+    fn wait_after_a_cursor_does_not_replay_a_delivered_match() {
+        let seat = crate::AgentId::new("worker-a").unwrap();
+        let page_after = |after: Option<&ActivityCursor>| {
+            let start = after.map(|cursor| cursor.sequence).unwrap_or(0);
+            let records = (start + 1..=2)
+                .map(|sequence| {
+                    let event_id = format!("event-{sequence}");
+                    ActivityRecord {
+                        sequence,
+                        received_at_ms: sequence,
+                        event: ActivityInput::arrival(
+                            seat.clone(),
+                            ActivityKind::MailReceived,
+                            &event_id,
+                            None,
+                            Some("operator-b"),
+                            None,
+                        )
+                        .unwrap(),
+                    }
+                })
+                .collect::<Vec<_>>();
+            let through = records
+                .last()
+                .map(|record| record.sequence)
+                .unwrap_or(start);
+            Ok::<_, &'static str>(ActivityPage {
+                epoch: "e0".into(),
+                oldest_sequence: 1,
+                current_sequence: 2,
+                records,
+                cursor: ActivityCursor {
+                    epoch: "e0".into(),
+                    sequence: through,
+                },
+                has_more: false,
+                reset: None,
+                sessions: None,
+            })
+        };
+        let first = wait_for_activity(
+            page_after,
+            |_| {},
+            || 0,
+            &seat,
+            &[ActivityKind::MailReceived],
+            None,
+            0,
+        )
+        .unwrap();
+        assert_eq!(first.records[0].event.event_id, "event-1");
+        let resume = ActivityCursor {
+            epoch: first.cursor.epoch.clone(),
+            sequence: 1,
+        };
+        let mut polls = 0u32;
+        let second = wait_for_activity(
+            |after| {
+                polls += 1;
+                assert_eq!(after.map(|cursor| cursor.sequence), Some(1));
+                page_after(after)
+            },
+            |_| {},
+            || 0,
+            &seat,
+            &[ActivityKind::MailReceived],
+            Some(&resume),
+            0,
+        )
+        .unwrap();
+        assert_eq!(polls, 1);
+        assert_eq!(second.records.len(), 1);
+        assert_eq!(second.records[0].event.event_id, "event-2");
     }
 }

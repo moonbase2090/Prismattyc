@@ -137,8 +137,9 @@ pub fn wait(
     seat: &str,
     kinds: &[String],
     timeout_ms: u32,
+    after: Option<&read::Cursor>,
 ) -> Result<domain::ActivityPage, read::Error> {
-    let batch = arrivals::wait(endpoint, seat, kinds, timeout_ms)?;
+    let batch = arrivals::wait(endpoint, seat, kinds, timeout_ms, after)?;
     let records = batch
         .notices
         .into_iter()

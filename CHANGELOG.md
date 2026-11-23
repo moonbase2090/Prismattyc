@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.3.75] - 2026-11-23
+
+### Changed
+
+- Agent panes resume the same conversation after the mux restarts instead of starting a new one.
+
 ### Fixed
 
 - Credential prefixes used to hide access tokens in command summaries are stored as separate strings. A release build no longer contains one token-shaped value made by placing those prefixes next to each other. The recognized token formats are unchanged.

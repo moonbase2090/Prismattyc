@@ -52,14 +52,21 @@ pub fn inject_agent_slug(agent: InjectAgent) -> Option<&'static str> {
 ///
 /// `name` is a single path basename. Matching is case-insensitive.
 /// `muse` and `muse-*` (including `muse-bin*`) are Muse. `museum` is not.
-/// Classify an argv[0] basename (`codex`, `kiro-cli`, `cursor-agent`, …).
+/// Classify an argv[0] basename (`codex`, `claude.exe`, `kiro-cli`, `cursor-agent`, …).
 #[must_use]
 pub fn classify_agent_argv0(name: &str) -> Option<InjectAgent> {
-    let base = std::path::Path::new(name)
-        .file_name()
-        .and_then(|n| n.to_str())
+    let base = name
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|part| !part.is_empty())
         .unwrap_or(name);
-    classify_agent_file_name(base)
+    let lower = base.to_ascii_lowercase();
+    let stripped = lower
+        .strip_suffix(".exe")
+        .or_else(|| lower.strip_suffix(".cmd"))
+        .or_else(|| lower.strip_suffix(".bat"))
+        .unwrap_or(&lower);
+    classify_agent_file_name(stripped)
 }
 
 fn classify_agent_file_name(name: &str) -> Option<InjectAgent> {
@@ -331,7 +338,41 @@ mod tests {
     fn classify_argv0_basename() {
         assert_eq!(classify_agent_argv0("kiro-cli"), Some(InjectAgent::Kiro));
         assert_eq!(classify_agent_argv0("/bin/codex"), Some(InjectAgent::Codex));
+        assert_eq!(
+            classify_agent_argv0("claude.exe"),
+            Some(InjectAgent::Claude)
+        );
+        assert_eq!(
+            classify_agent_argv0(r"C:\w\agent\claude.exe"),
+            Some(InjectAgent::Claude)
+        );
+        assert_eq!(
+            classify_agent_argv0(r"C:\w\agent\CLAUDE.EXE"),
+            Some(InjectAgent::Claude)
+        );
+        assert_eq!(
+            classify_agent_argv0(r"C:\w\agent\codex.exe"),
+            Some(InjectAgent::Codex)
+        );
+        assert_eq!(
+            classify_agent_argv0(r"C:\w\agent\grok.exe"),
+            Some(InjectAgent::Grok)
+        );
+        assert_eq!(
+            classify_agent_argv0(r"C:\Users\u\AppData\Roaming\npm\claude.cmd"),
+            Some(InjectAgent::Claude)
+        );
+        assert_eq!(
+            classify_agent_argv0("cursor-agent.exe"),
+            Some(InjectAgent::Cursor)
+        );
+        assert_eq!(
+            classify_agent_argv0("hermes.exe"),
+            Some(InjectAgent::Hermes)
+        );
         assert_eq!(classify_agent_argv0("museum"), None);
+        assert_eq!(classify_agent_argv0("museum.exe"), None);
+        assert_eq!(classify_agent_argv0("claude.exe.txt"), None);
     }
 
     #[test]

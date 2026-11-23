@@ -4,9 +4,7 @@
 //! only. Inode-level socket ownership stays Linux-only.
 
 use std::collections::{HashSet, VecDeque};
-use std::ffi::OsStr;
-#[cfg(not(windows))]
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 /// Whether `/proc/<pid>` (Linux) or `kill(pid, 0)` says the pid exists.
@@ -214,6 +212,7 @@ pub fn resume_args(args: Vec<String>) -> Vec<String> {
     let agent = match crate::inject_submit::classify_agent_argv0(program) {
         Some(InjectAgent::Claude) => InjectAgent::Claude,
         Some(InjectAgent::Codex) => InjectAgent::Codex,
+        Some(InjectAgent::Grok) => InjectAgent::Grok,
         Some(InjectAgent::Hermes | InjectAgent::Unknown) | None => return args,
         Some(_) => return vec![program.clone()],
     };
@@ -230,8 +229,9 @@ pub fn resume_args(args: Vec<String>) -> Vec<String> {
             Some((flag, value)) => (flag, Some(value)),
             None => (arg.as_str(), None),
         };
-        let selector =
-            agent == InjectAgent::Claude && matches!(flag, "--resume" | "-r" | "--session-id");
+        let selector = matches!(agent, InjectAgent::Claude | InjectAgent::Grok)
+            && matches!(flag, "--resume" | "-r" | "--session-id")
+            || (agent == InjectAgent::Grok && flag == "-s");
         let resume_subcommand = agent == InjectAgent::Codex && !positional_seen && arg == "resume";
         if selector || resume_subcommand {
             let value = inline.map(str::to_owned).or_else(|| {
@@ -242,17 +242,28 @@ pub fn resume_args(args: Vec<String>) -> Vec<String> {
                         value.clone()
                     })
             });
-            if flag == "--session-id" {
+            if matches!(flag, "--session-id" | "-s") {
                 session_override = value;
             } else if value.is_some() {
                 session = value;
             }
             positional_seen |= resume_subcommand;
-        } else if (agent == InjectAgent::Claude
+        } else if (matches!(agent, InjectAgent::Claude | InjectAgent::Grok)
             && matches!(flag, "--continue" | "-c" | "--fork-session"))
             || (agent == InjectAgent::Codex && matches!(flag, "--last" | "--all"))
         {
             // Selection is rendered once below; a restore never forks.
+        } else if agent == InjectAgent::Grok
+            && matches!(flag, "-p" | "--single" | "--prompt-file" | "--prompt-json")
+        {
+            // Never replay single-turn prompts on restore.
+            if inline.is_none()
+                && args
+                    .get(index + 1)
+                    .is_some_and(|value| !value.starts_with('-'))
+            {
+                index += 1;
+            }
         } else {
             let takes_value = matches!(flag, "--model" | "--effort")
                 || (agent == InjectAgent::Codex
@@ -281,6 +292,33 @@ pub fn resume_args(args: Vec<String>) -> Vec<String> {
                             | "--setting-sources"
                             | "--agent"
                             | "--agents"
+                    ))
+                || (agent == InjectAgent::Grok
+                    && matches!(
+                        flag,
+                        "-m" | "--reasoning-effort"
+                            | "--permission-mode"
+                            | "--agent"
+                            | "--agents"
+                            | "--allow"
+                            | "--allowedTools"
+                            | "--allowed-tools"
+                            | "--deny"
+                            | "--disallowedTools"
+                            | "--disallowed-tools"
+                            | "--add-dir"
+                            | "--cwd"
+                            | "--sandbox"
+                            | "--tools"
+                            | "--leader-socket"
+                            | "--max-turns"
+                            | "--output-format"
+                            | "--json-schema"
+                            | "--rules"
+                            | "--system-prompt"
+                            | "--system-prompt-file"
+                            | "--system-prompt-override"
+                            | "--debug-file"
                     ));
             let toggle = (agent == InjectAgent::Codex
                 && matches!(
@@ -304,6 +342,25 @@ pub fn resume_args(args: Vec<String>) -> Vec<String> {
                             | "--chrome"
                             | "--no-chrome"
                             | "--bare"
+                    ))
+                || (agent == InjectAgent::Grok
+                    && matches!(
+                        flag,
+                        "--always-approve"
+                            | "--dangerously-skip-permissions"
+                            | "--disable-web-search"
+                            | "--fullscreen"
+                            | "--include-partial-messages"
+                            | "--memory-flush"
+                            | "--minimal"
+                            | "--no-alt-screen"
+                            | "--no-memory"
+                            | "--no-plan"
+                            | "--no-subagents"
+                            | "--oauth"
+                            | "--restore-code"
+                            | "--verbatim"
+                            | "--debug"
                     ));
             if takes_value {
                 if inline.is_some() {
@@ -329,7 +386,7 @@ pub fn resume_args(args: Vec<String>) -> Vec<String> {
     }
     let mut restored = vec![program.clone()];
     match agent {
-        InjectAgent::Claude => match session_override.or(session) {
+        InjectAgent::Claude | InjectAgent::Grok => match session_override.or(session) {
             Some(id) => restored.extend(["--resume".into(), id]),
             None => restored.push("--continue".into()),
         },
@@ -531,11 +588,17 @@ pub(crate) fn interactive_shell(spawn: &crate::SpawnSpec) -> bool {
             .argv
             .iter()
             .all(|arg| matches!(arg.as_str(), "-l" | "--login" | "-i"));
-    let windows = cfg!(windows)
-        && spawn
+    #[cfg(windows)]
+    let windows = spawn.argv.is_empty()
+        && (spawn
             .program
             .eq_ignore_ascii_case(&crate::platform::default_shell())
-        && spawn.argv.is_empty();
+            || matches!(
+                executable_name(&spawn.program).as_str(),
+                "cmd" | "powershell" | "pwsh"
+            ));
+    #[cfg(not(windows))]
+    let windows = false;
     posix || windows
 }
 
@@ -549,16 +612,25 @@ pub(crate) fn replay_spawn_command(spawn: &crate::SpawnSpec, pid: Option<u32>) -
         .chain(spawn.argv.iter().cloned())
         .collect::<Vec<_>>();
     let mut owner = pid;
-    if crate::inject_submit::classify_agent_argv0(&spawn.program).is_none() {
-        if let Some((foreground, live_args)) =
-            pid.and_then(foreground_process_args).filter(|(_, args)| {
-                args.first()
-                    .and_then(|program| crate::inject_submit::classify_agent_argv0(program))
-                    .is_some()
-            })
+    let spawn_is_shell = is_hook_shell_argv(&args);
+    if !is_agent_argv(&args) {
+        if let Some((foreground, live_args)) = pid
+            .and_then(foreground_process_args)
+            .filter(|(_, args)| is_agent_argv(args))
         {
             owner = Some(foreground);
             args = live_args;
+        } else if spawn_is_shell {
+            // If a script launch (e.g. `zsh -l launch.sh`) has already dropped
+            // to an idle interactive shell, do not replay the launch script.
+            #[cfg(not(windows))]
+            if let Some(pid) = pid {
+                if live_foreground_command(pid).is_none()
+                    && cmdline_strings(pid).is_some_and(|live| is_interactive_shell_argv(&live))
+                {
+                    return None;
+                }
+            }
         }
     }
     #[cfg(not(windows))]
@@ -570,9 +642,52 @@ pub(crate) fn replay_spawn_command(spawn: &crate::SpawnSpec, pid: Option<u32>) -
     }
     #[cfg(windows)]
     {
-        let _ = owner;
-        replay_command(&args)
+        windows_replay_command(owner, args)
     }
+}
+
+/// Whether `spawn` launched a non-interactive script/command whose live tree
+/// now runs an agent (or already dropped to an interactive shell), or launched
+/// an agent directly. Used by periodic workspace checkpointing so a plain
+/// restart resumes the live session instead of re-running a startup script.
+pub(crate) fn spawn_needs_resume_rewrite(spawn: &crate::SpawnSpec, pid: u32) -> bool {
+    if spawn.program.is_empty() || interactive_shell(spawn) {
+        return false;
+    }
+    let spawn_args = std::iter::once(spawn.program.clone())
+        .chain(spawn.argv.iter().cloned())
+        .collect::<Vec<_>>();
+    if is_agent_argv(&spawn_args) {
+        return true;
+    }
+    if !is_hook_shell_argv(&spawn_args) {
+        return false;
+    }
+    if foreground_process_args(pid).is_some_and(|(_, args)| is_agent_argv(&args)) {
+        return true;
+    }
+    #[cfg(not(windows))]
+    {
+        live_foreground_command(pid).is_none()
+            && cmdline_strings(pid).is_some_and(|live| is_interactive_shell_argv(&live))
+    }
+    #[cfg(windows)]
+    false
+}
+
+fn is_agent_argv(args: &[String]) -> bool {
+    args.first()
+        .and_then(|program| crate::inject_submit::classify_agent_argv0(program))
+        .is_some()
+        || hermes_launch_prefix(args).is_some()
+}
+
+#[cfg(not(windows))]
+fn is_interactive_shell_argv(args: &[String]) -> bool {
+    is_shell_argv(args)
+        && args[1..]
+            .iter()
+            .all(|arg| matches!(arg.as_str(), "-l" | "--login" | "-i"))
 }
 
 /// Terminal foreground only. Ignores [`TEST_FOREGROUND_COMMAND_ENV`].
@@ -581,7 +696,9 @@ pub fn live_foreground_command(root: u32) -> Option<String> {
     #[cfg(windows)]
     {
         match windows::foreground(root) {
-            windows::Foreground::Running { args, .. } => replay_command(&args),
+            windows::Foreground::Running { pid, args, .. } => {
+                windows_replay_command(Some(pid), args)
+            }
             _ => None,
         }
     }
@@ -957,38 +1074,45 @@ fn foreground_pid_in_pgid(root: u32, tpgid: u32) -> Option<u32> {
         }
     }
     let has_foreground_group_leader = members.contains(&tpgid);
-    let non_shell: Vec<u32> = members
+    let non_shell: Vec<(u32, Vec<String>)> = members
         .into_iter()
-        .filter(|&pid| {
-            cmdline_strings(pid)
-                .map(|args| !is_shell_argv(&args))
-                .unwrap_or(false)
+        .filter_map(|pid| {
+            let args = cmdline_strings(pid)?;
+            (!is_shell_argv(&args)).then_some((pid, args))
         })
         .collect();
     if non_shell.is_empty() {
         return has_foreground_group_leader.then_some(tpgid);
     }
-    let pick = non_shell
-        .iter()
-        .copied()
-        .find(|pid| *pid == tpgid)
-        .unwrap_or(non_shell[0]);
-    Some(pick)
+    // Prefer the foreground group leader when it is itself a non-shell
+    // program; otherwise pick the shallowest known agent (ignoring MCP/helper
+    // children), or the shallowest non-shell process in deterministic BFS order.
+    if let Some((pid, _)) = non_shell.iter().find(|(pid, _)| *pid == tpgid) {
+        return Some(*pid);
+    }
+    if let Some((pid, _)) = non_shell.iter().find(|(_, args)| is_agent_argv(args)) {
+        return Some(*pid);
+    }
+    Some(non_shell[0].0)
 }
 
 #[cfg(not(windows))]
 fn tree_pids(root: u32) -> Vec<u32> {
     let mut seen = HashSet::new();
+    let mut order = Vec::new();
     let mut queue = VecDeque::from([root]);
     seen.insert(root);
     while let Some(pid) = queue.pop_front() {
-        for child in children_of(pid) {
+        order.push(pid);
+        let mut children = children_of(pid);
+        children.sort_unstable();
+        for child in children {
             if seen.insert(child) {
                 queue.push_back(child);
             }
         }
     }
-    seen.into_iter().collect()
+    order
 }
 
 #[cfg(not(windows))]
@@ -1007,6 +1131,7 @@ fn cmdline_strings(pid: u32) -> Option<Vec<String>> {
 #[cfg(not(windows))]
 fn unix_replay_command(pid: u32, args: Vec<String>) -> String {
     let mut args = resume_args(args);
+    resolve_live_agent_selector(pid, &mut args);
     if let Some(program) = args
         .first()
         .and_then(|program| stable_program_name(pid, program))
@@ -1014,6 +1139,253 @@ fn unix_replay_command(pid: u32, args: Vec<String>) -> String {
         args[0] = program;
     }
     shell_join(&args)
+}
+
+#[cfg(windows)]
+fn windows_replay_command(pid: Option<u32>, args: Vec<String>) -> Option<String> {
+    let mut args = resume_args(args);
+    if let Some(pid) = pid {
+        resolve_live_agent_selector(pid, &mut args);
+    }
+    if uses_ambiguous_latest_selector(&args) {
+        return None;
+    }
+    windows::command(&args)
+}
+
+#[cfg(any(windows, test))]
+fn uses_ambiguous_latest_selector(args: &[String]) -> bool {
+    use crate::inject_submit::InjectAgent;
+
+    let Some(program) = args.first() else {
+        return false;
+    };
+    match crate::inject_submit::classify_agent_argv0(program) {
+        Some(InjectAgent::Codex) => {
+            args.get(1).map(String::as_str) == Some("resume")
+                && args.get(2).map(String::as_str) == Some("--last")
+        }
+        Some(InjectAgent::Claude | InjectAgent::Grok) => {
+            args.get(1).map(String::as_str) == Some("--continue")
+        }
+        _ => false,
+    }
+}
+
+fn resolve_live_agent_selector(pid: u32, args: &mut Vec<String>) {
+    use crate::inject_submit::InjectAgent;
+
+    let Some(program) = args.first() else {
+        return;
+    };
+    match crate::inject_submit::classify_agent_argv0(program) {
+        Some(InjectAgent::Codex) if args.get(1).map(String::as_str) == Some("resume") => {
+            if args.get(2).map(String::as_str) == Some("--last") {
+                if let Some(id) = resolve_codex_rollout_id(pid) {
+                    args[2] = id;
+                }
+            }
+        }
+        Some(InjectAgent::Claude) if args.get(1).map(String::as_str) == Some("--continue") => {
+            if let Some(id) = resolve_claude_session_id(pid) {
+                args[1] = "--resume".into();
+                args.insert(2, id);
+            }
+        }
+        Some(InjectAgent::Grok) if args.get(1).map(String::as_str) == Some("--continue") => {
+            if let Some(id) = resolve_grok_session_id(pid) {
+                args[1] = "--resume".into();
+                args.insert(2, id);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn valid_session_selector(id: &str) -> bool {
+    !id.is_empty()
+        && !id.starts_with('-')
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+}
+
+fn resolve_codex_rollout_id(pid: u32) -> Option<String> {
+    let mut candidates = vec![pid];
+    let mut children = children_of(pid);
+    children.sort_unstable();
+    candidates.extend(children);
+    for candidate in candidates {
+        let mut paths = open_fd_paths(candidate);
+        paths.sort();
+        for path in paths {
+            if let Some(id) = codex_rollout_id_from_file(&path) {
+                return Some(id);
+            }
+        }
+    }
+    None
+}
+
+fn codex_rollout_id_from_file(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_str()?;
+    if !(name.starts_with("rollout-") && name.ends_with(".jsonl")) {
+        return None;
+    }
+    let first_line = read_first_line_bounded(path, 512 * 1024)?;
+    let parsed: serde_json::Value = serde_json::from_str(&first_line).ok()?;
+    let payload = parsed.get("payload").unwrap_or(&parsed);
+    if payload
+        .get("thread_source")
+        .and_then(serde_json::Value::as_str)
+        == Some("subagent")
+    {
+        return None;
+    }
+    if payload
+        .get("parent_thread_id")
+        .is_some_and(|v| !v.is_null())
+    {
+        return None;
+    }
+    if payload.get("source").is_some_and(|source| {
+        source.as_str() == Some("subagent")
+            || source
+                .as_object()
+                .is_some_and(|map| map.contains_key("subagent"))
+    }) {
+        return None;
+    }
+    let id = payload
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            payload
+                .get("session_id")
+                .and_then(serde_json::Value::as_str)
+        })
+        .or_else(|| uuid_suffix_from_rollout_name(name))?;
+    valid_session_selector(id).then(|| id.to_owned())
+}
+
+fn uuid_suffix_from_rollout_name(name: &str) -> Option<&str> {
+    let stem = name.strip_suffix(".jsonl")?;
+    let uuid = stem.len().checked_sub(36).map(|start| &stem[start..])?;
+    let bytes = uuid.as_bytes();
+    let is_uuid = bytes.len() == 36
+        && bytes[8] == b'-'
+        && bytes[13] == b'-'
+        && bytes[18] == b'-'
+        && bytes[23] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(i, b)| matches!(i, 8 | 13 | 18 | 23) || b.is_ascii_hexdigit());
+    is_uuid.then_some(uuid)
+}
+
+fn read_first_line_bounded(path: &Path, max_bytes: usize) -> Option<String> {
+    use std::io::{BufRead, BufReader, Read};
+    let file = std::fs::File::open(path).ok()?;
+    let mut reader = BufReader::new(file.take((max_bytes as u64).saturating_add(1)));
+    let mut line = String::new();
+    let read = reader.read_line(&mut line).ok()?;
+    if read == 0 || line.len() > max_bytes {
+        return None;
+    }
+    Some(line)
+}
+
+fn resolve_claude_session_id(pid: u32) -> Option<String> {
+    let config_dir = process_env_var(pid, b"CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            process_env_var(pid, b"HOME")
+                .or_else(|| process_env_var(pid, b"USERPROFILE"))
+                .map(|home| PathBuf::from(home).join(".claude"))
+        })
+        .or_else(|| std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from))
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(|home| PathBuf::from(home).join(".claude"))
+        })?;
+    resolve_claude_session_id_in_dir(&config_dir, pid)
+}
+
+fn resolve_claude_session_id_in_dir(config_dir: &Path, pid: u32) -> Option<String> {
+    let mut seen = HashSet::new();
+    let mut candidates = Vec::new();
+    let mut queue = VecDeque::from([pid]);
+    seen.insert(pid);
+    while let Some(current) = queue.pop_front() {
+        candidates.push(current);
+        if candidates.len() >= 64 {
+            break;
+        }
+        let mut children = children_of(current);
+        children.sort_unstable();
+        for child in children {
+            if seen.insert(child) {
+                queue.push_back(child);
+            }
+        }
+    }
+    for candidate in candidates {
+        let session_file = config_dir
+            .join("sessions")
+            .join(format!("{candidate}.json"));
+        let Ok(raw) = std::fs::read(&session_file) else {
+            continue;
+        };
+        if raw.len() > 256 * 1024 {
+            continue;
+        }
+        let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        if parsed.get("pid").and_then(serde_json::Value::as_u64) != Some(u64::from(candidate)) {
+            continue;
+        }
+        if let Some(id) = parsed
+            .get("sessionId")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| valid_session_selector(id))
+        {
+            return Some(id.to_owned());
+        }
+    }
+    None
+}
+
+fn resolve_grok_session_id(pid: u32) -> Option<String> {
+    let mut candidates = vec![pid];
+    let mut children = children_of(pid);
+    children.sort_unstable();
+    candidates.extend(children);
+    for candidate in candidates {
+        let mut paths = open_fd_paths(candidate);
+        paths.sort();
+        for path in paths {
+            if path.file_name().and_then(OsStr::to_str) != Some("events.jsonl") {
+                continue;
+            }
+            let Some(session_dir) = path.parent() else {
+                continue;
+            };
+            let Some(id) = session_dir.file_name().and_then(OsStr::to_str) else {
+                continue;
+            };
+            let is_grok_session = path
+                .ancestors()
+                .any(|anc| anc.file_name().and_then(OsStr::to_str) == Some(".grok"));
+            if is_grok_session && valid_session_selector(id) {
+                return Some(id.to_owned());
+            }
+        }
+    }
+    None
 }
 
 #[cfg(not(windows))]
@@ -1095,25 +1467,67 @@ fn version_alias_candidates(versioned_name: &str) -> Vec<String> {
 
 #[cfg(target_os = "linux")]
 fn process_path(pid: u32) -> Option<OsString> {
+    process_env_var(pid, b"PATH")
+}
+
+#[cfg(target_os = "linux")]
+fn process_env_var(pid: u32, key: &[u8]) -> Option<OsString> {
     use std::os::unix::ffi::OsStringExt;
 
     let raw = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
-    let path = raw
-        .split(|byte| *byte == 0)
-        .find_map(|entry| entry.strip_prefix(b"PATH="))?;
-    Some(OsString::from_vec(path.to_vec()))
+    let value = raw.split(|byte| *byte == 0).find_map(|entry| {
+        let rest = entry.strip_prefix(key)?;
+        rest.strip_prefix(b"=")
+    })?;
+    Some(OsString::from_vec(value.to_vec()))
 }
 
 #[cfg(target_os = "macos")]
 fn process_path(pid: u32) -> Option<OsString> {
+    process_env_var(pid, b"PATH")
+}
+
+#[cfg(target_os = "macos")]
+fn process_env_var(pid: u32, key: &[u8]) -> Option<OsString> {
     use std::os::unix::ffi::OsStringExt;
 
-    macos::path(pid).map(OsString::from_vec)
+    macos::env_var(pid, key).map(OsString::from_vec)
 }
 
 #[cfg(all(not(windows), not(any(target_os = "linux", target_os = "macos"))))]
 fn process_path(_pid: u32) -> Option<OsString> {
     None
+}
+
+#[cfg(windows)]
+fn process_env_var(pid: u32, key: &[u8]) -> Option<OsString> {
+    windows::env_var(pid, key)
+}
+
+#[cfg(all(not(windows), not(any(target_os = "linux", target_os = "macos"))))]
+fn process_env_var(_pid: u32, _key: &[u8]) -> Option<OsString> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn open_fd_paths(pid: u32) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| std::fs::read_link(entry.path()).ok())
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn open_fd_paths(pid: u32) -> Vec<PathBuf> {
+    macos::open_fd_paths(pid)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn open_fd_paths(_pid: u32) -> Vec<PathBuf> {
+    Vec::new()
 }
 
 fn is_shell_argv(args: &[String]) -> bool {
@@ -1206,22 +1620,19 @@ fn shell_quote(value: &str) -> String {
 
 #[cfg(not(windows))]
 fn first_non_shell_descendant(root: u32) -> Option<u32> {
-    let mut seen = HashSet::new();
-    let mut queue = VecDeque::from([root]);
-    seen.insert(root);
-    while let Some(pid) = queue.pop_front() {
-        for child in children_of(pid) {
-            if !seen.insert(child) {
+    let mut first_non_shell = None;
+    for pid in tree_pids(root).into_iter().filter(|pid| *pid != root) {
+        if let Some(args) = cmdline_strings(pid) {
+            if is_shell_argv(&args) {
                 continue;
             }
-            match cmdline_strings(child) {
-                Some(args) if is_shell_argv(&args) => queue.push_back(child),
-                Some(_) => return Some(child),
-                None => queue.push_back(child),
+            if is_agent_argv(&args) {
+                return Some(pid);
             }
+            first_non_shell.get_or_insert(pid);
         }
     }
-    None
+    first_non_shell
 }
 
 /// Exact-argv check used by `prismattyc-mux stop` so a recycled pid is never signalled.
@@ -1426,14 +1837,14 @@ mod macos {
     type ProcArgsAndPath = (Vec<Vec<u8>>, Option<Vec<u8>>);
 
     pub(super) fn procargs(pid: u32) -> Option<Vec<Vec<u8>>> {
-        procargs_and_path(pid).map(|(args, _)| args)
+        procargs_and_env(pid, b"PATH").map(|(args, _)| args)
     }
 
-    pub(super) fn path(pid: u32) -> Option<Vec<u8>> {
-        procargs_and_path(pid).and_then(|(_, path)| path)
+    pub(super) fn env_var(pid: u32, key: &[u8]) -> Option<Vec<u8>> {
+        procargs_and_env(pid, key).and_then(|(_, val)| val)
     }
 
-    fn procargs_and_path(pid: u32) -> Option<ProcArgsAndPath> {
+    fn procargs_and_env(pid: u32, key: &[u8]) -> Option<ProcArgsAndPath> {
         let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as i32];
         let mut size = 0usize;
         unsafe {
@@ -1494,7 +1905,7 @@ mod macos {
         if args.is_empty() {
             return None;
         }
-        let mut path = None;
+        let mut found = None;
         while i < buf.len() {
             while i < buf.len() && buf[i] == 0 {
                 i += 1;
@@ -1503,12 +1914,14 @@ mod macos {
             while i < buf.len() && buf[i] != 0 {
                 i += 1;
             }
-            if let Some(value) = buf[start..i].strip_prefix(b"PATH=") {
-                path = Some(value.to_vec());
-                break;
+            if let Some(rest) = buf[start..i].strip_prefix(key) {
+                if let Some(value) = rest.strip_prefix(b"=") {
+                    found = Some(value.to_vec());
+                    break;
+                }
             }
         }
-        Some((args, path))
+        Some((args, found))
     }
 
     /// `libproc.h` `PROC_ALL_PIDS`. libc 0.2 does not export this selector.
@@ -1624,6 +2037,88 @@ mod macos {
         let nul = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
         let path = PathBuf::from(std::str::from_utf8(&bytes[..nul]).ok()?);
         path.is_absolute().then_some(path)
+    }
+
+    pub(super) fn open_fd_paths(pid: u32) -> Vec<PathBuf> {
+        const PROC_PIDFDVNODEPATHINFO: libc::c_int = 2;
+
+        #[repr(C)]
+        struct ProcFileInfo {
+            fi_openflags: u32,
+            fi_status: u32,
+            fi_offset: libc::off_t,
+            fi_type: i32,
+            fi_guardflags: u32,
+        }
+
+        #[repr(C)]
+        struct VnodeFdInfoWithPath {
+            pfi: ProcFileInfo,
+            pvip: libc::vnode_info_path,
+        }
+
+        let need = unsafe {
+            libc::proc_pidinfo(
+                pid as libc::pid_t,
+                libc::PROC_PIDLISTFDS,
+                0,
+                ptr::null_mut(),
+                0,
+            )
+        };
+        if need <= 0 {
+            return Vec::new();
+        }
+        let fd_size = std::mem::size_of::<libc::proc_fdinfo>();
+        let mut fds: Vec<libc::proc_fdinfo> = Vec::with_capacity((need as usize) / fd_size + 8);
+        let got = unsafe {
+            libc::proc_pidinfo(
+                pid as libc::pid_t,
+                libc::PROC_PIDLISTFDS,
+                0,
+                fds.as_mut_ptr().cast(),
+                (fds.capacity() * fd_size) as libc::c_int,
+            )
+        };
+        if got <= 0 {
+            return Vec::new();
+        }
+        let count = ((got as usize) / fd_size).min(fds.capacity());
+        unsafe { fds.set_len(count) };
+        let mut out = Vec::new();
+        let info_size = std::mem::size_of::<VnodeFdInfoWithPath>() as libc::c_int;
+        for entry in fds {
+            if entry.proc_fdtype != libc::PROX_FDTYPE_VNODE as u32 {
+                continue;
+            }
+            let mut info: VnodeFdInfoWithPath = unsafe { std::mem::zeroed() };
+            let n = unsafe {
+                libc::proc_pidfdinfo(
+                    pid as libc::pid_t,
+                    entry.proc_fd,
+                    PROC_PIDFDVNODEPATHINFO,
+                    (&mut info as *mut VnodeFdInfoWithPath).cast(),
+                    info_size,
+                )
+            };
+            if n < info_size {
+                continue;
+            }
+            let bytes: &[u8] = unsafe {
+                std::slice::from_raw_parts(
+                    info.pvip.vip_path.as_ptr().cast::<u8>(),
+                    std::mem::size_of_val(&info.pvip.vip_path),
+                )
+            };
+            let nul = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
+            if let Ok(text) = std::str::from_utf8(&bytes[..nul]) {
+                let path = PathBuf::from(text);
+                if path.is_absolute() {
+                    out.push(path);
+                }
+            }
+        }
+        out
     }
 }
 
@@ -2459,6 +2954,710 @@ mod tests {
             "background sleep must not be the PTY foreground: {found:?}"
         );
     }
+
+    #[test]
+    fn grok_resume_preserves_id_and_flags_without_prompt() {
+        let args = |items: &[&str]| items.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        assert_eq!(
+            resume_args(args(&[
+                "grok",
+                "--resume",
+                "abc-123",
+                "--model",
+                "model-c",
+                "-p",
+                "solve bug",
+            ])),
+            args(&["grok", "--resume", "abc-123", "--model", "model-c"])
+        );
+        assert_eq!(
+            resume_args(args(&[
+                "/usr/local/bin/grok",
+                "-s=sess-9",
+                "--reasoning-effort=high",
+                "--no-alt-screen",
+                "--fork-session",
+                "Read prompt.txt",
+            ])),
+            args(&[
+                "/usr/local/bin/grok",
+                "--resume",
+                "sess-9",
+                "--reasoning-effort=high",
+                "--no-alt-screen",
+            ])
+        );
+        assert_eq!(
+            resume_args(args(&[
+                "grok",
+                "--prompt-file",
+                "prompt.txt",
+                "--always-approve",
+                "--minimal",
+            ])),
+            args(&["grok", "--continue", "--always-approve", "--minimal"])
+        );
+    }
+
+    struct TestTempDir(PathBuf);
+
+    impl TestTempDir {
+        fn new(kind: &str) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static SEQ: AtomicU64 = AtomicU64::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "pmux-procinfo-{kind}-{}-{}",
+                std::process::id(),
+                SEQ.fetch_add(1, Ordering::Relaxed)
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("create test tempdir");
+            Self(dir)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestTempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn codex_rollout_id_ignores_subagent_and_selects_main_rollout() {
+        let dir = TestTempDir::new("codex-rollout");
+        let main_id = "22222222-2222-2222-2222-222222222222";
+        let sub_id = "11111111-1111-1111-1111-111111111111";
+        let sub_path = dir
+            .path()
+            .join(format!("rollout-2026-11-21T00-00-00-{sub_id}.jsonl"));
+        std::fs::write(
+            &sub_path,
+            format!(
+                r#"{{"type":"session_meta","payload":{{"id":"{sub_id}","parent_thread_id":"{main_id}","source":{{"subagent":{{"thread_spawn":{{"parent_thread_id":"{main_id}"}}}}}},"thread_source":"subagent"}}}}"#
+            ) + "\n",
+        )
+        .unwrap();
+        assert_eq!(codex_rollout_id_from_file(&sub_path), None);
+
+        let sub_parent_only = dir.path().join("rollout-parent-only.jsonl");
+        std::fs::write(
+            &sub_parent_only,
+            format!(r#"{{"payload":{{"id":"{sub_id}","parent_thread_id":"{main_id}"}}}}"#) + "\n",
+        )
+        .unwrap();
+        assert_eq!(codex_rollout_id_from_file(&sub_parent_only), None);
+
+        let main_path = dir
+            .path()
+            .join(format!("rollout-2026-11-21T00-00-00-{main_id}.jsonl"));
+        let padding = "x".repeat(64 * 1024);
+        std::fs::write(
+            &main_path,
+            format!(
+                r#"{{"type":"session_meta","payload":{{"id":"{main_id}","source":"cli","thread_source":"user","base_instructions":"{padding}"}}}}"#
+            ) + "\n",
+        )
+        .unwrap();
+        assert_eq!(
+            codex_rollout_id_from_file(&main_path).as_deref(),
+            Some(main_id)
+        );
+    }
+
+    #[test]
+    fn claude_session_file_resolver_and_ambiguous_selector_guard() {
+        let dir = TestTempDir::new("claude-session-file");
+        let sessions = dir.path().join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let pid = std::process::id();
+
+        std::fs::write(
+            sessions.join(format!("{pid}.json")),
+            format!(r#"{{"pid":{},"sessionId":"wrong-pid-id"}}"#, pid + 1),
+        )
+        .unwrap();
+        assert_eq!(resolve_claude_session_id_in_dir(dir.path(), pid), None);
+
+        std::fs::write(
+            sessions.join(format!("{pid}.json")),
+            format!(r#"{{"pid":{pid},"sessionId":"--bad-flag"}}"#),
+        )
+        .unwrap();
+        assert_eq!(resolve_claude_session_id_in_dir(dir.path(), pid), None);
+
+        std::fs::write(
+            sessions.join(format!("{pid}.json")),
+            format!(r#"{{"pid":{pid},"sessionId":"claude-exact-42"}}"#),
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_claude_session_id_in_dir(dir.path(), pid).as_deref(),
+            Some("claude-exact-42")
+        );
+
+        let args = |items: &[&str]| items.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        assert!(uses_ambiguous_latest_selector(&args(&[
+            "codex", "resume", "--last", "--model", "model-b"
+        ])));
+        assert!(!uses_ambiguous_latest_selector(&args(&[
+            "codex", "resume", "conv-1", "--model", "model-b"
+        ])));
+        assert!(uses_ambiguous_latest_selector(&args(&[
+            "claude",
+            "--continue",
+            "--model",
+            "model-a"
+        ])));
+        assert!(!uses_ambiguous_latest_selector(&args(&[
+            "claude", "--resume", "conv-2", "--model", "model-a"
+        ])));
+        assert!(uses_ambiguous_latest_selector(&args(&[
+            "grok",
+            "--continue",
+            "--model",
+            "model-c"
+        ])));
+        assert!(!uses_ambiguous_latest_selector(&args(&[
+            "grok", "--resume", "conv-3", "--model", "model-c"
+        ])));
+        assert!(!uses_ambiguous_latest_selector(&args(&["cargo", "watch"])));
+
+        // Windows executable paths and extensions must classify identically so
+        // resume rewriting, selector resolution, and fail-safe guards engage.
+        assert_eq!(
+            resume_args(args(&[
+                r"C:\w\agent\claude.exe",
+                "--model",
+                "model-a",
+                "seat1",
+            ])),
+            args(&[r"C:\w\agent\claude.exe", "--continue", "--model", "model-a",])
+        );
+        assert_eq!(
+            resume_args(args(&[
+                r"C:\w\agent\claude.exe",
+                "--resume",
+                "claude-exact-seat1",
+                "--model",
+                "model-a",
+                "seat1",
+            ])),
+            args(&[
+                r"C:\w\agent\claude.exe",
+                "--resume",
+                "claude-exact-seat1",
+                "--model",
+                "model-a",
+            ])
+        );
+        assert_eq!(
+            resume_args(args(&[
+                r"C:\w\agent\codex.exe",
+                "--model",
+                "model-b",
+                "prompt",
+            ])),
+            args(&[
+                r"C:\w\agent\codex.exe",
+                "resume",
+                "--last",
+                "--model",
+                "model-b",
+            ])
+        );
+        assert_eq!(
+            resume_args(args(&[
+                r"C:\w\agent\grok.exe",
+                "--model",
+                "model-c",
+                "-p",
+                "prompt",
+            ])),
+            args(&[r"C:\w\agent\grok.exe", "--continue", "--model", "model-c"])
+        );
+        assert!(uses_ambiguous_latest_selector(&args(&[
+            r"C:\w\agent\claude.exe",
+            "--continue",
+            "--model",
+            "model-a",
+        ])));
+        assert!(uses_ambiguous_latest_selector(&args(&[
+            r"C:\w\agent\codex.exe",
+            "resume",
+            "--last",
+            "--model",
+            "model-b",
+        ])));
+        assert!(uses_ambiguous_latest_selector(&args(&[
+            r"C:\w\agent\grok.exe",
+            "--continue",
+            "--model",
+            "model-c",
+        ])));
+        assert!(is_agent_argv(&args(&[
+            r"C:\w\agent\claude.exe",
+            "--model",
+            "model-a",
+            "seat1",
+        ])));
+        assert!(spawn_needs_resume_rewrite(
+            &crate::SpawnSpec {
+                program: r"C:\w\agent\claude.exe".into(),
+                argv: args(&["--model", "model-a", "seat1"]),
+                cwd: None,
+                env: Default::default(),
+            },
+            pid,
+        ));
+    }
+
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    struct ChildGuard(std::process::Child);
+
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            drop(self.0.stdin.take());
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_replay_command_resolves_claude_and_fails_safe_on_ambiguous_latest() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        const READY_MARKER: &str = "PMUX_WIN_ENV_HELPER_READY";
+        if std::env::var_os("PMUX_WIN_ENV_HELPER").is_some() {
+            let mut out = std::io::stdout();
+            writeln!(out, "\n{READY_MARKER}").unwrap();
+            out.flush().unwrap();
+            let _ = std::io::stdin().read(&mut [0u8; 1]);
+            return;
+        }
+
+        let _guard = FOREGROUND_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = TestTempDir::new("win-replay-selector");
+        let parent_dir = dir.path().join("parent-claude");
+        let child_dir = dir.path().join("child-claude");
+        std::fs::create_dir_all(parent_dir.join("sessions")).unwrap();
+        std::fs::create_dir_all(child_dir.join("sessions")).unwrap();
+
+        let prev = std::env::var_os("CLAUDE_CONFIG_DIR");
+        struct RestoreEnv(Option<OsString>);
+        impl Drop for RestoreEnv {
+            fn drop(&mut self) {
+                match self.0.as_ref() {
+                    Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+                    None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+                }
+            }
+        }
+        let _restore = RestoreEnv(prev);
+        // Point the test process at a decoy directory so std::env fallback cannot pass the test.
+        std::env::set_var("CLAUDE_CONFIG_DIR", &parent_dir);
+
+        let args = |items: &[&str]| items.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+
+        // Unselected launches without a resolvable live selector must fail safe (None)
+        // instead of falling back to --last / --continue.
+        assert_eq!(
+            windows_replay_command(
+                None,
+                args(&["codex.exe", "--model", "model-b", "Read prompt"]),
+            ),
+            None
+        );
+        assert_eq!(
+            windows_replay_command(
+                None,
+                args(&["grok.exe", "--model", "model-c", "-p", "Task"]),
+            ),
+            None
+        );
+        assert_eq!(
+            windows_replay_command(None, args(&["claude.exe", "--model", "model-a", "Task"])),
+            None
+        );
+
+        // Explicit selectors are preserved without startup prompts.
+        let codex_explicit = windows_replay_command(
+            None,
+            args(&[
+                "codex.exe",
+                "resume",
+                "codex-win-1",
+                "--model",
+                "model-b",
+                "Prompt",
+            ]),
+        )
+        .expect("explicit codex resume");
+        assert!(codex_explicit.contains("codex-win-1"), "{codex_explicit}");
+        assert!(!codex_explicit.contains("Prompt"), "{codex_explicit}");
+
+        let grok_explicit = windows_replay_command(
+            None,
+            args(&[
+                "grok.exe",
+                "--resume",
+                "grok-win-2",
+                "--model",
+                "model-c",
+                "-p",
+                "Prompt",
+            ]),
+        )
+        .expect("explicit grok resume");
+        assert!(grok_explicit.contains("grok-win-2"), "{grok_explicit}");
+        assert!(grok_explicit.contains("model-c"), "{grok_explicit}");
+        assert!(!grok_explicit.contains("Prompt"), "{grok_explicit}");
+
+        // Live Claude session file resolves exact --resume <id> from a child process's
+        // distinct CLAUDE_CONFIG_DIR via windows::env_var (not the parent's std::env fallback).
+        let exe = std::env::current_exe().expect("current_exe");
+        let mut child = ChildGuard(
+            prismattyc_process::spawn(
+                std::process::Command::new(exe)
+                    .args([
+                        "--exact",
+                        "procinfo::tests::windows_replay_command_resolves_claude_and_fails_safe_on_ambiguous_latest",
+                        "--nocapture",
+                    ])
+                    .env("PMUX_WIN_ENV_HELPER", "1")
+                    .env("CLAUDE_CONFIG_DIR", &child_dir)
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null()),
+            )
+            .expect("spawn windows env helper"),
+        );
+
+        let mut reader = BufReader::new(child.0.stdout.take().unwrap());
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let n = reader.read_line(&mut line).expect("read helper ready");
+            assert!(n > 0, "helper exited before printing ready");
+            if line.trim() == READY_MARKER {
+                break;
+            }
+        }
+
+        let child_pid = child.0.id();
+        std::fs::write(
+            parent_dir
+                .join("sessions")
+                .join(format!("{child_pid}.json")),
+            format!(r#"{{"pid":{child_pid},"sessionId":"decoy-parent-env"}}"#),
+        )
+        .unwrap();
+        std::fs::write(
+            child_dir.join("sessions").join(format!("{child_pid}.json")),
+            format!(r#"{{"pid":{child_pid},"sessionId":"claude-win-77"}}"#),
+        )
+        .unwrap();
+
+        assert_eq!(
+            windows::env_var(child_pid, b"CLAUDE_CONFIG_DIR"),
+            Some(child_dir.as_os_str().to_os_string()),
+            "windows::env_var must read the child process's distinct CLAUDE_CONFIG_DIR"
+        );
+        let claude_live = windows_replay_command(
+            Some(child_pid),
+            args(&[
+                r"C:\w\agent\claude.exe",
+                "--model",
+                "model-a",
+                "Initial prompt",
+            ]),
+        )
+        .expect("live claude session");
+        drop(child);
+
+        assert!(claude_live.contains("--resume"), "{claude_live}");
+        assert!(claude_live.contains("claude-win-77"), "{claude_live}");
+        assert!(!claude_live.contains("decoy-parent-env"), "{claude_live}");
+        assert!(claude_live.contains("model-a"), "{claude_live}");
+        assert!(!claude_live.contains("--continue"), "{claude_live}");
+        assert!(!claude_live.contains("Initial prompt"), "{claude_live}");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn live_fd_and_session_files_resolve_exact_agent_selectors() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        const READY_MARKER: &str = "PMUX_FD_HOLDER_READY";
+        if let Ok(raw) = std::env::var("PMUX_FD_HOLDER_FILES") {
+            let _held: Vec<_> = raw
+                .split('\n')
+                .filter(|s| !s.is_empty())
+                .map(|p| std::fs::File::open(p).expect("open fixture fd"))
+                .collect();
+            let mut out = std::io::stdout();
+            writeln!(out, "\n{READY_MARKER}").unwrap();
+            out.flush().unwrap();
+            let _ = std::io::stdin().read(&mut [0u8; 1]);
+            return;
+        }
+        let dir = TestTempDir::new("live-fd-selectors");
+
+        // Codex process holding both subagent and main rollouts open.
+        let main_id = "22222222-2222-2222-2222-222222222222";
+        let sub_id = "11111111-1111-1111-1111-111111111111";
+        let sub_path = dir.path().join(format!("rollout-2026-{sub_id}.jsonl"));
+        let main_path = dir.path().join(format!("rollout-2026-{main_id}.jsonl"));
+        std::fs::write(
+            &sub_path,
+            format!(
+                r#"{{"payload":{{"id":"{sub_id}","parent_thread_id":"{main_id}","thread_source":"subagent","source":{{"subagent":"x"}}}}}}"#
+            ) + "\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &main_path,
+            format!(r#"{{"payload":{{"id":"{main_id}","source":"cli","thread_source":"user"}}}}"#)
+                + "\n",
+        )
+        .unwrap();
+
+        let grok_dir = dir.path().join(".grok/sessions/grok-exact-88");
+        std::fs::create_dir_all(&grok_dir).unwrap();
+        let grok_events = grok_dir.join("events.jsonl");
+        std::fs::write(&grok_events, "{}\n").unwrap();
+
+        let claude_cfg = dir.path().join("claude-cfg");
+        std::fs::create_dir_all(claude_cfg.join("sessions")).unwrap();
+
+        let files = format!(
+            "{}\n{}\n{}",
+            sub_path.display(),
+            main_path.display(),
+            grok_events.display()
+        );
+        let exe = std::env::current_exe().expect("current_exe");
+        let mut codex_child = ChildGuard(
+            prismattyc_process::spawn(
+                std::process::Command::new(exe)
+                    .args([
+                        "--exact",
+                        "procinfo::tests::live_fd_and_session_files_resolve_exact_agent_selectors",
+                        "--nocapture",
+                    ])
+                    .env("PMUX_FD_HOLDER_FILES", files)
+                    .env("CLAUDE_CONFIG_DIR", &claude_cfg)
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null()),
+            )
+            .expect("spawn fd holder"),
+        );
+
+        let mut reader = BufReader::new(codex_child.0.stdout.take().unwrap());
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let n = reader.read_line(&mut line).unwrap();
+            assert!(n > 0, "fixture closed before ready");
+            if line.trim() == READY_MARKER {
+                break;
+            }
+        }
+        let pid = codex_child.0.id();
+
+        std::fs::write(
+            claude_cfg.join(format!("sessions/{pid}.json")),
+            format!(r#"{{"pid":{pid},"sessionId":"claude-exact-77"}}"#),
+        )
+        .unwrap();
+
+        assert_eq!(
+            unix_replay_command(
+                pid,
+                vec![
+                    "codex".into(),
+                    "--model".into(),
+                    "model-b".into(),
+                    "Read prompt".into()
+                ]
+            ),
+            format!("codex resume {main_id} --model model-b")
+        );
+        assert_eq!(
+            unix_replay_command(
+                pid,
+                vec!["claude".into(), "--model".into(), "model-a".into()]
+            ),
+            "claude --resume claude-exact-77 --model model-a"
+        );
+        assert_eq!(
+            unix_replay_command(
+                pid,
+                vec![
+                    "grok".into(),
+                    "--model".into(),
+                    "model-c".into(),
+                    "-p".into(),
+                    "Run task".into(),
+                ]
+            ),
+            "grok --resume grok-exact-88 --model model-c"
+        );
+
+        drop(codex_child);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn foreground_pid_prefers_agent_over_transient_mcp_and_caffeinate_children() {
+        use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+        use std::io::{BufRead, BufReader, Read};
+        let dir = TestTempDir::new("fg-agent-children");
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let claude_path = bin.join("claude");
+        let mcp_path = bin.join("sc-mcp");
+        let caff_path = bin.join("caffeinate");
+
+        let pipe_fifo = dir.path().join("ready.fifo");
+        assert!(
+            prismattyc_process::status(std::process::Command::new("mkfifo").arg(&pipe_fifo))
+                .unwrap()
+                .success()
+        );
+
+        // `launch.sh` stays in the PTY foreground group while running `claude`,
+        // which spawns transient children `sc-mcp` and `caffeinate` in the same
+        // process group.
+        let holder_sh = dir.path().join("holder.sh");
+        std::fs::write(&holder_sh, "while read _; do :; done\n").unwrap();
+        let claude_sh = dir.path().join("claude.sh");
+        std::fs::write(
+            &claude_sh,
+            format!(
+                "/bin/bash -c 'exec -a \"$1\" /bin/sh \"$2\" < /dev/null' _ '{}' '{}' &\n\
+                 /bin/bash -c 'exec -a \"$1\" /bin/sh \"$2\" < /dev/null' _ '{}' '{}' &\n\
+                 echo ready > '{}'\n\
+                 while read _; do :; done\n",
+                mcp_path.display(),
+                holder_sh.display(),
+                caff_path.display(),
+                holder_sh.display(),
+                pipe_fifo.display(),
+            ),
+        )
+        .unwrap();
+        let launch_sh = dir.path().join("launch.sh");
+        std::fs::write(
+            &launch_sh,
+            format!(
+                "/bin/bash -c 'exec -a \"$1\" /bin/sh \"$2\" --resume sess-exact-99 --model model-a' _ '{}' '{}'\n",
+                claude_path.display(),
+                claude_sh.display(),
+            ),
+        )
+        .unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let fifo_reader = pipe_fifo.clone();
+        std::thread::spawn(move || {
+            if let Ok(file) = std::fs::File::open(&fifo_reader) {
+                let mut line = String::new();
+                let _ = BufReader::new(file).read_line(&mut line);
+                let _ = tx.send(line);
+            }
+        });
+
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("open pty");
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.arg(launch_sh.to_str().unwrap());
+        let mut child = pair.slave.spawn_command(cmd).expect("spawn launch.sh");
+        let root_pid = child.process_id().expect("pty pid");
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().expect("pty reader");
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 512];
+            while matches!(reader.read(&mut buf), Ok(n) if n > 0) {}
+        });
+
+        let line = rx
+            .recv_timeout(std::time::Duration::from_secs(8))
+            .expect("claude fixture became ready");
+        assert_eq!(line.trim(), "ready");
+
+        for _ in 0..10 {
+            let cmd = live_foreground_command(root_pid).expect("foreground command");
+            assert!(
+                cmd.contains("claude --resume sess-exact-99 --model model-a"),
+                "must pick claude over transient sc-mcp/caffeinate children: {cmd}"
+            );
+        }
+
+        let spawn = crate::SpawnSpec {
+            program: "/bin/sh".into(),
+            argv: vec![launch_sh.to_string_lossy().into_owned()],
+            cwd: None,
+            env: Default::default(),
+        };
+        assert!(spawn_needs_resume_rewrite(&spawn, root_pid));
+        let replayed = replay_spawn_command(&spawn, Some(root_pid)).expect("replay cmd");
+        assert!(
+            replayed.contains("claude --resume sess-exact-99 --model model-a"),
+            "{replayed}"
+        );
+
+        let _ = child.kill();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn replay_spawn_command_drops_finished_launch_script_sitting_at_interactive_shell() {
+        let dir = TestTempDir::new("replay-finished-launch");
+        let launch_sh = dir.path().join("launch.sh");
+        std::fs::write(&launch_sh, "# one-shot launch\n").unwrap();
+
+        let mut idle_shell = prismattyc_process::spawn(
+            std::process::Command::new("/bin/sh")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null()),
+        )
+        .expect("spawn idle shell");
+        let pid = idle_shell.id();
+
+        let spawn = crate::SpawnSpec {
+            program: "/bin/sh".into(),
+            argv: vec!["-l".into(), launch_sh.to_string_lossy().into_owned()],
+            cwd: None,
+            env: Default::default(),
+        };
+        assert!(spawn_needs_resume_rewrite(&spawn, pid));
+        assert_eq!(replay_spawn_command(&spawn, Some(pid)), None);
+
+        let non_agent = crate::SpawnSpec {
+            program: "/bin/sleep".into(),
+            argv: vec!["99".into()],
+            cwd: None,
+            env: Default::default(),
+        };
+        assert!(!spawn_needs_resume_rewrite(&non_agent, pid));
+
+        let _ = idle_shell.kill();
+        let _ = idle_shell.wait();
+    }
 }
 
 #[cfg(windows)]
@@ -2925,6 +4124,30 @@ mod windows {
                 .with_cwd(UpdateKind::Always),
         );
         system.process(pid).map(f)
+    }
+
+    pub(super) fn env_var(pid: u32, key: &[u8]) -> Option<OsString> {
+        let key = std::str::from_utf8(key).ok()?;
+        let mut system = System::new();
+        let pid = Pid::from_u32(pid);
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing().with_environ(UpdateKind::Always),
+        );
+        let process = system.process(pid)?;
+        for entry in process.environ() {
+            let Some(text) = entry.to_str() else {
+                continue;
+            };
+            let Some((name, value)) = text.split_once('=') else {
+                continue;
+            };
+            if name.eq_ignore_ascii_case(key) && !value.is_empty() {
+                return Some(OsString::from(value));
+            }
+        }
+        None
     }
     pub(super) fn process_tree() -> Option<Vec<(u32, u32)>> {
         use windows_sys::Win32::{Foundation::*, System::Diagnostics::ToolHelp::*};

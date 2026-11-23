@@ -1833,7 +1833,7 @@ fn session_config_check_and_consented_restart_ignore_transient_agent_children() 
         &launch_sh,
         &format!(
             "#!/bin/sh\n\
-             exec /bin/bash -c 'exec -a \"$1\" /bin/sh \"$2\" --resume sess-pt224 --model opus' _ '{}' '{}'\n",
+             exec /bin/bash -c 'exec -a \"$1\" /bin/sh \"$2\" --resume sess-exact-1 --model model-a' _ '{}' '{}'\n",
             claude_bin.display(),
             claude_bin.display(),
         ),
@@ -1896,7 +1896,7 @@ fn session_config_check_and_consented_restart_ignore_transient_agent_children() 
         .unwrap();
     let saved_cmd = work["windows"][0]["root"]["command"].as_str().unwrap();
     assert!(
-        saved_cmd.contains("--resume sess-pt224 --model opus"),
+        saved_cmd.contains("--resume sess-exact-1 --model model-a"),
         "expected claude resume cmd, got {saved_cmd}"
     );
     assert!(
@@ -1942,7 +1942,7 @@ fn session_config_check_and_consented_restart_ignore_transient_agent_children() 
         "resumed"
     );
     let resumed_args = std::fs::read_to_string(&resumed_log).unwrap();
-    assert_eq!(resumed_args.trim(), "--resume sess-pt224 --model opus");
+    assert_eq!(resumed_args.trim(), "--resume sess-exact-1 --model model-a");
 
     ok(&pmux(&socket, &root, &extra, &["stop"]));
     drop(server);
@@ -2047,7 +2047,7 @@ fn plain_saved_restart_resumes_exact_conversations_and_monitor_socket_ready() {
         &format!(
             "#!/bin/sh\n\
              printf 'ONCE\\n' >> '{}'\n\
-             exec /bin/bash -c 'exec -a \"$1\" /bin/sh \"$2\" --model opus \"Initial claude prompt\"' _ '{}' '{}'\n",
+             exec /bin/bash -c 'exec -a \"$1\" /bin/sh \"$2\" --model model-a \"Initial claude prompt\"' _ '{}' '{}'\n",
             claude_launches.display(),
             claude_bin.display(),
             claude_bin.display(),
@@ -2080,7 +2080,7 @@ fn plain_saved_restart_resumes_exact_conversations_and_monitor_socket_ready() {
         &codex_launch_sh,
         &format!(
             "#!/bin/sh\n\
-             exec /bin/bash -c 'exec -a \"$1\" /bin/sh \"$2\" --model o3 \"Read prompt.txt\"' _ '{}' '{}'\n",
+             exec /bin/bash -c 'exec -a \"$1\" /bin/sh \"$2\" --model model-b \"Read prompt.txt\"' _ '{}' '{}'\n",
             codex_bin.display(),
             codex_bin.display(),
         ),
@@ -2111,7 +2111,7 @@ fn plain_saved_restart_resumes_exact_conversations_and_monitor_socket_ready() {
         &grok_launch_sh,
         &format!(
             "#!/bin/sh\n\
-             exec /bin/bash -c 'exec -a \"$1\" /bin/sh \"$2\" --resume grok-exact-33 --model grok-4 -p \"Initial grok prompt\"' _ '{}' '{}'\n",
+             exec /bin/bash -c 'exec -a \"$1\" /bin/sh \"$2\" --resume grok-exact-33 --model model-c -p \"Initial grok prompt\"' _ '{}' '{}'\n",
             grok_bin.display(),
             grok_bin.display(),
         ),
@@ -2243,15 +2243,15 @@ fn plain_saved_restart_resumes_exact_conversations_and_monitor_socket_ready() {
     );
     assert_eq!(
         std::fs::read_to_string(&claude_resumed_log).unwrap().trim(),
-        "--resume claude-exact-11 --model opus"
+        "--resume claude-exact-11 --model model-a"
     );
     assert_eq!(
         std::fs::read_to_string(&codex_resumed_log).unwrap().trim(),
-        format!("resume {main_id} --model o3")
+        format!("resume {main_id} --model model-b")
     );
     assert_eq!(
         std::fs::read_to_string(&grok_resumed_log).unwrap().trim(),
-        "--resume grok-exact-33 --model grok-4"
+        "--resume grok-exact-33 --model model-c"
     );
     assert_eq!(
         std::fs::read_to_string(&monitor_resumed_log)

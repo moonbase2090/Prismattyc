@@ -2964,11 +2964,11 @@ mod tests {
                 "--resume",
                 "abc-123",
                 "--model",
-                "grok-4",
+                "model-c",
                 "-p",
                 "solve bug",
             ])),
-            args(&["grok", "--resume", "abc-123", "--model", "grok-4"])
+            args(&["grok", "--resume", "abc-123", "--model", "model-c"])
         );
         assert_eq!(
             resume_args(args(&[
@@ -3101,28 +3101,28 @@ mod tests {
 
         let args = |items: &[&str]| items.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
         assert!(uses_ambiguous_latest_selector(&args(&[
-            "codex", "resume", "--last", "--model", "o3"
+            "codex", "resume", "--last", "--model", "model-b"
         ])));
         assert!(!uses_ambiguous_latest_selector(&args(&[
-            "codex", "resume", "conv-1", "--model", "o3"
+            "codex", "resume", "conv-1", "--model", "model-b"
         ])));
         assert!(uses_ambiguous_latest_selector(&args(&[
             "claude",
             "--continue",
             "--model",
-            "opus"
+            "model-a"
         ])));
         assert!(!uses_ambiguous_latest_selector(&args(&[
-            "claude", "--resume", "conv-2", "--model", "opus"
+            "claude", "--resume", "conv-2", "--model", "model-a"
         ])));
         assert!(uses_ambiguous_latest_selector(&args(&[
             "grok",
             "--continue",
             "--model",
-            "grok-4"
+            "model-c"
         ])));
         assert!(!uses_ambiguous_latest_selector(&args(&[
-            "grok", "--resume", "conv-3", "--model", "grok-4"
+            "grok", "--resume", "conv-3", "--model", "model-c"
         ])));
         assert!(!uses_ambiguous_latest_selector(&args(&["cargo", "watch"])));
 
@@ -3132,10 +3132,10 @@ mod tests {
             resume_args(args(&[
                 r"C:\w\agent\claude.exe",
                 "--model",
-                "opus",
+                "model-a",
                 "seat1",
             ])),
-            args(&[r"C:\w\agent\claude.exe", "--continue", "--model", "opus"])
+            args(&[r"C:\w\agent\claude.exe", "--continue", "--model", "model-a",])
         );
         assert_eq!(
             resume_args(args(&[
@@ -3143,7 +3143,7 @@ mod tests {
                 "--resume",
                 "claude-exact-seat1",
                 "--model",
-                "opus",
+                "model-a",
                 "seat1",
             ])),
             args(&[
@@ -3151,52 +3151,63 @@ mod tests {
                 "--resume",
                 "claude-exact-seat1",
                 "--model",
-                "opus",
+                "model-a",
             ])
         );
         assert_eq!(
-            resume_args(args(&[r"C:\w\agent\codex.exe", "--model", "o3", "prompt"])),
-            args(&[r"C:\w\agent\codex.exe", "resume", "--last", "--model", "o3"])
+            resume_args(args(&[
+                r"C:\w\agent\codex.exe",
+                "--model",
+                "model-b",
+                "prompt",
+            ])),
+            args(&[
+                r"C:\w\agent\codex.exe",
+                "resume",
+                "--last",
+                "--model",
+                "model-b",
+            ])
         );
         assert_eq!(
             resume_args(args(&[
                 r"C:\w\agent\grok.exe",
                 "--model",
-                "grok-4",
+                "model-c",
                 "-p",
                 "prompt",
             ])),
-            args(&[r"C:\w\agent\grok.exe", "--continue", "--model", "grok-4"])
+            args(&[r"C:\w\agent\grok.exe", "--continue", "--model", "model-c"])
         );
         assert!(uses_ambiguous_latest_selector(&args(&[
             r"C:\w\agent\claude.exe",
             "--continue",
             "--model",
-            "opus",
+            "model-a",
         ])));
         assert!(uses_ambiguous_latest_selector(&args(&[
             r"C:\w\agent\codex.exe",
             "resume",
             "--last",
             "--model",
-            "o3",
+            "model-b",
         ])));
         assert!(uses_ambiguous_latest_selector(&args(&[
             r"C:\w\agent\grok.exe",
             "--continue",
             "--model",
-            "grok-4",
+            "model-c",
         ])));
         assert!(is_agent_argv(&args(&[
             r"C:\w\agent\claude.exe",
             "--model",
-            "opus",
+            "model-a",
             "seat1",
         ])));
         assert!(spawn_needs_resume_rewrite(
             &crate::SpawnSpec {
                 program: r"C:\w\agent\claude.exe".into(),
-                argv: args(&["--model", "opus", "seat1"]),
+                argv: args(&["--model", "model-a", "seat1"]),
                 cwd: None,
                 env: Default::default(),
             },
@@ -3257,15 +3268,21 @@ mod tests {
         // Unselected launches without a resolvable live selector must fail safe (None)
         // instead of falling back to --last / --continue.
         assert_eq!(
-            windows_replay_command(None, args(&["codex.exe", "--model", "o3", "Read prompt"])),
+            windows_replay_command(
+                None,
+                args(&["codex.exe", "--model", "model-b", "Read prompt"]),
+            ),
             None
         );
         assert_eq!(
-            windows_replay_command(None, args(&["grok.exe", "--model", "grok-4", "-p", "Task"])),
+            windows_replay_command(
+                None,
+                args(&["grok.exe", "--model", "model-c", "-p", "Task"]),
+            ),
             None
         );
         assert_eq!(
-            windows_replay_command(None, args(&["claude.exe", "--model", "opus", "Task"])),
+            windows_replay_command(None, args(&["claude.exe", "--model", "model-a", "Task"])),
             None
         );
 
@@ -3277,7 +3294,7 @@ mod tests {
                 "resume",
                 "codex-win-1",
                 "--model",
-                "o3",
+                "model-b",
                 "Prompt",
             ]),
         )
@@ -3292,14 +3309,14 @@ mod tests {
                 "--resume",
                 "grok-win-2",
                 "--model",
-                "grok-4",
+                "model-c",
                 "-p",
                 "Prompt",
             ]),
         )
         .expect("explicit grok resume");
         assert!(grok_explicit.contains("grok-win-2"), "{grok_explicit}");
-        assert!(grok_explicit.contains("grok-4"), "{grok_explicit}");
+        assert!(grok_explicit.contains("model-c"), "{grok_explicit}");
         assert!(!grok_explicit.contains("Prompt"), "{grok_explicit}");
 
         // Live Claude session file resolves exact --resume <id> from a child process's
@@ -3357,7 +3374,7 @@ mod tests {
             args(&[
                 r"C:\w\agent\claude.exe",
                 "--model",
-                "opus",
+                "model-a",
                 "Initial prompt",
             ]),
         )
@@ -3367,7 +3384,7 @@ mod tests {
         assert!(claude_live.contains("--resume"), "{claude_live}");
         assert!(claude_live.contains("claude-win-77"), "{claude_live}");
         assert!(!claude_live.contains("decoy-parent-env"), "{claude_live}");
-        assert!(claude_live.contains("opus"), "{claude_live}");
+        assert!(claude_live.contains("model-a"), "{claude_live}");
         assert!(!claude_live.contains("--continue"), "{claude_live}");
         assert!(!claude_live.contains("Initial prompt"), "{claude_live}");
     }
@@ -3466,15 +3483,18 @@ mod tests {
                 vec![
                     "codex".into(),
                     "--model".into(),
-                    "o3".into(),
+                    "model-b".into(),
                     "Read prompt".into()
                 ]
             ),
-            format!("codex resume {main_id} --model o3")
+            format!("codex resume {main_id} --model model-b")
         );
         assert_eq!(
-            unix_replay_command(pid, vec!["claude".into(), "--model".into(), "opus".into()]),
-            "claude --resume claude-exact-77 --model opus"
+            unix_replay_command(
+                pid,
+                vec!["claude".into(), "--model".into(), "model-a".into()]
+            ),
+            "claude --resume claude-exact-77 --model model-a"
         );
         assert_eq!(
             unix_replay_command(
@@ -3482,12 +3502,12 @@ mod tests {
                 vec![
                     "grok".into(),
                     "--model".into(),
-                    "grok-4".into(),
+                    "model-c".into(),
                     "-p".into(),
                     "Run task".into(),
                 ]
             ),
-            "grok --resume grok-exact-88 --model grok-4"
+            "grok --resume grok-exact-88 --model model-c"
         );
 
         drop(codex_child);
@@ -3537,7 +3557,7 @@ mod tests {
         std::fs::write(
             &launch_sh,
             format!(
-                "/bin/bash -c 'exec -a \"$1\" /bin/sh \"$2\" --resume sess-exact-99 --model opus' _ '{}' '{}'\n",
+                "/bin/bash -c 'exec -a \"$1\" /bin/sh \"$2\" --resume sess-exact-99 --model model-a' _ '{}' '{}'\n",
                 claude_path.display(),
                 claude_sh.display(),
             ),
@@ -3581,7 +3601,7 @@ mod tests {
         for _ in 0..10 {
             let cmd = live_foreground_command(root_pid).expect("foreground command");
             assert!(
-                cmd.contains("claude --resume sess-exact-99 --model opus"),
+                cmd.contains("claude --resume sess-exact-99 --model model-a"),
                 "must pick claude over transient sc-mcp/caffeinate children: {cmd}"
             );
         }
@@ -3595,7 +3615,7 @@ mod tests {
         assert!(spawn_needs_resume_rewrite(&spawn, root_pid));
         let replayed = replay_spawn_command(&spawn, Some(root_pid)).expect("replay cmd");
         assert!(
-            replayed.contains("claude --resume sess-exact-99 --model opus"),
+            replayed.contains("claude --resume sess-exact-99 --model model-a"),
             "{replayed}"
         );
 

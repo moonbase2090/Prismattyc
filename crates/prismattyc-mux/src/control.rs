@@ -13290,7 +13290,18 @@ function Read-Exact([int]$Count) {
         let server = ControlServer::bind(&path, plane).unwrap();
         // Stands in for the connection thread that still holds the plane.
         let held = server.plane();
-        drop(server);
+        // Nothing has read the pane yet, so its console host is still waiting
+        // for an answer to its cursor position request. Stopping must not
+        // wait on that host forever.
+        let (stopped_tx, stopped) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            drop(server);
+            let _ = stopped_tx.send(());
+        });
+        assert!(
+            stopped.recv_timeout(Duration::from_secs(30)).is_ok(),
+            "the server did not finish stopping"
+        );
         // SAFETY: `handle` is the open process handle from above.
         let waited = unsafe { WaitForSingleObject(handle, 30_000) };
         // SAFETY: closed once, after the wait.

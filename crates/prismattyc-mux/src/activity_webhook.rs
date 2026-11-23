@@ -253,16 +253,22 @@ fn stage_delivery(
     queue: &mut VecDeque<Delivery>,
     now: Instant,
     kind: ActivityKind,
+    source: ActivitySource,
     seat: String,
     body: Vec<u8>,
-    terminal: bool,
-    runtime: bool,
 ) {
     if is_arrival(kind) {
         enqueue(queue, body, now);
-    } else {
-        pending.record(now, seat, body, terminal, runtime);
+        return;
     }
+    let terminal = match source {
+        ActivitySource::Hooks => {
+            matches!(kind, ActivityKind::SessionFinished | ActivityKind::Stopped)
+        }
+        ActivitySource::Runtime => kind == ActivityKind::Stopped,
+        ActivitySource::Notify => false,
+    };
+    pending.record(now, seat, body, terminal, source == ActivitySource::Runtime);
 }
 
 fn enqueue(queue: &mut VecDeque<Delivery>, body: Vec<u8>, now: Instant) {
@@ -428,23 +434,14 @@ fn run_worker(socket: &Path, config_path: &Path, stopped: mpsc::Receiver<()>) {
                         count: detail.and_then(|detail| detail.count),
                     };
                     if let Ok(body) = encode_payload(&payload) {
-                        let terminal = match record.event.source {
-                            ActivitySource::Hooks => matches!(
-                                record.event.kind,
-                                ActivityKind::SessionFinished | ActivityKind::Stopped
-                            ),
-                            ActivitySource::Runtime => record.event.kind == ActivityKind::Stopped,
-                            ActivitySource::Notify => false,
-                        };
                         stage_delivery(
                             &mut pending,
                             &mut queue,
                             Instant::now(),
                             record.event.kind,
+                            record.event.source,
                             record.event.seat.to_string(),
                             body,
-                            terminal,
-                            record.event.source == ActivitySource::Runtime,
                         );
                     }
                 }
@@ -1147,30 +1144,27 @@ mod tests {
             &mut queue,
             now,
             ActivityKind::MailReceived,
+            ActivitySource::Notify,
             "worker-a".into(),
             b"first-letter".to_vec(),
-            false,
-            false,
         );
         stage_delivery(
             &mut pending,
             &mut queue,
             now,
             ActivityKind::RoomMessage,
+            ActivitySource::Notify,
             "worker-a".into(),
             b"room-hint".to_vec(),
-            false,
-            false,
         );
         stage_delivery(
             &mut pending,
             &mut queue,
             now,
             ActivityKind::Working,
+            ActivitySource::Notify,
             "worker-a".into(),
             b"working".to_vec(),
-            false,
-            false,
         );
         assert_eq!(
             queue
@@ -1183,6 +1177,40 @@ mod tests {
         assert_eq!(
             pending.take_ready(now + DEBOUNCE),
             vec![b"working".to_vec()]
+        );
+    }
+
+    #[test]
+    fn stage_delivery_keeps_a_terminal_hook_ahead_of_runtime_status() {
+        let now = Instant::now();
+        let mut pending = Debouncer::default();
+        let mut queue = VecDeque::new();
+        stage_delivery(
+            &mut pending,
+            &mut queue,
+            now,
+            ActivityKind::SessionFinished,
+            ActivitySource::Hooks,
+            "seat-a".into(),
+            b"stopped".to_vec(),
+        );
+        stage_delivery(
+            &mut pending,
+            &mut queue,
+            now + Duration::from_millis(500),
+            ActivityKind::Working,
+            ActivitySource::Runtime,
+            "seat-a".into(),
+            b"waiting".to_vec(),
+        );
+        assert!(queue.is_empty());
+        assert_eq!(
+            pending.take_ready(now + Duration::from_millis(800)),
+            vec![b"stopped".to_vec()]
+        );
+        assert_eq!(
+            pending.take_ready(now + Duration::from_millis(1_600)),
+            vec![b"waiting".to_vec()]
         );
     }
 

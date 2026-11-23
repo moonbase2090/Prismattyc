@@ -197,14 +197,55 @@ struct LivePane {
 impl Drop for LivePane {
     fn drop(&mut self) {
         // Dropping `session` ends the child and closes the pseudoconsole.
-        // The close waits until the console host has written its last frame,
-        // so keep the reader's channel drained until the host exits. The
-        // reader thread then sees end of file and this thread ends with it.
+        // The close waits until the console host exits, so keep the reader's
+        // channel drained until then. A host that has just started first asks
+        // for the cursor position and does nothing else until it gets an
+        // answer, so answer it here. The reader thread then sees end of file
+        // and this thread ends with it.
         let (_, closed) = mpsc::sync_channel(0);
         let output = std::mem::replace(&mut self.from_pty_rx, closed);
+        let input = self.to_child_tx.clone();
         let _ = thread::Builder::new()
             .name("prism-server-pane-close".into())
-            .spawn(move || while output.recv().is_ok() {});
+            .spawn(move || {
+                let mut request = CursorRequest::default();
+                while let Ok(chunk) = output.recv() {
+                    let Ok(chunk) = chunk else { continue };
+                    if request.seen_in(&chunk.bytes) {
+                        let _ = input.send(CURSOR_POSITION_REPLY.to_vec());
+                    }
+                }
+            });
+    }
+}
+
+/// What a console host asks for when it starts.
+#[cfg(any(windows, test))]
+const CURSOR_POSITION_REQUEST: &[u8] = b"\x1b[6n";
+/// Any position will do: the host is about to close.
+#[cfg(windows)]
+const CURSOR_POSITION_REPLY: &[u8] = b"\x1b[1;1R";
+
+/// Finds cursor position requests in output that arrives in chunks.
+#[cfg(any(windows, test))]
+#[derive(Default)]
+struct CursorRequest {
+    tail: Vec<u8>,
+}
+
+#[cfg(any(windows, test))]
+impl CursorRequest {
+    /// True if a request ends in `bytes`, counting one split across chunks.
+    fn seen_in(&mut self, bytes: &[u8]) -> bool {
+        let keep = CURSOR_POSITION_REQUEST.len() - 1;
+        self.tail.extend_from_slice(bytes);
+        let seen = self
+            .tail
+            .windows(CURSOR_POSITION_REQUEST.len())
+            .any(|window| window == CURSOR_POSITION_REQUEST);
+        let drop = self.tail.len().saturating_sub(keep);
+        self.tail.drain(..drop);
+        seen
     }
 }
 
@@ -1524,6 +1565,25 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use std::path::PathBuf;
+
+    #[test]
+    fn cursor_request_is_found_whole_and_split_across_chunks() {
+        let mut request = CursorRequest::default();
+        assert!(request.seen_in(b"\x1b[6n"));
+        assert!(!request.seen_in(b"hello"));
+        assert!(!request.seen_in(b"text\x1b["));
+        assert!(request.seen_in(b"6n more"));
+        assert!(!request.seen_in(b"\x1b[6"));
+        assert!(!request.seen_in(b"m"));
+    }
+
+    #[test]
+    fn cursor_request_is_counted_once() {
+        let mut request = CursorRequest::default();
+        assert!(request.seen_in(b"a\x1b[6n"));
+        assert!(!request.seen_in(b""));
+        assert!(!request.seen_in(b"b"));
+    }
 
     #[cfg(windows)]
     fn windows_system(name: &str) -> String {

@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.3.74] - 2026-11-22
+
+### Changed
+
+- The update-available notice no longer shows the whole changelog. On macOS the alert shows the version, up to three one-line highlights and how many more changes there are, and **Release Notes** opens the full notes in the browser and returns to the alert. On Linux and Windows the notice names the version and its top change, and **Restart to update** has a **Release notes** link to the same page.
+- The activity feed and monitor now also hide credentials that are not behind a label in a command summary: the password in a URL such as `https://user:password@host`, the `user:password` value of `curl -u` or `--user`, the value after `Basic` or `Digest`, well-known access token formats, long random keys (including a signature inside a query or header value), and pasted private key blocks. Ordinary commands, paths, commit hashes and `user@host` addresses are shown as typed.
+
+### Fixed
+
+- Screen readers and accessibility clients on macOS can find and press the app's own controls. Tabs, Spaces (in the sidebar, expanded or collapsed), the Arrange buttons, the focused pane, the restore prompt and the command palette now report the rectangle they are drawn in; before, every one of them was reported as offscreen.
+- Updated `url` to 2.5.9 to address an advisory about a stack overflow on nested `blob:` URLs.
+
 ## [0.3.73] - 2026-11-21
 
 ### Added

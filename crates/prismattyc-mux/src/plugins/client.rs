@@ -170,3 +170,106 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    use pmux_plugin_api::MAX_TILES;
+
+    fn blank() -> frame::Cell {
+        frame::Cell {
+            text: " ".into(),
+            width: 1,
+            foreground: frame::Color::Default,
+            background: frame::Color::Default,
+            attributes: frame::Attributes {
+                bold: false,
+                dim: false,
+                italic: false,
+                blink: false,
+                reverse: false,
+                hidden: false,
+                strike: false,
+                overline: false,
+            },
+            underline: frame::Underline::None,
+        }
+    }
+
+    /// The most tiles the API allows, filling the frame budget, at the default
+    /// macOS cell size.
+    fn largest() -> (frame::Content, frame::Viewport) {
+        let pixels = frame::PixelSize {
+            width: 18,
+            height: 41,
+        };
+        let viewport = frame::Viewport {
+            columns: 200,
+            rows: 60,
+            pixels: Some(pixels),
+        };
+        let cells = 200 * 60;
+        // The validator's own accounting: 32 per cell, 256 per frame, the text,
+        // then the pixels and 64 per tile.
+        let room = MAX_FRAME_BYTES - (cells * 33 + 256) - MAX_TILES * 64;
+        let tile_bytes = 18 * 41 * 4;
+        let columns = (room / MAX_TILES / tile_bytes) as u16;
+        let tiles = (0..MAX_TILES)
+            .map(|index| {
+                let index = index as u16;
+                let per_row = 200 / columns;
+                frame::Tile {
+                    x: index % per_row * columns,
+                    y: index / per_row,
+                    columns,
+                    rows: 1,
+                    pixel_width: u32::from(columns) * 18,
+                    pixel_height: 41,
+                    rgba: vec![0x7f; usize::from(columns) * tile_bytes],
+                }
+            })
+            .collect();
+        let content = frame::Content {
+            columns: 200,
+            rows: 60,
+            cells: vec![blank(); cells],
+            tiles,
+            cursor: None,
+        };
+        (content, viewport)
+    }
+
+    #[test]
+    fn the_largest_valid_frame_crosses_one_control_response() -> Result<()> {
+        let (content, viewport) = largest();
+        let frame = ValidatedFrame::new(content, &viewport)?;
+        assert!(frame.byte_bound() > MAX_FRAME_BYTES - MAX_FRAME_BYTES / 10);
+        // What the daemon sends: the compact frame, base64, in one JSON reply.
+        let bytes = postcard::to_allocvec(frame.content())?;
+        assert!(bytes.len() <= MAX_FRAME_BYTES);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let response = ControlResponse {
+            version: PROTOCOL_VERSION,
+            request_id: u64::MAX,
+            body: ControlResponseBody::Ok {
+                response: ControlResponseData::Plugin {
+                    reply: Reply::Frame {
+                        handle: "h".repeat(64),
+                        content: encoded.clone(),
+                        next_tick_ms: u16::MAX,
+                    },
+                },
+            },
+        };
+        let wire = serde_json::to_vec(&response)?;
+        assert!(
+            wire.len() <= crate::control::MAX_RESPONSE_BYTES,
+            "{} bytes on the wire",
+            wire.len()
+        );
+        // And what the frontend accepts on the other side.
+        let decoded = decode_frame(&encoded, &viewport)?;
+        assert_eq!(decoded.content().tiles.len(), MAX_TILES);
+        Ok(())
+    }
+}

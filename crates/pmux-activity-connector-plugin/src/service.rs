@@ -2,7 +2,7 @@
 
 use pmux_plugin_api::guest::pmux::activity::read;
 use prismattyc_core::{
-    activity::{ActivityCursor, ActivityPage},
+    activity::{ActivityCursor, ActivityKind, ActivityPage},
     AgentId,
 };
 use serde::Deserialize;
@@ -18,6 +18,30 @@ pub trait Metadata {
         cursor: Option<ActivityCursor>,
         limit: u16,
     ) -> Result<ActivityPage, read::Error>;
+
+    fn wait(
+        &mut self,
+        endpoint: u64,
+        seat: &AgentId,
+        kinds: &[ActivityKind],
+        resume: Option<&ActivityCursor>,
+        timeout_ms: u64,
+    ) -> Result<ActivityPage, read::Error> {
+        prismattyc_core::activity::wait_for_activity(
+            |after| self.poll(endpoint, after.cloned(), 256),
+            |slice| std::thread::sleep(std::time::Duration::from_millis(slice)),
+            || {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+                    .unwrap_or(0)
+            },
+            seat,
+            kinds,
+            resume,
+            timeout_ms.min(prismattyc_core::activity::PLUGIN_ACTIVITY_WAIT_MS),
+        )
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -28,6 +52,10 @@ struct Arguments {
     cursor: Option<String>,
     since_ms: Option<u64>,
     limit: Option<u16>,
+    #[serde(default)]
+    kinds: Option<Vec<String>>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
 }
 
 struct Failure {
@@ -99,23 +127,32 @@ pub fn execute(metadata: &mut impl Metadata, contribution: &str, arguments: &str
             Failure::new("invalid_argument", "expected an activity argument object")
         })?;
         host = args.host.clone();
-        if !matches!(contribution, "hosts" | "seats" | "recent" | "poll") {
+        if !matches!(contribution, "hosts" | "seats" | "recent" | "poll" | "wait") {
             return Err(Failure::new("invalid_argument", "unknown activity command"));
         }
+        let arrival_args = args.kinds.is_some() || args.timeout_ms.is_some();
         if (contribution == "hosts"
             && (args.host.is_some()
                 || args.seat.is_some()
                 || args.cursor.is_some()
                 || args.since_ms.is_some()
-                || args.limit.is_some()))
+                || args.limit.is_some()
+                || arrival_args))
             || (contribution == "seats"
                 && (args.seat.is_some()
                     || args.cursor.is_some()
                     || args.since_ms.is_some()
-                    || args.limit.is_some()))
-            || (contribution == "recent" && (args.cursor.is_some() || args.since_ms.is_some()))
+                    || args.limit.is_some()
+                    || arrival_args))
+            || (contribution == "recent"
+                && (args.cursor.is_some() || args.since_ms.is_some() || arrival_args))
+            || (contribution == "poll" && arrival_args)
+            || (contribution == "wait" && (args.since_ms.is_some() || args.limit.is_some()))
             || (args.cursor.is_some() && args.since_ms.is_some())
             || args.limit.is_some_and(|limit| !(1..=256).contains(&limit))
+            || args
+                .timeout_ms
+                .is_some_and(|timeout| timeout > prismattyc_core::activity::MAX_ACTIVITY_WAIT_MS)
         {
             return Err(Failure::new(
                 "invalid_argument",
@@ -130,9 +167,34 @@ pub fn execute(metadata: &mut impl Metadata, contribution: &str, arguments: &str
             .map_err(|_| {
                 Failure::new("invalid_argument", "seat must be a valid agent identifier")
             })?;
-        if contribution == "recent" && seat.is_none() {
-            return Err(Failure::new("invalid_argument", "recent requires a seat"));
+        if matches!(contribution, "recent" | "wait") && seat.is_none() {
+            return Err(Failure::new(
+                "invalid_argument",
+                "this command requires a seat",
+            ));
         }
+        let kinds = if contribution == "wait" {
+            let names = args
+                .kinds
+                .as_ref()
+                .filter(|kinds| !kinds.is_empty())
+                .ok_or_else(|| {
+                    Failure::new("invalid_argument", "wait requires at least one event kind")
+                })?;
+            if args.timeout_ms.is_none() {
+                return Err(Failure::new("invalid_argument", "wait requires a timeout"));
+            }
+            names
+                .iter()
+                .map(|kind| {
+                    serde_json::from_value(json!(kind)).map_err(|_| {
+                        Failure::new("invalid_argument", "unknown activity event kind")
+                    })
+                })
+                .collect::<Result<Vec<ActivityKind>, _>>()?
+        } else {
+            Vec::new()
+        };
         let cursor = args
             .cursor
             .as_deref()
@@ -179,6 +241,22 @@ pub fn execute(metadata: &mut impl Metadata, contribution: &str, arguments: &str
         host = Some(endpoint.label.clone());
         let handle = endpoint.handle;
         let interval = endpoint.min_interval_ms;
+        if contribution == "wait" {
+            let page = metadata
+                .wait(
+                    handle,
+                    seat.as_ref().expect("wait seat was checked"),
+                    &kinds,
+                    cursor.as_ref(),
+                    args.timeout_ms.expect("wait timeout was checked"),
+                )
+                .map_err(|error| Failure::read(error, interval))?;
+            let timed_out = page.records.is_empty();
+            let mut value = query::poll_result(page, seat.as_ref());
+            value["timed_out"] = json!(timed_out);
+            value["host"] = json!(endpoint.label);
+            return Ok(value);
+        }
         let mut failure = None;
         let mut read_page = |cursor: Option<ActivityCursor>, limit: u16| {
             metadata.poll(handle, cursor, limit).map_err(|error| {
@@ -241,6 +319,8 @@ mod tests {
         labels: Vec<&'static str>,
         calls: usize,
         failure: Option<read::Error>,
+        kind: &'static str,
+        slept: u64,
     }
     impl Metadata for Fixture {
         fn endpoints(&mut self) -> Result<Vec<read::Endpoint>, read::Error> {
@@ -274,9 +354,48 @@ mod tests {
             Ok(serde_json::from_value(json!({
                 "epoch":"a0", "oldest_sequence":1,"current_sequence":7,
                 "records":[{"sequence":7,"received_at_ms":1200,"event":{
-                    "schema_version":1,"seat":"worker-a","run_id":"run-1","event_id":"event-7","source":"hooks","kind":"test_failed"
+                    "schema_version":1,"seat":"worker-a","run_id":"run-1","event_id":"event-7","source":"notify","kind":self.kind
                 }}],"cursor":{"epoch":"a0","sequence":7},"has_more":false,"reset":null
             })).unwrap())
+        }
+
+        fn wait(
+            &mut self,
+            endpoint: u64,
+            seat: &AgentId,
+            kinds: &[ActivityKind],
+            resume: Option<&ActivityCursor>,
+            timeout_ms: u64,
+        ) -> Result<ActivityPage, read::Error> {
+            if let Some(error) = self.failure {
+                return Err(error);
+            }
+            let clock = std::cell::Cell::new(0u64);
+            let slept = std::cell::Cell::new(0u64);
+            let page = prismattyc_core::activity::wait_for_activity(
+                |after| self.poll(endpoint, after.cloned(), 256),
+                |slice| {
+                    slept.set(slept.get() + slice);
+                    clock.set(clock.get() + slice);
+                },
+                || clock.get(),
+                seat,
+                kinds,
+                resume,
+                timeout_ms,
+            )?;
+            self.slept = slept.get();
+            Ok(page)
+        }
+    }
+
+    fn fixture(kind: &'static str) -> Fixture {
+        Fixture {
+            labels: vec!["local"],
+            calls: 0,
+            failure: None,
+            kind,
+            slept: 0,
         }
     }
 
@@ -286,6 +405,8 @@ mod tests {
             labels: vec!["local", "remote"],
             calls: 0,
             failure: None,
+            kind: "test_failed",
+            slept: 0,
         };
         assert_eq!(
             execute(&mut fixture, "hosts", "{}"),
@@ -306,6 +427,8 @@ mod tests {
             labels: vec!["local"],
             calls: 0,
             failure: None,
+            kind: "test_failed",
+            slept: 0,
         };
         assert_eq!(
             execute(
@@ -330,6 +453,8 @@ mod tests {
             labels: vec!["local"],
             calls: 0,
             failure: Some(read::Error::RateLimited),
+            kind: "test_failed",
+            slept: 0,
         };
         assert_eq!(
             execute(&mut fixture, "recent", r#"{"seat":"worker-a"}"#),
@@ -349,6 +474,8 @@ mod tests {
             labels: vec!["local"],
             calls: 0,
             failure: None,
+            kind: "test_failed",
+            slept: 0,
         };
         for (command, args) in [
             ("recent", "{}"),
@@ -464,5 +591,139 @@ mod tests {
             "activity feed exceeded the bounded query page limit"
         );
         assert_eq!(pages.calls, 2);
+    }
+
+    #[test]
+    fn wait_returns_a_queued_match_immediately_and_bounds_an_empty_feed() {
+        let mut queued = fixture("mail_received");
+        let (value, failed) = execute(
+            &mut queued,
+            "wait",
+            r#"{"seat":"worker-a","kinds":["mail_received"],"timeout_ms":60000}"#,
+        );
+        assert!(!failed, "{value}");
+        assert_eq!(value["timed_out"], false);
+        assert_eq!(
+            value["page"]["records"][0]["event"]["kind"],
+            "mail_received"
+        );
+        assert_eq!(value["page"]["records"][0]["event"]["event_id"], "event-7");
+        assert_eq!(queued.calls, 1);
+        assert_eq!(queued.slept, 0);
+        let encoded = value.to_string();
+        assert!(!encoded.contains("secret-subject"));
+        assert!(!encoded.contains("secret-body"));
+
+        let mut empty = fixture("working");
+        let (value, failed) = execute(
+            &mut empty,
+            "wait",
+            r#"{"seat":"worker-a","kinds":["room_message"],"timeout_ms":200}"#,
+        );
+        assert!(!failed, "{value}");
+        assert_eq!(value["timed_out"], true);
+        assert!(value["page"]["records"].as_array().unwrap().is_empty());
+        assert!(empty.calls > 1);
+        assert!(empty.slept <= 200, "{}", empty.slept);
+        assert!(empty.slept > 0);
+
+        let mut denied = fixture("mail_received");
+        denied.failure = Some(read::Error::PermissionDenied);
+        let (value, failed) = execute(
+            &mut denied,
+            "wait",
+            r#"{"seat":"worker-a","kinds":["mail_received"],"timeout_ms":1000}"#,
+        );
+        assert!(failed);
+        assert_eq!(value["error"]["code"], "request_rejected");
+        assert_eq!(denied.calls, 0);
+        assert!(value.to_string().contains("permission"));
+        assert!(!value.to_string().contains("event-7"));
+    }
+
+    #[test]
+    fn wait_rejects_an_unbounded_timeout_without_reading() {
+        let mut fixture = fixture("mail_received");
+        let (value, failed) = execute(
+            &mut fixture,
+            "wait",
+            r#"{"seat":"worker-a","kinds":["mail_received"],"timeout_ms":60001}"#,
+        );
+        assert!(failed);
+        assert_eq!(value["error"]["code"], "invalid_argument");
+        assert_eq!(fixture.calls, 0);
+    }
+
+    struct TwoArrivals {
+        calls: Vec<Option<u64>>,
+    }
+    impl Metadata for TwoArrivals {
+        fn endpoints(&mut self) -> Result<Vec<read::Endpoint>, read::Error> {
+            Ok(vec![read::Endpoint {
+                handle: 1,
+                label: "local".into(),
+                kind: read::EndpointKind::Local,
+                min_interval_ms: 250,
+            }])
+        }
+        fn poll(
+            &mut self,
+            _: u64,
+            cursor: Option<ActivityCursor>,
+            _: u16,
+        ) -> Result<ActivityPage, read::Error> {
+            self.calls
+                .push(cursor.as_ref().map(|cursor| cursor.sequence));
+            let start = cursor.as_ref().map(|cursor| cursor.sequence).unwrap_or(0);
+            let records = (start + 1..=2)
+                .map(|sequence| {
+                    json!({
+                        "sequence": sequence,
+                        "received_at_ms": sequence,
+                        "event": {
+                            "schema_version": 1,
+                            "seat": "worker-a",
+                            "run_id": "mail",
+                            "event_id": format!("event-{sequence}"),
+                            "source": "notify",
+                            "kind": "mail_received"
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+            let through = start + records.len() as u64;
+            Ok(serde_json::from_value(json!({
+                "epoch": "a0",
+                "oldest_sequence": 1,
+                "current_sequence": 2,
+                "records": records,
+                "cursor": {"epoch": "a0", "sequence": through},
+                "has_more": false,
+                "reset": null
+            }))
+            .unwrap())
+        }
+    }
+
+    #[test]
+    fn a_second_wait_with_a_cursor_does_not_replay_the_delivered_match() {
+        let mut feed = TwoArrivals { calls: Vec::new() };
+        let (first, failed) = execute(
+            &mut feed,
+            "wait",
+            r#"{"seat":"worker-a","kinds":["mail_received"],"timeout_ms":0}"#,
+        );
+        assert!(!failed, "{first}");
+        assert_eq!(first["page"]["records"][0]["event"]["event_id"], "event-1");
+        let (second, failed) = execute(
+            &mut feed,
+            "wait",
+            r#"{"seat":"worker-a","kinds":["mail_received"],"timeout_ms":0,"cursor":"a0:1"}"#,
+        );
+        assert!(!failed, "{second}");
+        assert_eq!(second["timed_out"], false);
+        assert_eq!(second["page"]["records"].as_array().unwrap().len(), 1);
+        assert_eq!(second["page"]["records"][0]["event"]["event_id"], "event-2");
+        assert_eq!(feed.calls.last().copied(), Some(Some(1)));
     }
 }

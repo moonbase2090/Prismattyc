@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, ensure, Context as _, Result};
 use pmux_plugin_api::host::pmux::{
-    activity::{manage, read},
+    activity::{arrivals, manage, read},
     plugin::host,
     plugin::lifecycle,
     view::frame,
@@ -375,6 +375,80 @@ impl read::Host for HostState {
     }
 }
 
+impl arrivals::Host for HostState {
+    fn wait(
+        &mut self,
+        endpoint: u64,
+        seat: String,
+        kinds: Vec<String>,
+        timeout_ms: u32,
+        after: Option<read::Cursor>,
+    ) -> Result<arrivals::Batch, read::Error> {
+        self.admit_read()?;
+        let seat = prismattyc_core::AgentId::new(seat).map_err(|_| read::Error::InvalidRequest)?;
+        let kinds = kinds
+            .iter()
+            .map(|kind| {
+                serde_json::from_value::<domain::ActivityKind>(serde_json::Value::String(
+                    kind.clone(),
+                ))
+                .map_err(|_| read::Error::InvalidRequest)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if kinds.is_empty() {
+            return Err(read::Error::InvalidRequest);
+        }
+        let timeout_ms =
+            u64::from(timeout_ms).min(prismattyc_core::activity::PLUGIN_ACTIVITY_WAIT_MS);
+        let started = std::time::Instant::now();
+        let mut last_page: Option<domain::ActivityPage> = None;
+        let resume = after.map(|cursor| domain::ActivityCursor {
+            epoch: cursor.epoch,
+            sequence: cursor.sequence,
+        });
+        let page = prismattyc_core::activity::wait_for_activity(
+            |after| loop {
+                match self.provider.poll(endpoint, after.cloned(), 256) {
+                    Err(read::Error::RateLimited) => {
+                        if started.elapsed() >= std::time::Duration::from_millis(timeout_ms) {
+                            return match last_page.take() {
+                                Some(mut page) => {
+                                    page.records.clear();
+                                    page.has_more = false;
+                                    Ok(page)
+                                }
+                                None => self.provider.poll(endpoint, after.cloned(), 256),
+                            };
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            prismattyc_core::activity::WAIT_SLICE_MS,
+                        ));
+                    }
+                    Ok(page) => {
+                        last_page = Some(page.clone());
+                        return Ok(page);
+                    }
+                    Err(error) => return Err(error),
+                }
+            },
+            |slice| std::thread::sleep(std::time::Duration::from_millis(slice)),
+            || started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+            &seat,
+            &kinds,
+            resume.as_ref(),
+            timeout_ms,
+        )?;
+        if page
+            .records
+            .iter()
+            .any(|record| record.event.validate_metadata().is_err())
+        {
+            return Err(read::Error::InvalidRequest);
+        }
+        Ok(convert_batch(page))
+    }
+}
+
 impl host::Host for HostState {
     fn now(&mut self) -> frame::Clock {
         frame::Clock {
@@ -511,6 +585,7 @@ fn convert_page(page: domain::ActivityPage) -> read::Page {
         records: page
             .records
             .into_iter()
+            .filter(|record| record.event.kind != domain::ActivityKind::RoomMessage)
             .map(|record| read::ActivityRecord {
                 sequence: record.sequence,
                 received_at_ms: record.received_at_ms,
@@ -532,7 +607,7 @@ fn convert_page(page: domain::ActivityPage) -> read::Page {
                         duration_ms: detail.duration_ms,
                         exit_code: detail.exit_code,
                         task: detail.task,
-                        operation_id: detail.operation_id,
+                        operation_id: detail.operation_id.or(detail.sender_id),
                         model: detail.model,
                     }),
                 },
@@ -575,6 +650,70 @@ fn convert_kind(kind: domain::ActivityKind) -> read::Kind {
         K::Stopped => read::Kind::Stopped,
         K::MailSent => read::Kind::MailSent,
         K::MailReceived => read::Kind::MailReceived,
+        // Room arrivals stay on the arrivals contract. A published reader
+        // cannot represent that kind, and this arm is not reached for them.
+        K::RoomMessage => read::Kind::MailReceived,
+    }
+}
+
+fn convert_source(source: domain::ActivitySource) -> read::Source {
+    match source {
+        domain::ActivitySource::Notify => read::Source::Notify,
+        domain::ActivitySource::Hooks => read::Source::Hooks,
+        domain::ActivitySource::Runtime => read::Source::Runtime,
+    }
+}
+
+fn convert_reset(reset: domain::ActivityReset) -> read::Reset {
+    match reset {
+        domain::ActivityReset::Restarted => read::Reset::Restarted,
+        domain::ActivityReset::RetentionGap => read::Reset::RetentionGap,
+        domain::ActivityReset::AheadOfFeed => read::Reset::AheadOfFeed,
+    }
+}
+
+fn convert_batch(page: domain::ActivityPage) -> arrivals::Batch {
+    arrivals::Batch {
+        epoch: page.epoch.clone(),
+        oldest_sequence: page.oldest_sequence,
+        current_sequence: page.current_sequence,
+        cursor_sequence: page.cursor.sequence,
+        has_more: page.has_more,
+        reset: page.reset.map(convert_reset),
+        notices: page
+            .records
+            .into_iter()
+            .map(|record| {
+                let kind = serde_json::to_value(record.event.kind)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .unwrap_or_default();
+                arrivals::Notice {
+                    sequence: record.sequence,
+                    received_at_ms: record.received_at_ms,
+                    schema_version: record.event.schema_version,
+                    seat: record.event.seat.to_string(),
+                    run_id: record.event.run_id,
+                    event_id: record.event.event_id,
+                    source: convert_source(record.event.source),
+                    kind,
+                    detail: record.event.detail.map(|detail| arrivals::Detail {
+                        tool: detail.tool,
+                        file: detail.file,
+                        command: detail.command,
+                        duration_ms: detail.duration_ms,
+                        exit_code: detail.exit_code,
+                        task: detail.task,
+                        operation_id: detail.operation_id,
+                        model: detail.model,
+                        sender_id: detail.sender_id,
+                        room_id: detail.room_id,
+                        message_id: detail.message_id,
+                        count: detail.count,
+                    }),
+                }
+            })
+            .collect(),
     }
 }
 
@@ -667,6 +806,204 @@ mod tests {
     use pmux_plugin_fixture::{component, module};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    #[test]
+    fn published_read_page_omits_room_arrivals_and_the_batch_keeps_event_metadata() {
+        let seat = prismattyc_core::AgentId::new("worker-a").unwrap();
+        let room = domain::ActivityInput::arrival(
+            seat.clone(),
+            domain::ActivityKind::RoomMessage,
+            "m-1",
+            Some("room-7"),
+            Some("operator-b"),
+            None,
+        )
+        .unwrap();
+        let tool = domain::ActivityInput {
+            schema_version: 1,
+            seat,
+            run_id: "run-1".into(),
+            event_id: "event-9".into(),
+            source: domain::ActivitySource::Hooks,
+            kind: domain::ActivityKind::ToolFinished,
+            detail: Some(domain::ActivityDetail {
+                tool: Some("cargo".into()),
+                ..domain::ActivityDetail::default()
+            }),
+            process_ids: Vec::new(),
+        };
+        let page = domain::ActivityPage {
+            epoch: "e0".into(),
+            oldest_sequence: 1,
+            current_sequence: 2,
+            records: vec![
+                domain::ActivityRecord {
+                    sequence: 1,
+                    received_at_ms: 10,
+                    event: room,
+                },
+                domain::ActivityRecord {
+                    sequence: 2,
+                    received_at_ms: 11,
+                    event: tool,
+                },
+            ],
+            cursor: domain::ActivityCursor {
+                epoch: "e0".into(),
+                sequence: 2,
+            },
+            has_more: false,
+            reset: Some(domain::ActivityReset::Restarted),
+            sessions: None,
+        };
+        let published = convert_page(page.clone());
+        assert_eq!(published.records.len(), 1);
+        assert_eq!(published.records[0].sequence, 2);
+        assert_eq!(published.records[0].event.kind, read::Kind::ToolFinished);
+        assert_eq!(
+            published.records[0]
+                .event
+                .detail
+                .as_ref()
+                .unwrap()
+                .tool
+                .as_deref(),
+            Some("cargo")
+        );
+        let batch = convert_batch(page);
+        assert_eq!(batch.notices.len(), 2);
+        assert!(matches!(batch.reset, Some(read::Reset::Restarted)));
+        assert_eq!(batch.notices[0].kind, "room_message");
+        assert_eq!(batch.notices[0].schema_version, 1);
+        let room_detail = batch.notices[0].detail.as_ref().unwrap();
+        assert_eq!(room_detail.room_id.as_deref(), Some("room-7"));
+        assert_eq!(room_detail.sender_id.as_deref(), Some("operator-b"));
+        assert_eq!(room_detail.message_id.as_deref(), Some("m-1"));
+        assert_eq!(batch.notices[1].kind, "tool_finished");
+        assert!(matches!(batch.notices[1].source, read::Source::Hooks));
+        assert_eq!(
+            batch.notices[1].detail.as_ref().unwrap().tool.as_deref(),
+            Some("cargo")
+        );
+    }
+
+    #[test]
+    fn host_wait_returns_a_match_past_the_first_page() {
+        struct Backlog {
+            calls: Arc<AtomicUsize>,
+        }
+        impl ActivityProvider for Backlog {
+            fn endpoints(&mut self) -> Result<Vec<read::Endpoint>, read::Error> {
+                Ok(Vec::new())
+            }
+            fn remove_stopped(&mut self, _: u64, _: u64) -> Result<manage::Removal, String> {
+                Ok(manage::Removal::Missing)
+            }
+            fn poll(
+                &mut self,
+                endpoint: u64,
+                after: Option<domain::ActivityCursor>,
+                limit: u16,
+            ) -> Result<domain::ActivityPage, read::Error> {
+                assert_eq!(endpoint, 7);
+                assert_eq!(limit, 256);
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                let start = after.as_ref().map(|cursor| cursor.sequence).unwrap_or(0);
+                let seat = prismattyc_core::AgentId::new("worker-a").unwrap();
+                let records = (start + 1..=257)
+                    .take(256)
+                    .map(|sequence| {
+                        let event_id = format!("event-{sequence}");
+                        let event = if sequence == 257 {
+                            domain::ActivityInput::arrival(
+                                seat.clone(),
+                                domain::ActivityKind::MailReceived,
+                                &event_id,
+                                None,
+                                Some("operator-b"),
+                                None,
+                            )
+                            .unwrap()
+                        } else {
+                            domain::ActivityInput {
+                                schema_version: 1,
+                                seat: seat.clone(),
+                                run_id: "run-1".into(),
+                                event_id,
+                                source: domain::ActivitySource::Runtime,
+                                kind: domain::ActivityKind::Working,
+                                detail: None,
+                                process_ids: Vec::new(),
+                            }
+                        };
+                        domain::ActivityRecord {
+                            sequence,
+                            received_at_ms: sequence,
+                            event,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let through = records
+                    .last()
+                    .map(|record| record.sequence)
+                    .unwrap_or(start);
+                Ok(domain::ActivityPage {
+                    epoch: "e0".into(),
+                    oldest_sequence: 1,
+                    current_sequence: 257,
+                    records,
+                    cursor: domain::ActivityCursor {
+                        epoch: "e0".into(),
+                        sequence: through,
+                    },
+                    has_more: through < 257,
+                    reset: None,
+                    sessions: None,
+                })
+            }
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut host = HostState {
+            limits: StoreLimitsBuilder::new().build(),
+            phase: Phase::Active,
+            activity: true,
+            session_manage: false,
+            provider: Box::new(Backlog {
+                calls: calls.clone(),
+            }),
+            assets: BTreeMap::new(),
+            started: Instant::now(),
+            imports: BTreeMap::new(),
+            calls: 0,
+        };
+        let batch = arrivals::Host::wait(
+            &mut host,
+            7,
+            "worker-a".into(),
+            vec!["mail_received".into()],
+            0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        assert_eq!(batch.notices.len(), 1);
+        assert_eq!(batch.notices[0].event_id, "event-257");
+        assert_eq!(batch.notices[0].kind, "mail_received");
+
+        let again = arrivals::Host::wait(
+            &mut host,
+            7,
+            "worker-a".into(),
+            vec!["mail_received".into()],
+            0,
+            Some(read::Cursor {
+                epoch: batch.epoch,
+                sequence: batch.cursor_sequence,
+            }),
+        )
+        .unwrap();
+        assert!(again.notices.is_empty());
+    }
 
     #[test]
     fn static_validation_does_not_run_a_core_start_function() {

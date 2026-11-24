@@ -155,7 +155,7 @@ impl SeatState {
 pub fn next_state(previous: SeatState, kind: ActivityKind) -> SeatState {
     use ActivityKind::*;
     match kind {
-        MailSent | MailReceived => previous,
+        MailSent | MailReceived | RoomMessage => previous,
         // A new session waits for its first prompt.
         Waiting | TurnFinished | SessionStarted => SeatState::Waiting,
         Stopped | SessionFinished => SeatState::Stopped,
@@ -228,7 +228,7 @@ impl Seat {
     fn record(&mut self, record: ActivityRecord) {
         if !matches!(
             record.event.kind,
-            ActivityKind::MailSent | ActivityKind::MailReceived
+            ActivityKind::MailSent | ActivityKind::MailReceived | ActivityKind::RoomMessage
         ) {
             if record.event.source != ActivitySource::Runtime {
                 self.hook_report = Some(record.clone());
@@ -789,6 +789,7 @@ fn note(kind: ActivityKind) -> Option<&'static str> {
         Stopped => Some("stopped"),
         MailSent => Some("sent mail"),
         MailReceived => Some("received mail"),
+        RoomMessage => Some("room message"),
         _ => None,
     }
 }

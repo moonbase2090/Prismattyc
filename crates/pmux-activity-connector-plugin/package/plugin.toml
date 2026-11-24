@@ -1,6 +1,6 @@
 manifest_version = 1
 id = "org.moonbase.activity-connector"
-version = "1.0.2"
+version = "1.1.0"
 plugin_api = "^2.0.0"
 component = "connector.wasm"
 notices = ["LICENSE"]
@@ -36,3 +36,10 @@ id = "poll"
 mcp_name = "pmux_activity_poll"
 input_schema = "poll-input.json"
 output_schema = "poll-output.json"
+
+[[contributions]]
+kind = "command"
+id = "wait"
+mcp_name = "pmux_activity_wait"
+input_schema = "wait-input.json"
+output_schema = "wait-output.json"

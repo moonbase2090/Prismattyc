@@ -3490,6 +3490,7 @@ impl ControlPlane {
             .mail_store
             .send(&from, &to, &summary, &body)
             .map_err(Self::mail_store_error)?;
+        self.record_stored_mail(to.as_str(), &from, &id, depth);
         self.on_mail_stored(to.as_str(), depth);
         Ok(ControlResponseData::MailSent { id, depth })
     }
@@ -3652,19 +3653,16 @@ impl ControlPlane {
             recipients.push(agent);
             names.push(agent_id.to_string());
         }
-        let delivered = self
+        let stored = self
             .mail_store
             .broadcast(&from, &recipients, &summary, &body)
             .map_err(Self::mail_store_error)?;
-        for agent in &recipients {
-            let depth = self
-                .mail_depth_for(agent.as_str())
-                .map(|(open, _)| open)
-                .unwrap_or(0);
-            self.on_mail_stored(agent.as_str(), depth);
+        for (agent, (id, depth)) in recipients.iter().zip(stored.iter()) {
+            self.record_stored_mail(agent.as_str(), &from, id, *depth);
+            self.on_mail_stored(agent.as_str(), *depth);
         }
         Ok(ControlResponseData::MailBroadcasted {
-            delivered,
+            delivered: u32::try_from(stored.len()).unwrap_or(u32::MAX),
             recipients: names,
         })
     }
@@ -3694,6 +3692,36 @@ impl ControlPlane {
     fn cancel_mail_nudge_for_agent(&mut self, agent: &str) {
         if let Some(pane_raw) = self.doorbell_pane(agent) {
             self.mail_nudges.remove(&pane_raw);
+        }
+    }
+
+    /// Metadata-only activity when the feed is on. The letter body and
+    /// summary are not arguments, so they cannot be copied into the event.
+    fn record_stored_mail(
+        &mut self,
+        recipient: &str,
+        sender: &str,
+        letter_id: &str,
+        open_count: u32,
+    ) {
+        if self.activity.is_none() {
+            return;
+        }
+        let Ok(seat) = prismattyc_core::AgentId::new(recipient) else {
+            return;
+        };
+        let Ok(event) = prismattyc_core::activity::ActivityInput::arrival(
+            seat,
+            prismattyc_core::activity::ActivityKind::MailReceived,
+            letter_id,
+            None,
+            Some(sender),
+            Some(open_count),
+        ) else {
+            return;
+        };
+        if let Some(feed) = self.activity.as_mut() {
+            let _ = feed.publish(event);
         }
     }
 
@@ -18284,6 +18312,123 @@ function Read-Exact([int]$Count) {
             plane.plugin_activity_page(None, 1).unwrap_err(),
             pmux_plugin_api::host::pmux::activity::read::Error::FeedDisabled
         );
+    }
+
+    #[test]
+    fn stored_mail_records_metadata_only_when_the_feed_is_on() {
+        let (mut plane, _, _) = fixture(8);
+        let _peer = mail_hello(&mut plane, 1, "operator-a");
+        let sender = mail_hello(&mut plane, 2, "operator-b");
+        let send = |plane: &mut ControlPlane, request_id: u64| {
+            plane.handle(ControlRequest::MailSend {
+                version: PROTOCOL_VERSION,
+                request_id,
+                client_id: sender,
+                to: "operator-a".into(),
+                summary: "secret-subject".into(),
+                body: "secret-body".into(),
+            })
+        };
+        let first = send(&mut plane, 3);
+        let ControlResponseBody::Ok {
+            response: ControlResponseData::MailSent { id, depth },
+        } = first.body
+        else {
+            panic!("expected MailSent");
+        };
+        assert_eq!(depth, 1);
+        let disabled = plane.handle(ControlRequest::ReadActivity {
+            version: PROTOCOL_VERSION,
+            request_id: 4,
+            cursor: None,
+            limit: 8,
+        });
+        assert_eq!(error_code(&disabled), ControlErrorCode::ActivityDisabled);
+
+        plane.enable_activity().unwrap();
+        let second = send(&mut plane, 5);
+        let ControlResponseBody::Ok {
+            response: ControlResponseData::MailSent { id: stored, .. },
+        } = second.body
+        else {
+            panic!("expected MailSent");
+        };
+        assert_ne!(stored, id);
+        let response = plane.handle(ControlRequest::ReadActivity {
+            version: PROTOCOL_VERSION,
+            request_id: 6,
+            cursor: None,
+            limit: 8,
+        });
+        let ControlResponseBody::Ok {
+            response: ControlResponseData::Activity { page },
+        } = response.body
+        else {
+            panic!("expected activity page");
+        };
+        assert_eq!(page.records.len(), 1);
+        assert_eq!(page.records[0].event.event_id, stored);
+        assert_eq!(page.records[0].event.seat.as_str(), "operator-a");
+        assert_eq!(
+            page.records[0].event.kind,
+            crate::activity::ActivityKind::MailReceived
+        );
+        assert_eq!(
+            page.records[0]
+                .event
+                .detail
+                .as_ref()
+                .unwrap()
+                .sender_id
+                .as_deref(),
+            Some("operator-b")
+        );
+        let encoded = serde_json::to_string(&page).unwrap();
+        assert!(!encoded.contains("secret-subject"), "{encoded}");
+        assert!(!encoded.contains("secret-body"), "{encoded}");
+
+        let room = crate::activity::ActivityInput::arrival(
+            crate::mailbox::AgentId::new("operator-a").unwrap(),
+            crate::activity::ActivityKind::RoomMessage,
+            "m-9",
+            Some("room-7"),
+            Some("operator-b"),
+            None,
+        )
+        .unwrap();
+        let published = plane.handle(ControlRequest::PublishActivity {
+            version: PROTOCOL_VERSION,
+            request_id: 7,
+            event: room,
+        });
+        assert!(matches!(
+            published.body,
+            ControlResponseBody::Ok {
+                response: ControlResponseData::ActivityPublished { .. }
+            }
+        ));
+        let response = plane.handle(ControlRequest::ReadActivity {
+            version: PROTOCOL_VERSION,
+            request_id: 8,
+            cursor: None,
+            limit: 8,
+        });
+        let ControlResponseBody::Ok {
+            response: ControlResponseData::Activity { page },
+        } = response.body
+        else {
+            panic!("expected activity page");
+        };
+        assert_eq!(page.records.len(), 2);
+        assert_eq!(
+            page.records[1].event.kind,
+            crate::activity::ActivityKind::RoomMessage
+        );
+        assert_eq!(page.records[1].event.run_id, "room-7");
+        let encoded = serde_json::to_string(&page.records[1]).unwrap();
+        assert!(encoded.contains("m-9"));
+        assert!(!encoded.contains("secret-subject"));
+        assert!(!encoded.contains("secret-body"));
     }
 
     #[test]

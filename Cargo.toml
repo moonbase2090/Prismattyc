@@ -38,11 +38,15 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 unicode-width = "0.2"
 vte = "0.15"
+lunatui-badge = { git = "https://github.com/moonbase2090/lunatui", rev = "9a722cf04ce9da97349e7448565bcccaa4c805b0" }
 lunatui-core = { git = "https://github.com/moonbase2090/lunatui", rev = "9a722cf04ce9da97349e7448565bcccaa4c805b0" }
 lunatui-image = { git = "https://github.com/moonbase2090/lunatui", rev = "9a722cf04ce9da97349e7448565bcccaa4c805b0" }
+lunatui-runtime = { git = "https://github.com/moonbase2090/lunatui", rev = "9a722cf04ce9da97349e7448565bcccaa4c805b0" }
 lunatui-term = { git = "https://github.com/moonbase2090/lunatui", rev = "9a722cf04ce9da97349e7448565bcccaa4c805b0" }
+lunatui-text = { git = "https://github.com/moonbase2090/lunatui", rev = "9a722cf04ce9da97349e7448565bcccaa4c805b0" }
 lunatui-theme = { git = "https://github.com/moonbase2090/lunatui", rev = "9a722cf04ce9da97349e7448565bcccaa4c805b0" }
 lunatui-widgets = { git = "https://github.com/moonbase2090/lunatui", rev = "9a722cf04ce9da97349e7448565bcccaa4c805b0", default-features = false, features = ["pixel-sparkline", "canvas"] }
+lunatui-ui-tokens = { git = "https://github.com/moonbase2090/lunatui", rev = "9a722cf04ce9da97349e7448565bcccaa4c805b0" }
 
 [profile.mutants]
 inherits = "test"

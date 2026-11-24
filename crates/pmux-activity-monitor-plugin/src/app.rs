@@ -3,6 +3,7 @@
 
 use lunatui_core::{ClusterTable, Grid, Rect};
 use lunatui_image::ImageSink;
+use lunatui_runtime::RenderMode;
 use lunatui_term::Event;
 use lunatui_widgets::RenderCx;
 
@@ -34,6 +35,17 @@ impl Monitor {
         self.ui.event(event, &mut self.hosts, self.now_ms)
     }
 
+    /// Graphite whenever the host shows pixels and the viewer has not turned
+    /// them off with `p`. Cells otherwise.
+    pub fn mode(&self, pixels: bool) -> RenderMode {
+        if pixels && self.ui.pixels {
+            RenderMode::Graphite
+        } else {
+            RenderMode::Cell
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
         grid: &mut Grid,
@@ -42,6 +54,7 @@ impl Monitor {
         area: Rect,
         mono_ms: u64,
         pixels: bool,
+        mode: RenderMode,
     ) {
         // Time passes for every host before each frame is drawn, even when no
         // poll brought anything new: an open turn can become stuck.
@@ -55,7 +68,7 @@ impl Monitor {
         };
         let mut cx = RenderCx::new(grid, clusters, &theme);
         if let Some(sink) = sink {
-            cx = cx.image_sink(sink);
+            cx = cx.image_sink(sink).render_mode(mode);
         }
         ui::render(
             &mut cx,
@@ -78,6 +91,7 @@ impl Monitor {
             Rect::new(0, 0, width, height),
             mono_ms,
             false,
+            RenderMode::Cell,
         );
         (grid, clusters)
     }

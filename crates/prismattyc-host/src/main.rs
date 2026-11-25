@@ -3202,6 +3202,8 @@ struct App {
     last_register_try: Option<Instant>,
     last_render_status: Option<Instant>,
     render_status_seq: u64,
+    /// The theme last handed to the file writer for plug-in views.
+    published_theme: Option<prismattyc_mux::host_theme::ThemeColors>,
     pump_timing: pump_timing::PumpTiming,
     last_component_poll: Option<Instant>,
     restart_view: Option<PathBuf>,
@@ -3308,6 +3310,7 @@ impl App {
             default_layout_path: None,
             last_register_try: None,
             last_render_status: None,
+            published_theme: None,
             render_status_seq: 0,
             pump_timing: pump_timing::PumpTiming::default(),
             last_component_poll: None,
@@ -3888,6 +3891,33 @@ impl App {
         }
     }
 
+    /// Share the focused window's theme with plug-in views whenever it changes.
+    fn publish_theme(&mut self) {
+        let Some((pid_path, pid)) = self.registered_host.as_ref() else {
+            return;
+        };
+        let Some(colors) = theme_for_plugins(
+            self.windows
+                .values()
+                .map(|host| (host.window_focused, &host.theme)),
+        ) else {
+            return;
+        };
+        if self.published_theme == Some(colors) {
+            return;
+        }
+        match self
+            .file_writer
+            .handle()
+            .theme(pid_path.clone(), *pid, colors)
+        {
+            Ok(_) => self.published_theme = Some(colors),
+            Err(error) => {
+                eprintln!("prismattyc-host: could not share the theme with plug-ins: {error}");
+            }
+        }
+    }
+
     fn poll_file_writer(&mut self) {
         for completion in self.file_writer.drain() {
             match completion.kind {
@@ -3949,6 +3979,13 @@ impl App {
                 file_writer::CompletionKind::RenderStatus => {
                     if let Err(error) = completion.result {
                         eprintln!("prismattyc-host: could not publish render status: {error}");
+                    }
+                }
+                file_writer::CompletionKind::Theme => {
+                    if let Err(error) = completion.result {
+                        eprintln!(
+                            "prismattyc-host: could not share the theme with plug-ins: {error}"
+                        );
                     }
                 }
                 file_writer::CompletionKind::ComponentHeartbeat => {
@@ -4267,6 +4304,7 @@ impl App {
             self.finish_pump_timing(pump_started, external_us, pump_io);
             return;
         }
+        self.publish_theme();
         let phase_started = Instant::now();
         self.publish_render_status();
         self.pump_timing.record_phase(
@@ -15328,6 +15366,17 @@ fn graphite_chord_label(keymap: &keybind::KeyMap, action: keybind::Action) -> St
 /// Prismattyc Dark or Light from the window's system appearance; every other
 /// theme pins the window appearance to its own variant so the native title
 /// band matches the chrome and terminal below it.
+/// The theme plug-in views follow: the focused window's. With no window
+/// focused, the theme shared last stays.
+fn theme_for_plugins<'a>(
+    windows: impl IntoIterator<Item = (bool, &'a theme::Theme)>,
+) -> Option<prismattyc_mux::host_theme::ThemeColors> {
+    windows
+        .into_iter()
+        .find(|(focused, _)| *focused)
+        .map(|(_, theme)| theme::shared_colors(theme))
+}
+
 fn apply_host_theme(host: &mut HostState, theme: theme::Theme) {
     let follow = theme::follows_os(&theme);
     host.window.set_theme(if follow {
@@ -22950,6 +22999,28 @@ mod modifier_tests;
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    fn builtin(id: &str) -> &'static theme::Theme {
+        theme::builtins()
+            .iter()
+            .find(|theme| theme.id == id)
+            .unwrap()
+    }
+
+    #[test]
+    fn plugins_follow_the_focused_windows_theme() {
+        let dark = builtin("prismattyc-dark");
+        let light = builtin("prismattyc-light");
+        let shared = theme_for_plugins([(false, dark), (true, light)]).unwrap();
+        assert!(!shared.dark);
+        assert_eq!(shared.background, light.default_bg);
+        assert_eq!(shared.foreground, light.default_fg);
+        assert_eq!(shared.ansi, light.ansi);
+        let shared = theme_for_plugins([(true, dark), (false, light)]).unwrap();
+        assert!(shared.dark);
+        assert_eq!(shared.background, dark.default_bg);
+        assert_eq!(theme_for_plugins([(false, dark), (false, light)]), None);
+    }
 
     #[test]
     fn final_host_stays_open_until_exited_cleanup_succeeds() {

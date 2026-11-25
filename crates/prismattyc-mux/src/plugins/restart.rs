@@ -64,7 +64,9 @@ pub(super) fn bundled_by(executable: Option<&std::path::Path>) -> Result<Bundled
     bundled_newer_than(executable, prismattyc_core::package_version())
 }
 
-fn bundled_newer_than(executable: Option<&std::path::Path>, running: &str) -> Result<Bundled> {
+/// [`bundled_by`] with the running version given, for tests in their own process.
+#[doc(hidden)]
+pub fn bundled_newer_than(executable: Option<&std::path::Path>, running: &str) -> Result<Bundled> {
     let Some(executable) = executable else {
         return bundled();
     };
@@ -158,76 +160,6 @@ mod tests {
             }]
         );
         assert!(super::pending(&installed(&[(MONITOR, "0.9.0")]), &selections).is_empty());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn the_installed_daemon_is_asked_for_its_bundles_and_a_bad_answer_is_an_error() {
-        let dir = std::env::temp_dir().join(format!("pmux-bundled-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        // Install each script through a child that has exited: a file this process
-        // still has open for writing can be copied into another test's fork and then
-        // fail to exec as busy.
-        let script = |name: &str, body: &str| {
-            let path = dir.join(name);
-            let source = dir.join(format!("{name}.source"));
-            std::fs::write(&source, format!("#!/bin/sh\n{body}\n")).unwrap();
-            let installed = prismattyc_process::status(
-                std::process::Command::new("install")
-                    .args(["-m", "755"])
-                    .arg(&source)
-                    .arg(&path),
-            )
-            .unwrap();
-            assert!(installed.success(), "install the fake pmuxd");
-            std::fs::remove_file(&source).unwrap();
-            path
-        };
-        let asked = dir.join("asked");
-        let newer = script(
-            "pmuxd-newer",
-            &format!(
-                r#"case "$1" in --version) echo 'pmuxd 9.0.0 (abc)';; --bundled-plugins) printf '{{"plugins":[{{"id":"{MONITOR}","version":"9.0.0"}}]}}\n';; *) exit 9;; esac"#
-            ),
-        );
-        let found = bundled_newer_than(Some(&newer), "1.0.0").unwrap();
-        let selections = BTreeMap::from([(MONITOR.to_owned(), Selection::Enabled("1.0.0".into()))]);
-        assert_eq!(
-            pending(&found, &selections),
-            [PendingPlugin {
-                id: MONITOR.into(),
-                from: Some("1.0.0".into()),
-                to: "9.0.0".into()
-            }]
-        );
-        // A newer daemon that cannot answer is an error, not "nothing pending".
-        let broken = script(
-            "pmuxd-broken",
-            r#"case "$1" in --version) echo 'pmuxd 9.0.0 (abc)';; *) exit 2;; esac"#,
-        );
-        let error = bundled_newer_than(Some(&broken), "1.0.0").unwrap_err();
-        assert!(
-            format!("{error:#}").contains("bundled plug-ins"),
-            "{error:#}"
-        );
-        // A daemon that is not newer is never run with the new flag: an older release
-        // would take it for a program to start.
-        let older = script(
-            "pmuxd-older",
-            &format!(
-                r#"case "$1" in --version) echo 'pmuxd 1.0.0 (abc)';; *) touch '{}';; esac"#,
-                asked.display()
-            ),
-        );
-        assert_eq!(
-            bundled_newer_than(Some(&older), "1.0.0").unwrap(),
-            bundled().unwrap()
-        );
-        assert!(
-            !asked.exists(),
-            "a daemon that is not newer was run with --bundled-plugins"
-        );
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

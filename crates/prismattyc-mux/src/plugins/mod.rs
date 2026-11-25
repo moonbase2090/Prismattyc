@@ -38,7 +38,9 @@ pub use package::{pack, Installed};
 pub use protocol::{
     AdminAction, Observed, Reply, Request, RetryReason, Status, ToolExport, ViewEndpoint,
 };
-pub use restart::{bundled as bundled_defaults, Bundled, BundledPlugin, PendingPlugin};
+pub use restart::{
+    bundled as bundled_defaults, bundled_newer_than, Bundled, BundledPlugin, PendingPlugin,
+};
 pub use update::{
     available as updates_available, update as update_plugins, Outcome, Result_ as UpdateResult,
 };

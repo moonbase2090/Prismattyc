@@ -1535,7 +1535,7 @@ pub(super) fn open_plugins(host: &mut crate::HostState) {
 }
 
 /// After input on the settings panel: Restart now on the Plug-ins page closes the
-/// panel and opens Update and restart, as the `update_restart` command does.
+/// panel and opens Update and restart at Update and restart all components.
 pub(super) fn follow_up(host: &mut crate::HostState) {
     if host
         .settings
@@ -1543,7 +1543,7 @@ pub(super) fn follow_up(host: &mut crate::HostState) {
         .is_some_and(|panel| panel.plugins.take_restart_request())
     {
         crate::close_context_menu(host);
-        crate::space_panel::maintenance(host);
+        crate::space_panel::maintenance_restart(host);
     }
 }
 

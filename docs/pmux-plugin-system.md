@@ -55,7 +55,10 @@ manifest's required ones are pre-selected the first time), **Update to** and
 enable plug-ins); both open the page and show the result there. They are on by
 default and bound to no key. When official plug-ins wait for a daemon restart,
 the page lists them and offers **Restart now**, which opens **Update and
-restart**.
+restart** with **Update and restart all components** selected. Enter lists the
+running sessions and asks before saving them and restarting the daemon. The
+plain **Restart** rows postpone the daemon while sessions run, so they do not
+finish the plug-in update.
 
 The official Activity Monitor and activity connector start enabled. On startup,
 pmuxd installs the newest compatible version in its verified bundle when a

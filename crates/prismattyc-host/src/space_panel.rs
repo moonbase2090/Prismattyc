@@ -758,6 +758,33 @@ pub(super) fn maintenance(host: &mut HostState) {
     }
 }
 
+/// Open Update and restart with Update and restart all components selected, so
+/// Enter reviews the running sessions and restarts every component. The plain
+/// Restart rows postpone the daemon while sessions run.
+pub(super) fn maintenance_restart(host: &mut HostState) {
+    maintenance(host);
+    let full = host.space_panel.as_ref().and_then(full_update_row);
+    if let (Some(full), Some(menu)) = (full, host.context_menu.as_mut()) {
+        menu.selected = full;
+    }
+}
+
+/// The row that starts Update and restart all components. Its description may
+/// wrap onto rows of its own, which do nothing when chosen.
+fn full_update_row(panel: &Panel) -> Option<usize> {
+    panel
+        .rows
+        .iter()
+        .position(|r| matches!(r.choice, Choice::FullUpdate(_)))
+}
+
+/// The selected row's label on the open panel, for the Linux window tests.
+#[cfg(all(test, target_os = "linux"))]
+pub(super) fn selected_label(host: &HostState) -> Option<String> {
+    let panel = host.space_panel.as_ref()?;
+    action_label(panel, host.context_menu.as_ref().map(|menu| menu.selected))
+}
+
 /// Open the Layout page (#150). Graphite chrome only; classic has one layout.
 pub(super) fn layout(host: &mut HostState) {
     if host.spacing.chrome_style != config::ChromeStyle::Graphite {
@@ -2426,6 +2453,37 @@ mod resize_tests {
             .iter()
             .filter(|row| matches!(row.choice, Choice::None))
             .all(|row| space_rail::name_cells(&row.label) <= 24));
+    }
+
+    #[test]
+    fn restart_now_selects_the_full_update_row_not_its_wrapped_description() {
+        let mut panel = Panel {
+            space: "demo".into(),
+            maintenance: true,
+            owner: None,
+            details: None,
+            page: Page::Maintenance,
+            rows: vec![],
+            input: None,
+            submitted: None,
+            pending: None,
+            update_action: None,
+            scroll: 0,
+            columns: 60,
+            chrome_layout: None,
+        };
+        panel.rebuild();
+        let full = full_update_row(&panel).expect("the full update row exists");
+        let row = &panel.rows[full];
+        assert_eq!(row.label, "Update and restart all components");
+        assert!(matches!(
+            row.choice,
+            Choice::FullUpdate(update_flow::Action::Start)
+        ));
+        // At this width the description sits on the next row, which is inert.
+        let next = &panel.rows[full + 1];
+        assert!(next.label.starts_with("Review running sessions"));
+        assert!(matches!(next.choice, Choice::None));
     }
 }
 

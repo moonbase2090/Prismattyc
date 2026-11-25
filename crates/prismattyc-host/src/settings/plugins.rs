@@ -426,7 +426,7 @@ impl Page {
                     );
                     row(
                         "Restart now".into(),
-                        "Open Update and restart to restart the daemon; sessions are saved first"
+                        "Opens Update and restart; Enter lists sessions and saves them before restarting"
                             .into(),
                         Action::RestartNow,
                     );

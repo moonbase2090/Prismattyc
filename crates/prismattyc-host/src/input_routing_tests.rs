@@ -133,6 +133,12 @@ fn verify_full_settings_menus(host: &mut HostState) {
     settings::follow_up(host);
     assert!(host.settings.is_none());
     assert_eq!(panel_header(host).as_deref(), Some("UPDATE AND RESTART"));
+    // Enter must start the session review, not a restart that postpones the
+    // daemon while sessions run.
+    assert_eq!(
+        space_panel::selected_label(host).as_deref(),
+        Some("Update and restart all components")
+    );
 }
 
 fn verify_space_command_completions(host: &mut HostState) {

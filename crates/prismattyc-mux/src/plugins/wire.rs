@@ -76,6 +76,7 @@ pub(super) enum Request {
     Page(Result<ActivityPage, read::Error>),
     RemoveStopped { endpoint: u64, session_id: u64 },
     RemovedStopped(Result<pmux_plugin_api::host::pmux::activity::manage::Removal, String>),
+    Theme(Option<pmux_plugin_api::host::pmux::theme::colors::Theme>),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -95,6 +96,7 @@ pub(super) enum Response {
         endpoint: u64,
         session_id: u64,
     },
+    Theme,
     Failed(String),
     Rejected,
 }

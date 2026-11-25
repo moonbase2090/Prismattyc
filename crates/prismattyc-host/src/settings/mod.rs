@@ -137,6 +137,33 @@ impl Panel {
         })
     }
 
+    /// The longest built-in setting or section label. The label column is sized to it
+    /// for every section, so switching sections never moves the column or the panel;
+    /// a longer label, such as a plug-in name, ends in an ellipsis.
+    pub fn widest_label() -> &'static str {
+        static WIDEST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        WIDEST.get_or_init(|| {
+            controls::catalog()
+                .into_iter()
+                .map(|control| control.label)
+                .chain(
+                    Section::ALL
+                        .iter()
+                        .map(|section| section.label().to_owned()),
+                )
+                .max_by_key(|label| crate::raster::text_cells(label))
+                .unwrap_or_default()
+        })
+    }
+
+    /// How the host lays the panel out: fixed height, a window-wide panel, and a label
+    /// column sized to [`Self::widest_label`] in every section.
+    pub fn layout_mode() -> crate::raster::PaletteLayoutMode {
+        crate::raster::PaletteLayoutMode::FixedPanel {
+            widest_label: Self::widest_label(),
+        }
+    }
+
     fn indices(&self) -> Vec<usize> {
         self.controls
             .iter()

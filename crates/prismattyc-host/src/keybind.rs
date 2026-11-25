@@ -408,7 +408,7 @@ impl Action {
             Action::JumpNeedsYou => "focus the next pane that needs your attention".into(),
             Action::UpdateRestart => "update, restart components, and inspect versions".into(),
             Action::PluginsCheck => "check for plug-in updates".into(),
-            Action::PluginsUpdate => "update and enable plug-ins".into(),
+            Action::PluginsUpdate => "update plug-ins; ones you turned off stay off".into(),
             Action::RecentMessages => "show recent status messages, including hidden toasts".into(),
 
             Action::CloseTab => "close the active tab".into(),

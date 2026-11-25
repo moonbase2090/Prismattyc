@@ -11,6 +11,7 @@ use base64::Engine as _;
 use pmux_plugin_api::host::pmux::{
     activity::{manage, read},
     plugin::lifecycle,
+    theme::colors,
     tool::call,
     view::frame,
 };
@@ -294,6 +295,8 @@ struct State {
 
 struct Manager {
     _writer: std::fs::File,
+    /// The daemon's control socket; the registered host's theme sits beside it.
+    socket: PathBuf,
     executable: PathBuf,
     journal: PathBuf,
     store: Store,
@@ -406,6 +409,7 @@ impl Manager {
         store.check_catalog(&catalog.list())?;
         Ok(Self {
             _writer: writer,
+            socket: socket.to_path_buf(),
             executable: std::env::current_exe()?.canonicalize()?,
             journal: path,
             store,
@@ -1775,6 +1779,17 @@ fn remove_worker(state: &mut State, identity: &str) -> Option<Cancellation> {
     Some(worker.cancel)
 }
 
+/// A host theme as the plug-in API carries it.
+fn view_theme(theme: crate::host_theme::ThemeColors) -> colors::Theme {
+    let rgb = |[r, g, b]: [u8; 3]| frame::Rgb { r, g, b };
+    colors::Theme {
+        dark: theme.dark,
+        foreground: rgb(theme.foreground),
+        background: rgb(theme.background),
+        ansi: theme.ansi.into_iter().map(rgb).collect(),
+    }
+}
+
 struct Provider {
     manager: Arc<Manager>,
     worker: String,
@@ -1786,6 +1801,10 @@ struct Provider {
 }
 
 impl ActivityProvider for Provider {
+    fn theme(&mut self) -> Option<colors::Theme> {
+        crate::host_theme::read(&self.manager.socket).map(view_theme)
+    }
+
     fn remove_stopped(
         &mut self,
         endpoint: u64,

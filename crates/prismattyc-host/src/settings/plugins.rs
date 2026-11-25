@@ -449,7 +449,7 @@ impl Page {
             );
             row(
                 "Update and enable".into(),
-                check_summary(&waiting),
+                update_summary(&waiting),
                 if online && !busy && !waiting.is_empty() {
                     Action::UpdateAll
                 } else {
@@ -858,6 +858,17 @@ fn status_text(state: Option<&Status>, update: Option<&str>) -> String {
     }
 }
 
+/// The Update and enable row: what is newer, and that it only updates. A plug-in
+/// that is off gets the new version but stays off; its detail page enables it.
+fn update_summary(waiting: &[(String, String)]) -> String {
+    let summary = check_summary(waiting);
+    if waiting.is_empty() {
+        summary
+    } else {
+        format!("{summary} · plug-ins you turned off stay off")
+    }
+}
+
 fn check_summary(waiting: &[(String, String)]) -> String {
     if waiting.is_empty() {
         return "Plug-ins are up to date".into();
@@ -955,6 +966,15 @@ mod tests {
         assert_eq!(
             status_text(Some(&incompatible), None),
             "Incompatible with this release"
+        );
+    }
+
+    #[test]
+    fn update_and_enable_says_that_plugins_turned_off_stay_off() {
+        assert_eq!(update_summary(&[]), "Plug-ins are up to date");
+        assert_eq!(
+            update_summary(&[("a".into(), "1.1.0".into())]),
+            "1 update available: a 1.1.0 · plug-ins you turned off stay off"
         );
     }
 

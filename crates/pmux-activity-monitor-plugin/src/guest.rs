@@ -7,6 +7,7 @@ use lunatui_term::{Event, KeyCode, KeyEvent, Modifiers};
 use pmux_plugin_api::guest::pmux::{
     activity::{manage, read},
     plugin::{host, lifecycle},
+    theme::colors,
     view::frame,
 };
 use pmux_plugin_api::monitor::GraphStyle;
@@ -16,7 +17,7 @@ use crate::{
     app::Monitor,
     capture,
     model::{Host, Link},
-    ui::Palette,
+    ui::{Choice, HostTheme, Palette},
 };
 
 const POLL_INTERVAL_MS: u16 = 250;
@@ -28,6 +29,9 @@ struct View {
     last_poll: Option<u64>,
     frame_bytes: u32,
     readable: bool,
+    choice: Choice,
+    /// The host shares its theme, so the palette follows it.
+    themed: bool,
     clock: frame::Clock,
     first_tick: Option<u64>,
     next_host: usize,
@@ -40,14 +44,23 @@ impl View {
             return Err("monitor requires a view".into());
         };
         let preferences = &reference.preferences;
-        let palette = match preferences.palette {
-            frame::Palette::Light => Palette::LIGHT,
-            frame::Palette::Dark => Palette::DARK,
-            frame::Palette::Auto if preferences.dark_background == Some(false) => Palette::LIGHT,
-            frame::Palette::Auto => Palette::DARK,
+        let choice = match preferences.palette {
+            frame::Palette::Light => Choice::Light,
+            frame::Palette::Dark => Choice::Dark,
+            frame::Palette::Auto => Choice::Auto {
+                dark_background: preferences.dark_background,
+            },
         };
+        let themed = context
+            .capabilities
+            .iter()
+            .any(|capability| capability.name == "pmux:theme/colors" && capability.available);
         let clock = host::now();
-        let mut monitor = Monitor::new(vec!["local".into()], palette, clock.wall_ms);
+        let mut monitor = Monitor::new(
+            vec!["local".into()],
+            Palette::choose(choice, None),
+            clock.wall_ms,
+        );
         monitor.ui.graph_style = GraphStyle::from_view(&reference.contribution)?;
         monitor.ui.motion = preferences.motion && !preferences.snapshot;
         let readable = context
@@ -64,6 +77,8 @@ impl View {
             last_poll: None,
             frame_bytes: context.limits.frame_bytes,
             readable,
+            choice,
+            themed,
             clock,
             first_tick: None,
             next_host: 0,
@@ -171,6 +186,26 @@ impl View {
         }
     }
 
+    /// Take the host's current theme, so a theme change shows on the next frame.
+    fn follow_theme(&mut self) {
+        let shared = if self.themed && matches!(self.choice, Choice::Auto { .. }) {
+            colors::current()
+        } else {
+            None
+        };
+        let ansi: Vec<[u8; 3]> = shared
+            .iter()
+            .flat_map(|theme| theme.ansi.iter().map(|color| [color.r, color.g, color.b]))
+            .collect();
+        let theme = shared.as_ref().map(|theme| HostTheme {
+            dark: theme.dark,
+            foreground: [theme.foreground.r, theme.foreground.g, theme.foreground.b],
+            background: [theme.background.r, theme.background.g, theme.background.b],
+            ansi: &ansi,
+        });
+        self.monitor.palette = Palette::choose(self.choice, theme);
+    }
+
     fn event(&mut self, event: frame::Event) -> Result<lifecycle::Reply, String> {
         match event {
             frame::Event::Close => return Ok(lifecycle::Reply::Closed),
@@ -234,6 +269,7 @@ impl View {
         {
             return Err("activity feed unavailable".into());
         }
+        self.follow_theme();
         let content = capture::render(
             &mut self.monitor,
             &self.reference.viewport,

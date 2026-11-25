@@ -335,6 +335,16 @@ impl PickerItem {
 
 /// Resolve app-supplied semantic status intent through the active Prismattyc
 /// theme. The app never owns an RGB or ANSI index.
+/// The colors plug-in views draw with to match the panes around them.
+pub fn shared_colors(theme: &Theme) -> prismattyc_mux::host_theme::ThemeColors {
+    prismattyc_mux::host_theme::ThemeColors {
+        dark: theme.variant == ThemeVariant::Dark,
+        foreground: theme.default_fg,
+        background: theme.default_bg,
+        ansi: theme.ansi,
+    }
+}
+
 pub fn status_rgb(theme: &Theme, tone: prismattyc_protocol::StatusTone) -> Rgb {
     tone.ansi_index()
         .map_or(theme.default_fg, |index| theme.ansi[usize::from(index)])

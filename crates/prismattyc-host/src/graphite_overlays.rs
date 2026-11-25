@@ -158,6 +158,24 @@ fn move_palette_layout(
     }
 }
 
+/// Pixel width the label column wants: the longest regular row label, or the panel's
+/// fixed widest label.
+pub(crate) fn palette_label_width(frame: &PaletteFrame<'_>, chrome: ChromeGeom, px: f32) -> usize {
+    match frame.layout_mode {
+        raster::PaletteLayoutMode::FixedPanel { widest_label } => {
+            graphite::text_width(Face::Regular, px, widest_label).ceil() as usize
+        }
+        _ => frame
+            .sections
+            .iter()
+            .flat_map(|section| section.rows)
+            .filter(|row| !row.full_width)
+            .map(|row| graphite::text_width(Face::Regular, px, &row.name).ceil() as usize)
+            .max()
+            .unwrap_or(chrome.px(190.0)),
+    }
+}
+
 fn palette_row_name_width(full_width: bool, natural_width: usize, available: usize) -> usize {
     if full_width {
         available
@@ -239,14 +257,7 @@ pub(crate) fn palette(
     let text_right = right.saturating_sub(inset);
     let px = chrome.px(13.0).max(10) as f32;
     let small_px = chrome.px(11.0).max(9) as f32;
-    let natural_name_width = frame
-        .sections
-        .iter()
-        .flat_map(|section| section.rows)
-        .filter(|row| !row.full_width)
-        .map(|row| graphite::text_width(Face::Regular, px, &row.name).ceil() as usize)
-        .max()
-        .unwrap_or(chrome.px(190.0));
+    let natural_name_width = palette_label_width(frame, chrome, px);
 
     draw_panel(
         buffer,

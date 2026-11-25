@@ -3162,6 +3162,17 @@ pub enum PaletteLayoutMode {
     ContentFit,
     /// Keep a fixed-height panel and scroll rows inside its viewport.
     FixedHeight,
+    /// A fixed-height panel whose width follows the window, not the rows, and whose
+    /// label column is as wide as `widest_label` (less where the window is too
+    /// narrow). Longer labels end in an ellipsis. Pages that switch content in place
+    /// use this so the panel and its label column never move.
+    FixedPanel { widest_label: &'static str },
+}
+
+impl PaletteLayoutMode {
+    fn fixed_height(self) -> bool {
+        matches!(self, Self::FixedHeight | Self::FixedPanel { .. })
+    }
 }
 
 /// Everything `rasterize_palette` paints. Pickers that reuse the panel pass
@@ -3421,7 +3432,7 @@ pub(crate) fn palette_collect_lines(frame: &PaletteFrame<'_>) -> (Vec<PaletteLin
 }
 
 /// Display width of `text` in cells.
-fn text_cells(text: &str) -> usize {
+pub(crate) fn text_cells(text: &str) -> usize {
     text.chars()
         .map(|ch| prismattyc_core::char_display_width(ch).max(1))
         .sum()
@@ -3583,14 +3594,14 @@ pub fn palette_layout(
     }
     let (window_cols, window_rows) = palette_window(font, stride_px, buffer_height_px)?;
     let mut geom = palette_geom(window_cols, window_rows, font.cell_h);
-    if !geom.compact {
+    if !geom.compact && !matches!(frame.layout_mode, PaletteLayoutMode::FixedPanel { .. }) {
         let screen_width = window_cols.saturating_sub(4).max(20);
         geom.width_cells = palette_content_width(frame, geom.inset_cells).min(screen_width);
     }
     if geom.width_cells < 20 {
         return None;
     }
-    if frame.layout_mode == PaletteLayoutMode::FixedHeight {
+    if frame.layout_mode.fixed_height() {
         return palette_fixed_layout(font, frame, stride_px, buffer_height_px, geom);
     }
     let has_query = frame.query.is_some();
@@ -3877,6 +3888,41 @@ pub fn rasterize_palette(
     )
 }
 
+/// Width of the label column: the longest regular row label, or the panel's fixed
+/// label width, never more than the row leaves room for beside the chord column.
+pub(crate) fn palette_label_cells(
+    frame: &PaletteFrame<'_>,
+    geom: PaletteGeom,
+    inner_cells: usize,
+) -> usize {
+    let regular_rows = frame
+        .sections
+        .iter()
+        .flat_map(|section| section.rows)
+        .filter(|row| !row.full_width)
+        .collect::<Vec<_>>();
+    let wanted = match frame.layout_mode {
+        PaletteLayoutMode::FixedPanel { widest_label } => text_cells(widest_label),
+        _ => regular_rows
+            .iter()
+            .map(|row| text_cells(&row.name))
+            .max()
+            .unwrap_or(geom.name_cells),
+    };
+    wanted.min(
+        inner_cells
+            .saturating_sub(geom.name_x + geom.chord_gap_cells.saturating_mul(2) + 1)
+            .saturating_sub(
+                regular_rows
+                    .iter()
+                    .map(|row| text_cells(&row.chord_label))
+                    .max()
+                    .unwrap_or(0),
+            )
+            .max(1),
+    )
+}
+
 /// Themed palette painter with an optional hovered filter chip.
 #[allow(clippy::too_many_arguments)]
 pub fn rasterize_palette_with_hover(
@@ -3899,29 +3945,7 @@ pub fn rasterize_palette_with_hover(
     let inner_cells = geom
         .width_cells
         .saturating_sub(geom.inset_cells.saturating_mul(2));
-    let regular_rows = frame
-        .sections
-        .iter()
-        .flat_map(|section| section.rows)
-        .filter(|row| !row.full_width)
-        .collect::<Vec<_>>();
-    let regular_name_cells = regular_rows
-        .iter()
-        .map(|row| text_cells(&row.name))
-        .max()
-        .unwrap_or(geom.name_cells)
-        .min(
-            inner_cells
-                .saturating_sub(geom.name_x + geom.chord_gap_cells.saturating_mul(2) + 1)
-                .saturating_sub(
-                    regular_rows
-                        .iter()
-                        .map(|row| text_cells(&row.chord_label))
-                        .max()
-                        .unwrap_or(0),
-                )
-                .max(1),
-        );
+    let regular_name_cells = palette_label_cells(frame, geom, inner_cells);
     let (lines, _) = palette_collect_lines(frame);
     let start = layout.start;
     let shown = layout.shown;

@@ -427,6 +427,32 @@ mod tests {
     }
 
     #[test]
+    fn graphite_tiles_are_drawn_on_the_themes_background() -> anyhow::Result<()> {
+        let mut ansi = [[0x80, 0x80, 0x80]; 16];
+        ansi[2] = [0x10, 0x70, 0x30];
+        let paper = [0xff, 0xfe, 0xf0];
+        let mut monitor = comps_fleet()?;
+        monitor.palette = Palette::from_theme(false, [0, 0, 0], paper, &ansi);
+        let content = wide(&mut monitor, MAX_FRAME_BYTES as u32)?;
+        assert!(content.tiles.len() > 10, "Graphite draws tiles");
+        let mut counts = std::collections::BTreeMap::new();
+        for tile in &content.tiles {
+            for pixel in tile.rgba.chunks(4) {
+                *counts
+                    .entry([pixel[0], pixel[1], pixel[2]])
+                    .or_insert(0usize) += 1;
+            }
+        }
+        let (most, _) = counts.iter().max_by_key(|(_, count)| **count).unwrap();
+        assert_eq!(*most, paper, "tiles sit on the theme's background");
+        assert!(
+            !counts.contains_key(&Palette::DARK.ground),
+            "no pixel keeps the built-in dark ground"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn graphite_draws_type_chips_and_keycaps_as_pixels_over_their_text() -> anyhow::Result<()> {
         let mut monitor = comps_fleet()?;
         let content = wide(&mut monitor, MAX_FRAME_BYTES as u32)?;

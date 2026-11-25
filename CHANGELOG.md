@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- The settings **Plug-ins** page says when an update installed newer official plug-ins that wait for a daemon restart, names each one with the version it changes from and to, and offers **Restart now**, which opens **Update and restart**. `pmux plugin pending` lists the same.
+
 ### Changed
 
 - The settings **Plug-ins** page shows each plug-in's installed version and state (enabled, disabled, update available, failed, incompatible), has one row per permission in plain words with the manifest's required ones pre-selected, and updates a plug-in in one step while keeping its granted permissions (a plug-in you turned off stays off). New command-palette commands check for plug-in updates and update and enable plug-ins. `pmux plugin update [ID]` does the same from the command line, `pmux plugin enable` without `--allow` grants what the manifest requires, and a refused permission scope now lists the valid ones.

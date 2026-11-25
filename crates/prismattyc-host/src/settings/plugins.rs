@@ -12,7 +12,7 @@ use std::sync::{
 use anyhow::{bail, ensure, Context, Result};
 use prismattyc_mux::plugins::{
     self as native, AdminAction, CatalogEntry, Client, ConnectionCloser, Endpoint, Installed,
-    Manifest, Observed, Reply, Request, Status,
+    Manifest, Observed, PendingPlugin, Reply, Request, Status,
 };
 
 use crate::palette::PaletteRow;
@@ -27,6 +27,10 @@ struct Snapshot {
     inspected: Option<Manifest>,
     /// What an update run did, in words, for the notice line.
     summary: Option<String>,
+    /// Official plug-ins the installed release changes at the next daemon restart.
+    restart: Vec<PendingPlugin>,
+    /// Why that could not be read, when it could not.
+    restart_unknown: Option<String>,
 }
 
 struct Draft {
@@ -64,8 +68,12 @@ enum Action {
     Install,
     Enable,
     Disable,
-    Update { enable_off: bool },
+    Update {
+        enable_off: bool,
+    },
     UpdateAll,
+    /// Open Update and restart, where the daemon restart happens.
+    RestartNow,
 }
 
 struct Row {
@@ -99,6 +107,8 @@ pub(super) struct Page {
     entered: bool,
     notice: String,
     queued: Option<Command>,
+    /// Restart now was chosen; the host opens Update and restart.
+    restart_requested: bool,
 }
 
 impl Page {
@@ -113,7 +123,19 @@ impl Page {
             entered: false,
             notice: String::new(),
             queued: None,
+            restart_requested: false,
         }
+    }
+
+    /// Choose Restart now, as activating its row does.
+    #[cfg(all(test, target_os = "linux"))]
+    pub fn request_restart(&mut self) {
+        self.restart_requested = true;
+    }
+
+    /// Whether Restart now was chosen since the last call.
+    pub fn take_restart_request(&mut self) -> bool {
+        std::mem::take(&mut self.restart_requested)
     }
 
     /// Run a palette command on this page: now when it is idle, after the
@@ -395,6 +417,27 @@ impl Page {
             let waiting = self.snapshot.as_ref().map_or(Vec::new(), |snapshot| {
                 native::updates_available(&snapshot.catalog, &snapshot.states)
             });
+            if let Some(snapshot) = &self.snapshot {
+                if !snapshot.restart.is_empty() {
+                    row(
+                        "Restart to finish plug-in updates".into(),
+                        restart_text(&snapshot.restart),
+                        Action::None,
+                    );
+                    row(
+                        "Restart now".into(),
+                        "Open Update and restart to restart the daemon; sessions are saved first"
+                            .into(),
+                        Action::RestartNow,
+                    );
+                } else if let Some(reason) = &snapshot.restart_unknown {
+                    row(
+                        "Restart status unknown".into(),
+                        format!("Could not check the installed release: {reason}"),
+                        Action::None,
+                    );
+                }
+            }
             row(
                 "Check for plug-in updates".into(),
                 "Refresh the official package catalog and list what is newer".into(),
@@ -495,6 +538,10 @@ impl Page {
             self.draft = None;
             return true;
         }
+        if matches!(action, Action::RestartNow) {
+            self.restart_requested = true;
+            return true;
+        }
         if self.pending.is_some() {
             return false;
         }
@@ -588,7 +635,7 @@ impl Page {
                     Err(error) => self.notice = error.to_string(),
                 }
             }
-            Action::None | Action::Back => {}
+            Action::None | Action::Back | Action::RestartNow => {}
         }
         false
     }
@@ -719,6 +766,12 @@ fn load(
     let Reply::Endpoints { endpoints } = request(Request::Endpoints)? else {
         bail!("Unexpected endpoint reply");
     };
+    // An older daemon does not know this request; the page still loads.
+    let (restart, restart_unknown) = match request(Request::RestartPending) {
+        Ok(Reply::RestartPending { plugins, unchecked }) => (plugins, unchecked),
+        Ok(_) => (Vec::new(), Some("unexpected daemon reply".into())),
+        Err(error) => (Vec::new(), Some(format!("{error:#}"))),
+    };
     let inspected = if let Some((id, version)) = target.filter(|(id, version)| {
         installed
             .iter()
@@ -746,7 +799,21 @@ fn load(
         endpoints,
         inspected,
         summary,
+        restart,
+        restart_unknown,
     })
+}
+
+/// The plug-ins a restart changes, in words: "org.x 1.0.0 → 1.1.0 · org.y (new) 2.0.0".
+fn restart_text(pending: &[PendingPlugin]) -> String {
+    pending
+        .iter()
+        .map(|plugin| match &plugin.from {
+            Some(from) => format!("{} {from} → {}", plugin.id, plugin.to),
+            None => format!("{} (new) {}", plugin.id, plugin.to),
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 impl Page {
@@ -930,5 +997,77 @@ mod tests {
             ]),
             "a 1.0.0 to 1.1.0; b 2.1.0 installed, still off; c not updated: does not fit this release"
         );
+    }
+
+    fn loaded(restart: Vec<PendingPlugin>, restart_unknown: Option<&str>) -> Page {
+        let mut page = Page::new();
+        page.snapshot = Some(Snapshot {
+            online: true,
+            restart,
+            restart_unknown: restart_unknown.map(str::to_owned),
+            ..Snapshot::default()
+        });
+        page
+    }
+
+    fn labels(page: &Page) -> Vec<String> {
+        page.items().into_iter().map(|row| row.label).collect()
+    }
+
+    #[test]
+    fn a_pending_restart_lists_each_plugin_and_offers_restart_now() {
+        let mut page = loaded(
+            vec![
+                PendingPlugin {
+                    id: "org.moonbase.activity-monitor".into(),
+                    from: Some("1.0.0".into()),
+                    to: "1.1.0".into(),
+                },
+                PendingPlugin {
+                    id: "org.moonbase.activity-connector".into(),
+                    from: None,
+                    to: "2.0.0".into(),
+                },
+            ],
+            None,
+        );
+        let items = page.items();
+        let notice = items
+            .iter()
+            .position(|row| row.label == "Restart to finish plug-in updates")
+            .expect("restart notice row");
+        assert_eq!(
+            items[notice].detail,
+            "org.moonbase.activity-monitor 1.0.0 → 1.1.0 · org.moonbase.activity-connector (new) 2.0.0"
+        );
+        assert_eq!(items[notice + 1].label, "Restart now");
+        assert!(!page.take_restart_request());
+        // Restart now asks the host to open Update and restart, once.
+        assert!(page.activate(notice + 1));
+        assert!(page.take_restart_request());
+        assert!(!page.take_restart_request());
+        // The notice row itself does nothing.
+        assert!(!page.activate(notice));
+        assert!(!page.take_restart_request());
+    }
+
+    #[test]
+    fn nothing_pending_shows_no_restart_rows_and_an_unreadable_release_says_why() {
+        let quiet = labels(&loaded(Vec::new(), None));
+        assert!(!quiet.iter().any(|label| label.starts_with("Restart")));
+        let unknown = loaded(
+            Vec::new(),
+            Some("the installed daemon reported an unreadable version"),
+        );
+        let row = unknown
+            .items()
+            .into_iter()
+            .find(|row| row.label == "Restart status unknown")
+            .expect("unknown row");
+        assert_eq!(
+            row.detail,
+            "Could not check the installed release: the installed daemon reported an unreadable version"
+        );
+        assert!(!labels(&unknown).contains(&"Restart now".to_owned()));
     }
 }

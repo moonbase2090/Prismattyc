@@ -1534,6 +1534,27 @@ pub(super) fn open_plugins(host: &mut crate::HostState) {
     }
 }
 
+/// After input on the settings panel: Restart now on the Plug-ins page closes the
+/// panel and opens Update and restart, as the `update_restart` command does.
+pub(super) fn follow_up(host: &mut crate::HostState) {
+    if host
+        .settings
+        .as_mut()
+        .is_some_and(|panel| panel.plugins.take_restart_request())
+    {
+        crate::close_context_menu(host);
+        crate::space_panel::maintenance(host);
+    }
+}
+
+/// Choose Restart now on the open Plug-ins page (the Linux window tests use this).
+#[cfg(all(test, target_os = "linux"))]
+pub(super) fn choose_plugin_restart(host: &mut crate::HostState) {
+    if let Some(panel) = host.settings.as_mut() {
+        panel.plugins.request_restart();
+    }
+}
+
 pub(super) fn handle_key(host: &mut crate::HostState, event: &winit::event::KeyEvent) -> bool {
     let Some(panel) = host.settings.as_mut() else {
         return false;
@@ -1561,6 +1582,7 @@ pub(super) fn handle_key(host: &mut crate::HostState, event: &winit::event::KeyE
     } else if let Some(menu) = host.context_menu.as_mut() {
         menu.selected = panel.selected();
     }
+    follow_up(host);
     host.dirty = true;
     host.window.request_redraw();
     true

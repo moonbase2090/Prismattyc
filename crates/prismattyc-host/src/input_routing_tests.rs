@@ -123,6 +123,16 @@ fn verify_full_settings_menus(host: &mut HostState) {
         "Settings must retain its full editor"
     );
     assert!(host.space_panel.is_none());
+
+    // Restart now on the Plug-ins page hands over to Update and restart.
+    quiet(host);
+    settings::open_plugins(host);
+    settings::follow_up(host);
+    assert!(host.settings.is_some(), "nothing chosen yet");
+    settings::choose_plugin_restart(host);
+    settings::follow_up(host);
+    assert!(host.settings.is_none());
+    assert_eq!(panel_header(host).as_deref(), Some("UPDATE AND RESTART"));
 }
 
 fn verify_space_command_completions(host: &mut HostState) {

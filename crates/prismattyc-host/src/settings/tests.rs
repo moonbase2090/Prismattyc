@@ -911,9 +911,7 @@ fn host_settings_entry_keeps_blocking_prompt_and_releases_rail_editor() {
 
 #[test]
 fn settings_painters_keep_selected_rows_visible_and_clickable_in_both_chromes() {
-    use crate::raster::{
-        FontMetrics, OverlaySurface, PaletteFrame, PaletteLayoutMode, PaletteSection,
-    };
+    use crate::raster::{FontMetrics, OverlaySurface, PaletteFrame, PaletteSection};
     let font = FontMetrics::load_with(15.0, None, &[]).unwrap();
     let theme = crate::theme::shipped_default();
     let mut fixture = Fixture::new("font_px=18.5\n");
@@ -933,7 +931,7 @@ fn settings_painters_keep_selected_rows_visible_and_clickable_in_both_chromes() 
                 rows: &rows,
             }];
             let frame = PaletteFrame {
-                layout_mode: PaletteLayoutMode::FixedHeight,
+                layout_mode: Panel::layout_mode(),
                 query: None,
                 query_focused: false,
                 chips: None,
@@ -1214,4 +1212,270 @@ fn stepping_an_extreme_integer_clamps_instead_of_overflowing() {
     fixture.save();
     let saved = std::fs::read_to_string(&fixture.panel.path).unwrap();
     assert!(saved.contains("panes = 1"), "{saved}");
+}
+
+/// Lay out every section the way the host paints the panel and report, per section, the
+/// panel's left edge and width and the label column (cells for the cell painter, pixels
+/// for Graphite).
+fn section_geometry(
+    mode: impl Fn() -> crate::raster::PaletteLayoutMode,
+    cols: usize,
+    rows: usize,
+) -> Vec<(&'static str, usize, usize, usize, usize)> {
+    use crate::raster::{FontMetrics, PaletteFrame, PaletteSection};
+    let mut fixture = Fixture::new("");
+    let panel = &mut fixture.panel;
+    let font = FontMetrics::load(14.0).expect("bundled font");
+    let chrome = crate::mux::ChromeGeom {
+        graphite: true,
+        scale_milli: 1000,
+    };
+    let (width, height) = (cols * font.cell_w, rows * font.cell_h);
+    Section::ALL
+        .iter()
+        .enumerate()
+        .map(|(index, section)| {
+            panel.section = index;
+            let (header, rows) = panel.rows();
+            let sections = [PaletteSection {
+                header: &header,
+                subtitle: "",
+                rows: &rows,
+            }];
+            let frame = PaletteFrame {
+                layout_mode: mode(),
+                query: None,
+                query_focused: false,
+                chips: None,
+                sections: &sections,
+                selected: 0,
+                scroll: 0,
+                detail: None,
+                footer: "↑/↓ rows · ←/→ section or value · Enter edit/reset · Escape back",
+            };
+            let layout = crate::raster::palette_layout(&font, &frame, width, height)
+                .expect("panel fits the window");
+            let inner = layout
+                .geom
+                .width_cells
+                .saturating_sub(layout.geom.inset_cells * 2);
+            (
+                section.label(),
+                layout.panel_x,
+                layout.panel_w,
+                crate::raster::palette_label_cells(&frame, layout.geom, inner),
+                crate::graphite_overlays::palette_label_width(
+                    &frame,
+                    chrome,
+                    chrome.px(13.0) as f32,
+                ),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn the_settings_panel_and_its_label_column_keep_one_width_in_every_section() {
+    use crate::raster::PaletteLayoutMode;
+    let fixed = Panel::layout_mode;
+    // A wide window, a default 80x24 terminal and a narrow one.
+    for (cols, rows) in [(200, 50), (80, 24), (48, 20)] {
+        let geometry = section_geometry(fixed, cols, rows);
+        let first = geometry[0];
+        for each in &geometry {
+            assert_eq!(
+                (each.1, each.2, each.3, each.4),
+                (first.1, first.2, first.3, first.4),
+                "{cols}x{rows}: {} moved the panel or its label column",
+                each.0
+            );
+        }
+    }
+    // Fitting the rows, as before, moves both between sections; the fixed panel is
+    // what keeps them still.
+    let fitted = section_geometry(|| PaletteLayoutMode::FixedHeight, 200, 50);
+    assert!(fitted.iter().any(|each| each.2 != fitted[0].2));
+    assert!(fitted.iter().any(|each| each.3 != fitted[0].3));
+    assert!(fitted.iter().any(|each| each.4 != fitted[0].4));
+}
+
+#[test]
+fn the_label_column_fits_the_longest_built_in_label() {
+    let widest = Panel::widest_label();
+    let labels = controls::catalog()
+        .into_iter()
+        .map(|control| control.label)
+        .chain(
+            Section::ALL
+                .iter()
+                .map(|section| section.label().to_owned()),
+        )
+        .collect::<Vec<_>>();
+    assert!(labels.iter().any(|label| label == widest));
+    let cells = crate::raster::text_cells(widest);
+    assert!(labels
+        .iter()
+        .all(|label| crate::raster::text_cells(label) <= cells));
+    // At a wide window the column is exactly that label's width in every section.
+    let geometry = section_geometry(Panel::layout_mode, 200, 50);
+    assert!(geometry.iter().all(|each| each.3 == cells));
+}
+
+/// The rightmost column with ink in the given row's band, in pixels.
+fn ink_right(pixels: &[u32], width: usize, top: usize, height: usize, background: &[u32]) -> usize {
+    (top..top + height)
+        .flat_map(|y| (0..width).map(move |x| (x, y)))
+        .filter(|&(x, y)| pixels[y * width + x] != background[y * width + x])
+        .map(|(x, _)| x)
+        .max()
+        .unwrap_or(0)
+}
+
+#[test]
+fn a_label_longer_than_the_column_is_cut_at_its_edge_in_both_painters() {
+    use crate::raster::{FontMetrics, OverlaySurface, PaletteFrame, PaletteSection};
+    let font = FontMetrics::load_with(15.0, None, &[]).unwrap();
+    let theme = crate::theme::shipped_default();
+    let widest = Panel::widest_label();
+    let long = format!("org.example.{}", "very-long-plug-in-name-".repeat(4));
+    assert!(crate::raster::text_cells(&long) > 2 * crate::raster::text_cells(widest));
+    let (width, height) = (1400, 820);
+    for graphite in [false, true] {
+        // The right edge of the second row's label, with no description beside it.
+        let paint = |label: &str| {
+            let rows = vec![
+                PaletteRow::plain("Plug-ins".into(), String::new(), String::new()),
+                PaletteRow::plain(label.to_owned(), String::new(), String::new()),
+            ];
+            let sections = [PaletteSection {
+                header: "SETTINGS — Plug-ins",
+                subtitle: "",
+                rows: &rows,
+            }];
+            let frame = PaletteFrame {
+                layout_mode: Panel::layout_mode(),
+                query: None,
+                query_focused: false,
+                chips: None,
+                sections: &sections,
+                selected: 0,
+                scroll: 0,
+                detail: None,
+                footer: "",
+            };
+            let paint_rows = |rows: &[PaletteRow]| {
+                let sections = [PaletteSection {
+                    rows,
+                    ..sections[0]
+                }];
+                let mut pixels =
+                    vec![crate::raster::pack_argb(255, theme.default_bg); width * height];
+                let layout = crate::paint_palette_overlay(
+                    &font,
+                    &theme,
+                    crate::mux::ChromeGeom {
+                        graphite,
+                        scale_milli: 1000,
+                    },
+                    [0x62, 0xa8, 0xff],
+                    &PaletteFrame {
+                        sections: &sections,
+                        ..frame
+                    },
+                    OverlaySurface::default(),
+                    &mut pixels,
+                    width,
+                    height,
+                )
+                .expect("panel paints");
+                (pixels, layout)
+            };
+            let (pixels, layout) = paint_rows(&rows);
+            let mut blank = rows.clone();
+            blank[1].name.clear();
+            let (background, _) = paint_rows(&blank);
+            let row = layout.rows.iter().find(|row| row.global == 1).unwrap();
+            ink_right(&pixels, width, row.y, layout.geom.row_pitch_px, &background)
+        };
+        let fits = paint(widest);
+        let cut = paint(&long);
+        let chrome = if graphite { "Graphite" } else { "cell" };
+        // The cut label ends at the column edge: no further right than the widest
+        // built-in label plus one ellipsis.
+        assert!(cut > fits / 2, "{chrome}: the long label painted nothing");
+        assert!(
+            cut <= fits + font.cell_w,
+            "{chrome}: a long label ran to x {cut}, past the column that ends near x {fits}"
+        );
+    }
+}
+
+/// Paint three sections, before and after the fixed panel, through the host's palette
+/// painter when `PRISMATTYC_SETTINGS_WIDTH_SHOTS` names a directory. "Before" is the
+/// fixed-height, fit-to-rows layout the host used for settings until now.
+#[test]
+fn settings_width_review_captures() {
+    use crate::raster::{
+        FontMetrics, OverlaySurface, PaletteFrame, PaletteLayoutMode, PaletteSection,
+    };
+    let Some(dir) = std::env::var_os("PRISMATTYC_SETTINGS_WIDTH_SHOTS").map(PathBuf::from) else {
+        return;
+    };
+    std::fs::create_dir_all(&dir).unwrap();
+    let font = FontMetrics::load_with(15.0, None, &[]).unwrap();
+    let theme = crate::theme::shipped_default();
+    let mut fixture = Fixture::new("");
+    let (width, height) = (1400, 820);
+    for (name, mode) in [
+        ("before", PaletteLayoutMode::FixedHeight),
+        ("after", Panel::layout_mode()),
+    ] {
+        for label in ["Accessibility", "Remote destinations", "Multiplexer"] {
+            fixture.panel.section = Section::ALL
+                .iter()
+                .position(|section| section.label() == label)
+                .unwrap();
+            let (header, rows) = fixture.panel.rows();
+            let sections = [PaletteSection {
+                header: &header,
+                subtitle: "",
+                rows: &rows,
+            }];
+            let frame = PaletteFrame {
+                layout_mode: mode,
+                query: None,
+                query_focused: false,
+                chips: None,
+                sections: &sections,
+                selected: 0,
+                scroll: 0,
+                detail: None,
+                footer: "↑/↓ rows · ←/→ section or value · Enter edit/reset · Escape back",
+            };
+            let mut pixels = vec![crate::raster::pack_argb(255, theme.default_bg); width * height];
+            crate::paint_palette_overlay(
+                &font,
+                &theme,
+                crate::mux::ChromeGeom {
+                    graphite: true,
+                    scale_milli: 1000,
+                },
+                [0x62, 0xa8, 0xff],
+                &frame,
+                OverlaySurface::default(),
+                &mut pixels,
+                width,
+                height,
+            )
+            .expect("settings paints");
+            let file = label.to_lowercase().replace(' ', "-");
+            crate::write_present_png(
+                &dir.join(format!("{name}-{file}.png")),
+                &pixels,
+                width as u32,
+                height as u32,
+            )
+            .unwrap();
+        }
+    }
 }

@@ -24,6 +24,27 @@ const LIST_LANE_WINDOW_MS: u64 = 5 * 60_000;
 const DETAIL_LANE_WINDOW_MS: u64 = 10 * 60_000;
 const KIND_WIDTH: usize = 16;
 
+/// How a view picks its colors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Choice {
+    Dark,
+    Light,
+    /// Follow the host's theme. `dark_background` is what the terminal
+    /// reported, for when the host shares no theme.
+    Auto {
+        dark_background: Option<bool>,
+    },
+}
+
+/// The host theme a view was given.
+#[derive(Clone, Copy, Debug)]
+pub struct HostTheme<'a> {
+    pub dark: bool,
+    pub foreground: [u8; 3],
+    pub background: [u8; 3],
+    pub ansi: &'a [[u8; 3]],
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Palette {
     pub dark: bool,
@@ -80,6 +101,69 @@ impl Palette {
         failed: rgb(0xc2392b),
         stopped: rgb(0x8a929e),
     };
+
+    /// Colors that match the host's theme: its background and text, shades
+    /// mixed from them, its blue as the accent, and its green, yellow and red
+    /// for working, waiting and failed seats. The mix amounts follow the
+    /// Graphite tokens above.
+    pub fn from_theme(
+        dark: bool,
+        foreground: [u8; 3],
+        background: [u8; 3],
+        ansi: &[[u8; 3]; 16],
+    ) -> Self {
+        let over = |color: [u8; 3], amount: f32| {
+            let mix = |over: u8, under: u8| {
+                (f32::from(over) * amount + f32::from(under) * (1.0 - amount)).round() as u8
+            };
+            Color::Rgb(
+                mix(color[0], background[0]),
+                mix(color[1], background[1]),
+                mix(color[2], background[2]),
+            )
+        };
+        let [r, g, b] = foreground;
+        Self {
+            dark,
+            ground: background,
+            text: Color::Rgb(r, g, b),
+            strong: Color::Rgb(r, g, b),
+            muted: over(foreground, 0.72),
+            hairline: over(foreground, 0.2),
+            selection: over(ansi[4], 0.12),
+            raised: over(foreground, 0.07),
+            focus: over(ansi[4], 1.0),
+            working: over(ansi[2], 1.0),
+            waiting: over(ansi[3], 1.0),
+            failed: over(ansi[1], 1.0),
+            stopped: over(foreground, 0.5),
+        }
+    }
+
+    /// The palette a view draws with. An explicit dark or light choice wins.
+    /// Otherwise the host's theme, when it shared one with all 16 ANSI colors,
+    /// and failing that the built-in palette that suits the pane background.
+    pub fn choose(choice: Choice, theme: Option<HostTheme<'_>>) -> Self {
+        match choice {
+            Choice::Dark => Self::DARK,
+            Choice::Light => Self::LIGHT,
+            Choice::Auto { dark_background } => theme
+                .and_then(|theme| {
+                    let ansi = <&[[u8; 3]; 16]>::try_from(theme.ansi).ok()?;
+                    Some(Self::from_theme(
+                        theme.dark,
+                        theme.foreground,
+                        theme.background,
+                        ansi,
+                    ))
+                })
+                .unwrap_or(if dark_background == Some(false) {
+                    Self::LIGHT
+                } else {
+                    Self::DARK
+                }),
+        }
+    }
 
     pub fn state(&self, state: SeatState) -> Color {
         match state {
@@ -3559,6 +3643,128 @@ mod tests {
             .unwrap() as u16;
         assert!(!grid.get(x, other).unwrap().style().attrs.bold());
         Ok(())
+    }
+
+    /// A light theme whose colors appear in no built-in palette.
+    fn paper() -> Palette {
+        let mut ansi = [[0x80, 0x80, 0x80]; 16];
+        ansi[1] = [0xa0, 0x10, 0x20];
+        ansi[2] = [0x10, 0x70, 0x30];
+        ansi[3] = [0x90, 0x60, 0x00];
+        ansi[4] = [0x20, 0x40, 0xb0];
+        Palette::from_theme(false, [0x00, 0x00, 0x00], [0xff, 0xfe, 0xf0], &ansi)
+    }
+
+    #[test]
+    fn a_view_follows_the_host_theme_unless_dark_or_light_was_chosen() {
+        let mut ansi = [[0x80, 0x80, 0x80]; 16];
+        ansi[2] = [0x10, 0x70, 0x30];
+        let theme = HostTheme {
+            dark: false,
+            foreground: [0, 0, 0],
+            background: [0xff, 0xfe, 0xf0],
+            ansi: &ansi,
+        };
+        let auto = Choice::Auto {
+            dark_background: Some(true),
+        };
+        let followed = Palette::choose(auto, Some(theme));
+        assert_eq!(followed.ground, [0xff, 0xfe, 0xf0]);
+        assert_eq!(followed.working, Color::Rgb(0x10, 0x70, 0x30));
+        assert_eq!(Palette::choose(Choice::Dark, Some(theme)), Palette::DARK);
+        assert_eq!(Palette::choose(Choice::Light, Some(theme)), Palette::LIGHT);
+        assert_eq!(Palette::choose(auto, None), Palette::DARK);
+        let light_pane = Choice::Auto {
+            dark_background: Some(false),
+        };
+        assert_eq!(Palette::choose(light_pane, None), Palette::LIGHT);
+        let short = HostTheme {
+            ansi: &ansi[..8],
+            ..theme
+        };
+        assert_eq!(Palette::choose(auto, Some(short)), Palette::DARK);
+    }
+
+    #[test]
+    fn a_theme_palette_takes_the_themes_ground_text_accent_and_state_colors() {
+        let palette = paper();
+        assert!(!palette.dark);
+        assert_eq!(palette.ground, [0xff, 0xfe, 0xf0]);
+        assert_eq!(palette.text, Color::Rgb(0, 0, 0));
+        assert_eq!(
+            palette.state(SeatState::Working),
+            Color::Rgb(0x10, 0x70, 0x30)
+        );
+        assert_eq!(
+            palette.state(SeatState::Waiting),
+            Color::Rgb(0x90, 0x60, 0x00)
+        );
+        assert_eq!(
+            palette.state(SeatState::Failed),
+            Color::Rgb(0xa0, 0x10, 0x20)
+        );
+        assert_eq!(
+            palette.state(SeatState::Stuck),
+            Color::Rgb(0xa0, 0x10, 0x20)
+        );
+        assert_eq!(palette.focus, Color::Rgb(0x20, 0x40, 0xb0));
+        // Dim text is 72% of the way from the background to the text.
+        assert_eq!(palette.state(SeatState::Idle), Color::Rgb(71, 71, 67));
+        assert_eq!(palette.state(SeatState::Stopped), Color::Rgb(128, 127, 120));
+    }
+
+    #[test]
+    fn a_monitor_drawn_with_the_theme_uses_only_the_themes_colors() -> Result<()> {
+        let mut monitor = fleet()?;
+        monitor.palette = paper();
+        let (_, grid, _) = draw(&mut monitor, 100, 24);
+        let theme = paper();
+        let allowed = [
+            Color::Default,
+            Color::Rgb(0xff, 0xfe, 0xf0),
+            theme.text,
+            theme.strong,
+            theme.muted,
+            theme.hairline,
+            theme.selection,
+            theme.raised,
+            theme.focus,
+            theme.working,
+            theme.waiting,
+            theme.failed,
+            theme.stopped,
+        ];
+        let mut seen = std::collections::BTreeSet::new();
+        for y in 0..grid.height() {
+            for x in 0..grid.width() {
+                let style = grid.get(x, y).unwrap().style();
+                for color in [style.fg, style.bg] {
+                    assert!(
+                        allowed.contains(&color) || is_theme_fade(&theme, color),
+                        "{color:?} at {x},{y} is not a theme color"
+                    );
+                    seen.insert(format!("{color:?}"));
+                }
+            }
+        }
+        assert!(seen.contains(&format!("{:?}", theme.working)));
+        assert!(seen.contains(&format!("{:?}", theme.text)));
+        Ok(())
+    }
+
+    /// A state color faded toward the theme's background.
+    fn is_theme_fade(theme: &Palette, color: Color) -> bool {
+        (0..=100).any(|step| {
+            [
+                theme.working,
+                theme.waiting,
+                theme.failed,
+                theme.stopped,
+                theme.muted,
+            ]
+            .into_iter()
+            .any(|state| blend(theme, state, step as f32 / 100.0) == color)
+        })
     }
 
     #[test]

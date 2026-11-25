@@ -13,6 +13,7 @@ use anyhow::{bail, ensure, Context, Result};
 use pmux_plugin_api::host::pmux::{
     activity::{manage, read},
     plugin::lifecycle,
+    theme::colors,
 };
 use pmux_plugin_runtime::{ActivityProvider, Runtime};
 use prismattyc_core::activity::{ActivityCursor, ActivityPage};
@@ -128,7 +129,10 @@ impl Process {
                 let response = wire::read(&mut pipes.input)?;
                 if matches!(
                     &response,
-                    Response::Endpoints | Response::Poll { .. } | Response::RemoveStopped { .. }
+                    Response::Endpoints
+                        | Response::Poll { .. }
+                        | Response::RemoveStopped { .. }
+                        | Response::Theme
                 ) {
                     imports += 1;
                     ensure!(
@@ -147,6 +151,7 @@ impl Process {
                         endpoint,
                         session_id,
                     } => Request::RemovedStopped(provider.remove_stopped(endpoint, session_id)),
+                    Response::Theme => Request::Theme(provider.theme()),
                     Response::Failed(message) => bail!("plug-in worker failed: {message}"),
                     response => return Ok(response),
                 };
@@ -379,6 +384,14 @@ impl ActivityProvider for Broker {
         {
             Request::RemovedStopped(result) => result,
             _ => Err("invalid session cleanup response".into()),
+        }
+    }
+
+    fn theme(&mut self) -> Option<colors::Theme> {
+        wire::write(&mut std::io::stdout().lock(), &Response::Theme).ok()?;
+        match self.receive().ok()? {
+            Request::Theme(theme) => theme,
+            _ => None,
         }
     }
 }

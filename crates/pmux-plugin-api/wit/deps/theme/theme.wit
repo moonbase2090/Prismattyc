@@ -1,0 +1,23 @@
+// SPDX-License-Identifier: MIT
+
+package pmux:theme@1.0.0;
+
+/// The colors of the theme the host shows panes in.
+interface colors {
+    use pmux:view/frame@2.0.0.{rgb};
+
+    record theme {
+        /// Whether the theme is a dark one.
+        dark: bool,
+        /// Default text color.
+        foreground: rgb,
+        /// Default pane background.
+        background: rgb,
+        /// ANSI colors 0 to 15, in order.
+        ansi: list<rgb>,
+    }
+
+    /// The host's current theme, or none when it has not shared one. It can
+    /// change while a view is open, so read it again when drawing.
+    current: func() -> option<theme>;
+}

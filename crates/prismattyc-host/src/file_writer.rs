@@ -11,6 +11,7 @@ use std::thread::{self, JoinHandle};
 use std::time::SystemTime;
 
 use prismattyc_mux::attach_tabs::AttachTabsFile;
+use prismattyc_mux::host_theme::ThemeColors;
 use serde_json::Value;
 
 pub(super) type Stamp = (SystemTime, u64);
@@ -18,6 +19,7 @@ pub(super) type Stamp = (SystemTime, u64);
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum WriteKey {
     RenderStatus(PathBuf),
+    Theme(PathBuf),
     AttachTabs(PathBuf),
     ComponentHeartbeat { socket: PathBuf, component: String },
 }
@@ -27,6 +29,11 @@ enum WriteJob {
         pid_path: PathBuf,
         pid: u32,
         status: Value,
+    },
+    Theme {
+        pid_path: PathBuf,
+        pid: u32,
+        colors: ThemeColors,
     },
     AttachTabs {
         path: PathBuf,
@@ -42,6 +49,7 @@ impl WriteJob {
     fn key(&self) -> WriteKey {
         match self {
             Self::RenderStatus { pid_path, .. } => WriteKey::RenderStatus(pid_path.clone()),
+            Self::Theme { pid_path, .. } => WriteKey::Theme(pid_path.clone()),
             Self::AttachTabs { path, .. } => WriteKey::AttachTabs(path.clone()),
             Self::ComponentHeartbeat { socket, component } => WriteKey::ComponentHeartbeat {
                 socket: socket.clone(),
@@ -53,6 +61,7 @@ impl WriteJob {
     fn completion_kind(&self) -> CompletionKind {
         match self {
             Self::RenderStatus { .. } => CompletionKind::RenderStatus,
+            Self::Theme { .. } => CompletionKind::Theme,
             Self::AttachTabs { path, .. } => CompletionKind::AttachTabs { path: path.clone() },
             Self::ComponentHeartbeat { .. } => CompletionKind::ComponentHeartbeat,
         }
@@ -92,6 +101,7 @@ pub(super) struct FileWriter {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum CompletionKind {
     RenderStatus,
+    Theme,
     AttachTabs { path: PathBuf },
     ComponentHeartbeat,
 }
@@ -221,6 +231,20 @@ impl Handle {
         })
     }
 
+    /// Share the host's theme with plug-in views in its panes.
+    pub(super) fn theme(
+        &self,
+        pid_path: PathBuf,
+        pid: u32,
+        colors: ThemeColors,
+    ) -> io::Result<u64> {
+        self.submit(WriteJob::Theme {
+            pid_path,
+            pid,
+            colors,
+        })
+    }
+
     pub(super) fn attach_tabs(&self, path: PathBuf, file: AttachTabsFile) -> io::Result<u64> {
         self.submit(WriteJob::AttachTabs { path, file })
     }
@@ -337,6 +361,15 @@ fn write_one(pending: PendingJob) -> Completion {
             status,
         } => (
             prismattyc_mux::host_render_status::publish(&pid_path, pid, &status)
+                .map_err(|error| error.to_string()),
+            None,
+        ),
+        WriteJob::Theme {
+            pid_path,
+            pid,
+            colors,
+        } => (
+            prismattyc_mux::host_theme::publish(&pid_path, pid, &colors)
                 .map_err(|error| error.to_string()),
             None,
         ),

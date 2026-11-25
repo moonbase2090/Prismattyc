@@ -24,6 +24,7 @@ mod geometry;
 pub mod host_register;
 pub mod host_render_status;
 pub mod host_tabs;
+pub mod host_theme;
 mod ids;
 mod image_paste;
 mod inject_submit;

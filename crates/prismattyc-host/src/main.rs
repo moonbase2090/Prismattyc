@@ -17946,6 +17946,8 @@ fn mux_command_for(action: keybind::Action) -> Option<MuxCommand> {
         | Action::ActivityMonitor
         | Action::JumpNeedsYou
         | Action::UpdateRestart
+        | Action::PluginsCheck
+        | Action::PluginsUpdate
         | Action::RecentMessages => return None,
     })
 }
@@ -20784,6 +20786,17 @@ fn dispatch_action(
     }
     if action == A::UpdateRestart {
         space_panel::maintenance(host);
+        return Dispatch::Handled;
+    }
+    if action == A::PluginsCheck || action == A::PluginsUpdate {
+        settings::plugins_command(
+            host,
+            if action == A::PluginsCheck {
+                settings::PluginsCommand::Check
+            } else {
+                settings::PluginsCommand::UpdateAll
+            },
+        );
         return Dispatch::Handled;
     }
     if action == A::RecentMessages {

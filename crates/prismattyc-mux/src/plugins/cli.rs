@@ -9,7 +9,7 @@ use super::{AdminAction, Client, Reply, Request};
 
 pub fn run(socket: &Path, args: Vec<String>) -> Result<()> {
     if args.is_empty() || matches!(args[0].as_str(), "--help" | "-h") {
-        println!("pmux plugin discover [--refresh]\npmux plugin list\npmux plugin inspect ID [--version VERSION]\npmux plugin install ID [--version VERSION]\npmux plugin enable ID [--version VERSION] [--allow activity.read:LABEL] [--allow activity.manage:local]\npmux plugin disable ID\npmux plugin invoke ID CONTRIBUTION [JSON]\npmux plugin run ID [VIEW] [--snapshot [--cols N] [--rows N]] [--endpoint LABEL[=DISPLAY_LABEL]] [--theme auto|dark|light] [--no-motion] [--no-pixels]\npmux plugin endpoint list\npmux plugin endpoint add LABEL (--socket PATH | --command-query JSON_ARGV | --command-tail JSON_ARGV)\npmux plugin endpoint remove LABEL\npmux plugin endpoint import [--apply] [--host LABEL=SOCKET] [--host-cmd LABEL JSON_ARGV] [--activity-hosts FILE]\n\nImport previews explicit legacy definitions; --apply registers the entire batch without grants or helper execution.\nLocal scopes are activity.read:local and activity.manage:local; named read scopes require registered endpoints. Installation leaves packages disabled. Choosing Activity Monitor enables it with local read and stopped-session cleanup; the connector receives local read only. Cleanup refuses any agent session with a live pane child. Disable keeps plug-ins off. Verified cached metadata is available offline; changes and refresh require the daemon. Changes preserve sessions. Plug-in updates are explicit; MCP exports require a separate operator allowlist.");
+        println!("pmux plugin discover [--refresh]\npmux plugin list\npmux plugin inspect ID [--version VERSION]\npmux plugin install ID [--version VERSION]\npmux plugin enable ID [--version VERSION] [--allow SCOPE]...\npmux plugin update [ID]\npmux plugin disable ID\npmux plugin invoke ID CONTRIBUTION [JSON]\npmux plugin run ID [VIEW] [--snapshot [--cols N] [--rows N]] [--endpoint LABEL[=DISPLAY_LABEL]] [--theme auto|dark|light] [--no-motion] [--no-pixels]\npmux plugin endpoint list\npmux plugin endpoint add LABEL (--socket PATH | --command-query JSON_ARGV | --command-tail JSON_ARGV)\npmux plugin endpoint remove LABEL\npmux plugin endpoint import [--apply] [--host LABEL=SOCKET] [--host-cmd LABEL JSON_ARGV] [--activity-hosts FILE]\n\nImport previews explicit legacy definitions; --apply registers the entire batch without grants or helper execution.\nLocal scopes are activity.read:local and activity.manage:local; named read scopes require registered endpoints. Installation leaves packages disabled. Choosing Activity Monitor enables it with local read and stopped-session cleanup; the connector receives local read only. Cleanup refuses any agent session with a live pane child. Disable keeps plug-ins off. Verified cached metadata is available offline; changes and refresh require the daemon. Changes preserve sessions. Plug-in updates are explicit; MCP exports require a separate operator allowlist.");
         return Ok(());
     }
     let import = if args.first().map(String::as_str) == Some("endpoint")
@@ -63,6 +63,12 @@ pub fn run(socket: &Path, args: Vec<String>) -> Result<()> {
     }
     if args[0] == "run" {
         return view(client, &args[1..]);
+    }
+    if args[0] == "update" {
+        ensure!(args.len() <= 2, "usage: pmux plugin update [ID]");
+        let outcomes = super::update::update(&mut client, args.get(1).map(String::as_str), false)?;
+        println!("{}", serde_json::to_string_pretty(&outcomes)?);
+        return Ok(());
     }
     if args[0] == "endpoint" {
         let request = endpoint(&args[1..])?;
@@ -284,6 +290,21 @@ fn parse(client: &mut Client, args: &[String]) -> Result<Request> {
                             })
                     })
                     .context("plug-in version is not installed; install it first")?;
+                let grants = if grants.is_empty() {
+                    // Nothing asked for: the permissions the manifest requires.
+                    match client.request(Request::Inspect {
+                        id: package.id.clone(),
+                        version: Some(package.version.clone()),
+                    })? {
+                        Reply::Inspection {
+                            manifest: Some(manifest),
+                            ..
+                        } => manifest.required_grants(),
+                        _ => Vec::new(),
+                    }
+                } else {
+                    grants
+                };
                 admin(AdminAction::Enable { package, grants })
             }
         }

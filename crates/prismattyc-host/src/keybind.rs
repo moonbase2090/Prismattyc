@@ -61,6 +61,10 @@ pub enum Action {
     /// Focus the next pane that needs attention (issue #184).
     JumpNeedsYou,
     UpdateRestart,
+    /// Check the plug-in catalog for newer versions.
+    PluginsCheck,
+    /// Install newer plug-in versions and apply them.
+    PluginsUpdate,
     /// Recent status messages, including toasts hidden by `toasts` (#171).
     /// Unbound by default.
     RecentMessages,
@@ -201,6 +205,8 @@ impl Action {
             Action::ActivityMonitor,
             Action::JumpNeedsYou,
             Action::UpdateRestart,
+            Action::PluginsCheck,
+            Action::PluginsUpdate,
             Action::RecentMessages,
             Action::CloseTab,
             Action::RenameTab,
@@ -300,6 +306,8 @@ impl Action {
             Action::ActivityMonitor => "activity_monitor".into(),
             Action::JumpNeedsYou => "jump_needs_you".into(),
             Action::UpdateRestart => "update_restart".into(),
+            Action::PluginsCheck => "plugins_check".into(),
+            Action::PluginsUpdate => "plugins_update".into(),
             Action::RecentMessages => "recent_messages".into(),
 
             Action::CloseTab => "close_tab".into(),
@@ -399,6 +407,8 @@ impl Action {
             Action::ActivityMonitor => "open the Activity Monitor Space".into(),
             Action::JumpNeedsYou => "focus the next pane that needs your attention".into(),
             Action::UpdateRestart => "update, restart components, and inspect versions".into(),
+            Action::PluginsCheck => "check for plug-in updates".into(),
+            Action::PluginsUpdate => "update plug-ins; ones you turned off stay off".into(),
             Action::RecentMessages => "show recent status messages, including hidden toasts".into(),
 
             Action::CloseTab => "close the active tab".into(),
@@ -583,6 +593,8 @@ impl Action {
             | Action::SpaceRailPrev
             | Action::SaveSpace => ActionGroup::Spaces,
             Action::UpdateRestart
+            | Action::PluginsCheck
+            | Action::PluginsUpdate
             | Action::RecentMessages
             | Action::NewWindow
             | Action::Quit
@@ -629,6 +641,8 @@ impl Action {
             Action::ActivityMonitor => Some("See what each agent seat is doing; press q in the monitor to quit."),
             Action::JumpNeedsYou => Some("Clears attention on the pane you focus."),
             Action::UpdateRestart => Some("Check installed versions, update, or restart components."),
+            Action::PluginsCheck => Some("Lists plug-ins with a newer version; nothing is installed."),
+            Action::PluginsUpdate => Some("Installs newer versions and keeps the permissions already granted; a plug-in you turned off stays off."),
             Action::RecentMessages => Some("Settings choose which toasts show: all, errors, or off."),
             Action::PresetSingle
             | Action::PresetSplitH
@@ -1207,6 +1221,8 @@ pub(crate) fn default_chords(action: Action) -> Vec<&'static str> {
         Action::AgentMessages
         | Action::ActivityMonitor
         | Action::UpdateRestart
+        | Action::PluginsCheck
+        | Action::PluginsUpdate
         | Action::RecentMessages => vec![],
         Action::JumpNeedsYou => vec!["ctrl+shift+u"],
 
@@ -1624,6 +1640,8 @@ mod tests {
             Action::AgentMessages
                 | Action::ActivityMonitor
                 | Action::UpdateRestart
+                | Action::PluginsCheck
+                | Action::PluginsUpdate
                 | Action::RecentMessages
                 | Action::PresetSingle
                 | Action::PresetSplitH

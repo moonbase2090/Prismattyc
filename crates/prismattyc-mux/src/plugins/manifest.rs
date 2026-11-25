@@ -165,6 +165,19 @@ impl Manifest {
         Ok(())
     }
 
+    /// The local permissions its required capabilities need: what to
+    /// pre-select when nothing has been granted yet.
+    pub fn required_grants(&self) -> Vec<String> {
+        [
+            ("pmux:activity/read", "activity.read:local"),
+            ("pmux:activity/manage", "activity.manage:local"),
+        ]
+        .into_iter()
+        .filter(|(capability, _)| self.requires.contains_key(*capability))
+        .map(|(_, grant)| grant.to_owned())
+        .collect()
+    }
+
     pub fn compatibility(&self) -> Result<()> {
         ensure!(
             VersionReq::parse(&self.plugin_api)?.matches(&Version::parse(API_VERSION)?),
@@ -266,6 +279,31 @@ kind = "view"
 id = "main"
 title = "Example"
 "#
+    }
+
+    #[test]
+    fn required_capabilities_name_the_permissions_to_preselect() {
+        let mut manifest = Manifest::parse(source().as_bytes()).unwrap();
+        assert!(
+            manifest.required_grants().is_empty(),
+            "a view needs no activity permission"
+        );
+        manifest
+            .requires
+            .insert("pmux:activity/read".into(), "^1".into());
+        manifest
+            .requires
+            .insert("pmux:activity/manage".into(), "^1".into());
+        assert_eq!(
+            manifest.required_grants(),
+            vec!["activity.read:local", "activity.manage:local"]
+        );
+        // An optional capability is offered, not pre-selected.
+        manifest.requires.remove("pmux:activity/manage");
+        manifest
+            .optional
+            .insert("pmux:activity/manage".into(), "^1".into());
+        assert_eq!(manifest.required_grants(), vec!["activity.read:local"]);
     }
 
     #[test]

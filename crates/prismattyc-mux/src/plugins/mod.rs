@@ -14,6 +14,7 @@ mod package;
 mod paint;
 mod presenter;
 mod protocol;
+mod update;
 
 pub use pmux_plugin_api::monitor::GraphStyle;
 mod remote;
@@ -35,6 +36,9 @@ pub use manifest::{Contribution, Manifest};
 pub use package::{pack, Installed};
 pub use protocol::{
     AdminAction, Observed, Reply, Request, RetryReason, Status, ToolExport, ViewEndpoint,
+};
+pub use update::{
+    available as updates_available, update as update_plugins, Outcome, Result_ as UpdateResult,
 };
 pub(crate) use wire::error_message;
 

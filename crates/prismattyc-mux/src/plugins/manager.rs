@@ -364,7 +364,7 @@ fn load_journal(path: &Path) -> Result<Journal> {
             Version::parse(&selected.version)?;
         }
         if let Desired::Enabled { grants, .. } = desired {
-            validate_grants(grants, &journal.endpoints)?;
+            validate_grants(id, grants, &journal.endpoints)?;
         }
     }
     Ok(journal)
@@ -683,7 +683,11 @@ impl Manager {
             }
             AdminAction::Enable { package, grants } => {
                 let grants = grants.into_iter().collect::<BTreeSet<_>>();
-                validate_grants(&grants, &self.state.lock().unwrap().journal.endpoints)?;
+                validate_grants(
+                    &package.id,
+                    &grants,
+                    &self.state.lock().unwrap().journal.endpoints,
+                )?;
                 let next = Desired::Enabled {
                     selected: package.clone(),
                     grants: grants.clone(),
@@ -837,17 +841,31 @@ impl Manager {
 }
 
 fn validate_grants(
+    id: &str,
     grants: &BTreeSet<String>,
     endpoints: &BTreeMap<String, Endpoint>,
 ) -> Result<()> {
-    ensure!(
-        grants.iter().all(|grant| grant == "activity.read:local"
+    let known = |grant: &str| {
+        grant == "activity.read:local"
             || grant == "activity.manage:local"
             || grant
                 .strip_prefix("activity.read:")
-                .is_some_and(|label| endpoints.contains_key(label))),
-        "unknown or unconfigured plug-in permission scope"
-    );
+                .is_some_and(|label| endpoints.contains_key(label))
+    };
+    if let Some(unknown) = grants.iter().find(|grant| !known(grant)) {
+        let registered = endpoints
+            .keys()
+            .map(|label| format!("activity.read:{label}"))
+            .collect::<Vec<_>>();
+        bail!(
+            "unknown or unconfigured permission scope '{unknown}' for {id}; valid scopes: activity.read:local, activity.manage:local{}",
+            if registered.is_empty() {
+                "; named read scopes need a registered endpoint (pmux plugin endpoint add)".to_owned()
+            } else {
+                format!(", {}", registered.join(", "))
+            }
+        );
+    }
     Ok(())
 }
 
@@ -2179,6 +2197,7 @@ mod tests {
     #[test]
     fn unconfigured_scope_strings_never_grant_native_authority() {
         assert!(validate_grants(
+            "org.example.reader",
             &BTreeSet::from(["activity.read:local".into()]),
             &BTreeMap::new()
         )
@@ -2190,7 +2209,29 @@ mod tests {
             "activity.read:*",
             "activity.read:endpoint:unknown",
         ] {
-            assert!(validate_grants(&BTreeSet::from([scope.into()]), &BTreeMap::new()).is_err());
+            assert!(validate_grants(
+                "org.example.reader",
+                &BTreeSet::from([scope.into()]),
+                &BTreeMap::new()
+            )
+            .is_err());
         }
+    }
+
+    #[test]
+    fn a_refused_scope_names_the_valid_ones() {
+        let error = validate_grants(
+            "org.example.reader",
+            &BTreeSet::from(["activity.read:nowhere".into()]),
+            &BTreeMap::new(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("'activity.read:nowhere'"), "{error}");
+        assert!(error.contains("org.example.reader"), "{error}");
+        assert!(
+            error.contains("activity.read:local, activity.manage:local"),
+            "{error}"
+        );
     }
 }

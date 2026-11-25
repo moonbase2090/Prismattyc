@@ -377,6 +377,10 @@ terminal_switcher = "ctrl+shift+o"
 jump_needs_you = "ctrl+shift+u"
 # update, restart components, and inspect versions.
 # update_restart = []
+# check for plug-in updates.
+# plugins_check = []
+# update plug-ins; ones you turned off stay off.
+# plugins_update = []
 # show recent status messages, including hidden toasts.
 # recent_messages = []
 # close the active tab.

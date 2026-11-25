@@ -46,7 +46,12 @@ const DEFAULT_EVENT_CAPACITY: usize = 256;
 const MAX_EVENT_CAPACITY: usize = 4096;
 const MAX_EVENT_BATCH: usize = 256;
 pub(crate) const MAX_REQUEST_BYTES: usize = 1024 * 1024;
-pub(crate) const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+/// Holds a plug-in frame at its largest: base64 of `MAX_FRAME_BYTES` plus the envelope.
+pub(crate) const MAX_RESPONSE_BYTES: usize = 9 * 1024 * 1024;
+const _: () = assert!(
+    pmux_plugin_api::MAX_FRAME_BYTES.div_ceil(3) * 4 + 64 * 1024 <= MAX_RESPONSE_BYTES,
+    "a plug-in frame must fit one control response"
+);
 /// Pane-state recovery is streamed in bounded response frames.
 const PANE_STATE_CHUNK_BYTES: usize = 128 * 1024;
 pub const MAX_PANE_STATE_BYTES: usize = 256 * 1024 * 1024;
@@ -3250,6 +3255,15 @@ impl ControlPlane {
         Ok(())
     }
 
+    /// End every live pane at daemon shutdown. Call after `flush_pane_logs`,
+    /// which records the scrollback the next daemon restores.
+    #[cfg(windows)]
+    pub(crate) fn close_live_panes(&mut self) {
+        if let Some(live) = self.live.as_mut() {
+            live.close_all();
+        }
+    }
+
     pub(crate) fn flush_pane_logs(&mut self) {
         // Shutdown must finish the older write before publishing the final state.
         self.pane_log_worker.take();
@@ -3481,6 +3495,7 @@ impl ControlPlane {
             .mail_store
             .send(&from, &to, &summary, &body)
             .map_err(Self::mail_store_error)?;
+        self.record_stored_mail(to.as_str(), &from, &id, depth);
         self.on_mail_stored(to.as_str(), depth);
         Ok(ControlResponseData::MailSent { id, depth })
     }
@@ -3643,19 +3658,16 @@ impl ControlPlane {
             recipients.push(agent);
             names.push(agent_id.to_string());
         }
-        let delivered = self
+        let stored = self
             .mail_store
             .broadcast(&from, &recipients, &summary, &body)
             .map_err(Self::mail_store_error)?;
-        for agent in &recipients {
-            let depth = self
-                .mail_depth_for(agent.as_str())
-                .map(|(open, _)| open)
-                .unwrap_or(0);
-            self.on_mail_stored(agent.as_str(), depth);
+        for (agent, (id, depth)) in recipients.iter().zip(stored.iter()) {
+            self.record_stored_mail(agent.as_str(), &from, id, *depth);
+            self.on_mail_stored(agent.as_str(), *depth);
         }
         Ok(ControlResponseData::MailBroadcasted {
-            delivered,
+            delivered: u32::try_from(stored.len()).unwrap_or(u32::MAX),
             recipients: names,
         })
     }
@@ -3685,6 +3697,36 @@ impl ControlPlane {
     fn cancel_mail_nudge_for_agent(&mut self, agent: &str) {
         if let Some(pane_raw) = self.doorbell_pane(agent) {
             self.mail_nudges.remove(&pane_raw);
+        }
+    }
+
+    /// Metadata-only activity when the feed is on. The letter body and
+    /// summary are not arguments, so they cannot be copied into the event.
+    fn record_stored_mail(
+        &mut self,
+        recipient: &str,
+        sender: &str,
+        letter_id: &str,
+        open_count: u32,
+    ) {
+        if self.activity.is_none() {
+            return;
+        }
+        let Ok(seat) = prismattyc_core::AgentId::new(recipient) else {
+            return;
+        };
+        let Ok(event) = prismattyc_core::activity::ActivityInput::arrival(
+            seat,
+            prismattyc_core::activity::ActivityKind::MailReceived,
+            letter_id,
+            None,
+            Some(sender),
+            Some(open_count),
+        ) else {
+            return;
+        };
+        if let Some(feed) = self.activity.as_mut() {
+            let _ = feed.publish(event);
         }
     }
 
@@ -7711,10 +7753,17 @@ impl Drop for ControlServer {
         if let Some(thread) = self.attention_thread.take() {
             let _ = thread.join();
         }
-        self.plane
+        let mut plane = self
+            .plane
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .flush_pane_logs();
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        plane.flush_pane_logs();
+        // A connection thread can still hold the plane after this drop, and
+        // the process exit that follows skips its destructors. On Windows a
+        // pane's console host then outlives the daemon, so close them here.
+        #[cfg(windows)]
+        plane.close_live_panes();
+        drop(plane);
         remove_owned_socket(&self.path);
     }
 }
@@ -13204,6 +13253,99 @@ function Read-Exact([int]$Count) {
         (plane, window.get(), pane.get())
     }
 
+    /// Pseudoconsole hosts this process started for a console `cols` wide.
+    /// The width is part of each headless host's command line.
+    #[cfg(windows)]
+    fn pseudoconsole_hosts(cols: u16) -> Vec<u32> {
+        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+        let me = sysinfo::Pid::from_u32(std::process::id());
+        let mut system = System::new();
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+        );
+        let width = format!("--width {cols} ");
+        system
+            .processes()
+            .values()
+            .filter(|process| process.parent() == Some(me))
+            .filter(|process| {
+                let line = process
+                    .cmd()
+                    .iter()
+                    .map(|part| part.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                line.contains("--headless") && line.contains(&width)
+            })
+            .map(|process| process.pid().as_u32())
+            .collect()
+    }
+
+    /// The daemon exits right after its server drops, while a connection
+    /// thread can still hold the plane, so the plane's destructors never run.
+    /// The pane's console host must exit anyway, or it outlives the daemon and
+    /// keeps its working directory in use.
+    #[cfg(windows)]
+    #[test]
+    fn server_drop_closes_console_hosts_while_the_plane_is_still_held() {
+        use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+        };
+        // An unusual width tells this pane's console host apart from those
+        // of other tests.
+        const COLS: u16 = 101;
+        let domain = Domain::bootstrap("live").unwrap();
+        let session = domain.sessions().next().unwrap();
+        let window = session.windows[0];
+        let pane = domain.window(window).unwrap().layout.panes()[0];
+        let plane = ControlPlane::new_live(
+            domain,
+            [WindowBounds {
+                window_id: window.get(),
+                cols: COLS.into(),
+                rows: 24,
+            }],
+            Some(32),
+            [(pane.get(), live_shell_spawn("console-host"))],
+            None,
+        )
+        .unwrap();
+        let hosts = pseudoconsole_hosts(COLS);
+        assert_eq!(hosts.len(), 1, "one console host for the pane: {hosts:?}");
+        let host = hosts[0];
+        // SAFETY: a plain open of a process id for waiting; checked below.
+        let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, host) };
+        assert!(!handle.is_null(), "open console host {host}");
+        let path = socket_path();
+        let server = ControlServer::bind(&path, plane).unwrap();
+        // Stands in for the connection thread that still holds the plane.
+        let held = server.plane();
+        // Nothing has read the pane yet, so its console host is still waiting
+        // for an answer to its cursor position request. Stopping must not
+        // wait on that host forever.
+        let (stopped_tx, stopped) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            drop(server);
+            let _ = stopped_tx.send(());
+        });
+        assert!(
+            stopped.recv_timeout(Duration::from_secs(30)).is_ok(),
+            "the server did not finish stopping"
+        );
+        // SAFETY: `handle` is the open process handle from above.
+        let waited = unsafe { WaitForSingleObject(handle, 30_000) };
+        // SAFETY: closed once, after the wait.
+        unsafe { CloseHandle(handle) };
+        assert_eq!(
+            waited, WAIT_OBJECT_0,
+            "console host {host} still runs after the server stopped"
+        );
+        drop(held);
+    }
+
     fn pane_content(response: ControlResponse) -> PaneContent {
         match response.body {
             ControlResponseBody::Ok {
@@ -18175,6 +18317,123 @@ function Read-Exact([int]$Count) {
             plane.plugin_activity_page(None, 1).unwrap_err(),
             pmux_plugin_api::host::pmux::activity::read::Error::FeedDisabled
         );
+    }
+
+    #[test]
+    fn stored_mail_records_metadata_only_when_the_feed_is_on() {
+        let (mut plane, _, _) = fixture(8);
+        let _peer = mail_hello(&mut plane, 1, "operator-a");
+        let sender = mail_hello(&mut plane, 2, "operator-b");
+        let send = |plane: &mut ControlPlane, request_id: u64| {
+            plane.handle(ControlRequest::MailSend {
+                version: PROTOCOL_VERSION,
+                request_id,
+                client_id: sender,
+                to: "operator-a".into(),
+                summary: "secret-subject".into(),
+                body: "secret-body".into(),
+            })
+        };
+        let first = send(&mut plane, 3);
+        let ControlResponseBody::Ok {
+            response: ControlResponseData::MailSent { id, depth },
+        } = first.body
+        else {
+            panic!("expected MailSent");
+        };
+        assert_eq!(depth, 1);
+        let disabled = plane.handle(ControlRequest::ReadActivity {
+            version: PROTOCOL_VERSION,
+            request_id: 4,
+            cursor: None,
+            limit: 8,
+        });
+        assert_eq!(error_code(&disabled), ControlErrorCode::ActivityDisabled);
+
+        plane.enable_activity().unwrap();
+        let second = send(&mut plane, 5);
+        let ControlResponseBody::Ok {
+            response: ControlResponseData::MailSent { id: stored, .. },
+        } = second.body
+        else {
+            panic!("expected MailSent");
+        };
+        assert_ne!(stored, id);
+        let response = plane.handle(ControlRequest::ReadActivity {
+            version: PROTOCOL_VERSION,
+            request_id: 6,
+            cursor: None,
+            limit: 8,
+        });
+        let ControlResponseBody::Ok {
+            response: ControlResponseData::Activity { page },
+        } = response.body
+        else {
+            panic!("expected activity page");
+        };
+        assert_eq!(page.records.len(), 1);
+        assert_eq!(page.records[0].event.event_id, stored);
+        assert_eq!(page.records[0].event.seat.as_str(), "operator-a");
+        assert_eq!(
+            page.records[0].event.kind,
+            crate::activity::ActivityKind::MailReceived
+        );
+        assert_eq!(
+            page.records[0]
+                .event
+                .detail
+                .as_ref()
+                .unwrap()
+                .sender_id
+                .as_deref(),
+            Some("operator-b")
+        );
+        let encoded = serde_json::to_string(&page).unwrap();
+        assert!(!encoded.contains("secret-subject"), "{encoded}");
+        assert!(!encoded.contains("secret-body"), "{encoded}");
+
+        let room = crate::activity::ActivityInput::arrival(
+            crate::mailbox::AgentId::new("operator-a").unwrap(),
+            crate::activity::ActivityKind::RoomMessage,
+            "m-9",
+            Some("room-7"),
+            Some("operator-b"),
+            None,
+        )
+        .unwrap();
+        let published = plane.handle(ControlRequest::PublishActivity {
+            version: PROTOCOL_VERSION,
+            request_id: 7,
+            event: room,
+        });
+        assert!(matches!(
+            published.body,
+            ControlResponseBody::Ok {
+                response: ControlResponseData::ActivityPublished { .. }
+            }
+        ));
+        let response = plane.handle(ControlRequest::ReadActivity {
+            version: PROTOCOL_VERSION,
+            request_id: 8,
+            cursor: None,
+            limit: 8,
+        });
+        let ControlResponseBody::Ok {
+            response: ControlResponseData::Activity { page },
+        } = response.body
+        else {
+            panic!("expected activity page");
+        };
+        assert_eq!(page.records.len(), 2);
+        assert_eq!(
+            page.records[1].event.kind,
+            crate::activity::ActivityKind::RoomMessage
+        );
+        assert_eq!(page.records[1].event.run_id, "room-7");
+        let encoded = serde_json::to_string(&page.records[1]).unwrap();
+        assert!(encoded.contains("m-9"));
+        assert!(!encoded.contains("secret-subject"));
+        assert!(!encoded.contains("secret-body"));
     }
 
     #[test]

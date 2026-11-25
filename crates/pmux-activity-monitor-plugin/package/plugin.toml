@@ -1,9 +1,16 @@
 manifest_version = 1
 id = "org.moonbase.activity-monitor"
-version = "1.3.5"
+version = "1.4.0"
 plugin_api = "^2.0.0"
 component = "monitor.wasm"
-notices = ["LICENSE"]
+notices = [
+    "LICENSE",
+    "fonts/IBMPlexSans-OFL.txt",
+    "fonts/Inter-OFL.txt",
+    "fonts/JetBrainsMono-OFL.txt",
+    "fonts/NotoEmoji-OFL.txt",
+    "fonts/NotoSans-OFL.txt",
+]
 
 [requires]
 "pmux:activity/read" = "^1.0.0"

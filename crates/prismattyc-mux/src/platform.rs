@@ -1110,6 +1110,34 @@ pub fn home_dir() -> Option<std::ffi::OsString> {
         }
     })
 }
+/// Where a daemon's first pane starts. A daemon started in the folder that
+/// holds its executable, or in the install folder above it, starts the pane in
+/// `home`: the installer and the app start it there, and a shell left in that
+/// folder keeps it in use.
+pub fn first_pane_dir(
+    launch: std::path::PathBuf,
+    executable: &Path,
+    home: Option<std::path::PathBuf>,
+) -> std::path::PathBuf {
+    let bin = executable.parent();
+    let in_install = [bin, bin.and_then(Path::parent)]
+        .into_iter()
+        .flatten()
+        .any(|dir| same_directory(dir, &launch));
+    match home {
+        Some(home) if in_install => home,
+        _ => launch,
+    }
+}
+
+fn same_directory(left: &Path, right: &Path) -> bool {
+    left == right
+        || matches!(
+            (fs::canonicalize(left), fs::canonicalize(right)),
+            (Ok(left), Ok(right)) if left == right
+        )
+}
+
 pub fn config_home() -> Option<std::ffi::OsString> {
     std::env::var_os("XDG_CONFIG_HOME")
         .filter(|v| !v.is_empty())
@@ -1669,5 +1697,64 @@ mod console_flags {
         );
         assert_eq!(super::choose_windows_shell(None, Some("")), "cmd.exe");
         assert_eq!(super::choose_windows_shell(None, Some("  ")), "cmd.exe");
+    }
+}
+
+#[cfg(test)]
+mod first_pane_dir_tests {
+    use super::first_pane_dir;
+    use std::path::PathBuf;
+
+    /// A fresh install layout: `<root>/Prismattyc/bin/pmuxd`, a home folder
+    /// and a project folder, all real directories.
+    fn layout(name: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+        let root =
+            std::env::temp_dir().join(format!("pmux-first-pane-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let install = root.join("Prismattyc");
+        let bin = install.join("bin");
+        let home = root.join("home");
+        let project = root.join("project");
+        for dir in [&bin, &home, &project] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        (
+            bin.join(super::executable_name("pmuxd")),
+            home,
+            project,
+            root,
+        )
+    }
+
+    #[test]
+    fn started_in_the_executable_folder_the_first_pane_starts_at_home() {
+        let (exe, home, _, root) = layout("bin");
+        let bin = exe.parent().unwrap().to_path_buf();
+        assert_eq!(first_pane_dir(bin, &exe, Some(home.clone())), home);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn started_in_the_install_folder_the_first_pane_starts_at_home() {
+        let (exe, home, _, root) = layout("install");
+        let install = exe.parent().unwrap().parent().unwrap().to_path_buf();
+        assert_eq!(first_pane_dir(install, &exe, Some(home.clone())), home);
+        // The same folder spelled another way still counts.
+        let spelled = exe.parent().unwrap().join("..");
+        assert_eq!(first_pane_dir(spelled, &exe, Some(home.clone())), home);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn started_anywhere_else_the_first_pane_keeps_that_folder() {
+        let (exe, home, project, root) = layout("project");
+        assert_eq!(
+            first_pane_dir(project.clone(), &exe, Some(home.clone())),
+            project
+        );
+        // Without a home folder the launch folder is the only choice.
+        let bin = exe.parent().unwrap().to_path_buf();
+        assert_eq!(first_pane_dir(bin.clone(), &exe, None), bin);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

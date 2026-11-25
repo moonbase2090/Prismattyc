@@ -5332,6 +5332,35 @@ impl MuxRuntime {
         }
     }
 
+    /// Painted tab rectangles in tab order, for accessibility bounds: the
+    /// slots [`Self::tab_strip_hit`] resolves to that tab without a drag
+    /// reserve. `None` for a tab the strip does not show.
+    pub(crate) fn tab_rects(&self, stride_px: usize) -> Vec<Option<crate::graphite::Rect>> {
+        let n = self.tab_count();
+        let chrome = self.geom.top_chrome_px;
+        if self.geom.chrome.graphite {
+            let bar = self.graphite_bar.as_ref().filter(|_| chrome > 0);
+            return (0..n)
+                .map(|i| bar.and_then(|bar| bar.tabs.get(i)).map(|slot| slot.chip))
+                .collect();
+        }
+        if chrome == 0 || stride_px == 0 {
+            return vec![None; n];
+        }
+        let origin = effective_tab_end_pad(self.geom.window_pad, stride_px);
+        let right = stride_px.saturating_sub(origin);
+        let y = self.geom.tab_strip_y();
+        (0..n)
+            .map(|i| {
+                let (x0, width) =
+                    tab_slot_bounds(i, n, stride_px, self.geom.window_pad, self.geom.rail_gap)?;
+                let left = x0.max(origin);
+                let end = x0.saturating_add(width).min(right);
+                (end > left).then(|| crate::graphite::Rect::new(left, y, end - left, chrome))
+            })
+            .collect()
+    }
+
     /// Strip hit testing. `reserve_end` leaves a one-cell empty drop
     /// target on the right so a drag can create a tab even when only
     /// one tab is showing.
@@ -6684,20 +6713,22 @@ mod tests {
             socket: socket.clone(),
             data: root,
         };
+        // The socket file appears when pmuxd binds it, a moment before it
+        // listens; wait until a client is accepted.
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
-            if socket.exists() {
+            if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
                 return guard;
             }
             if let Some(status) = guard.child.try_wait().expect("poll private pmuxd") {
                 panic!(
-                    "private pmuxd exited with {status} before publishing {}",
+                    "private pmuxd exited with {status} before accepting on {}",
                     socket.display()
                 );
             }
             thread::sleep(Duration::from_millis(10));
         }
-        panic!("private pmuxd did not publish {}", socket.display());
+        panic!("private pmuxd did not accept on {}", socket.display());
     }
 
     #[cfg(unix)]
@@ -9461,6 +9492,104 @@ mod tests {
         assert!(!runtime.join_focused_pane().unwrap());
         assert!(runtime.last_window.is_none());
         assert_eq!(runtime.tab_count(), 1);
+    }
+
+    /// Accessibility bounds for a tab must be where a click on that tab lands.
+    #[test]
+    fn tab_rects_are_where_the_strip_hit_finds_each_tab() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        runtime.new_tab("/bin/sh", &[]).unwrap();
+        runtime.new_tab("/bin/sh", &[]).unwrap();
+        let classic = HostGeom {
+            cell_w: 10,
+            cell_h: 16,
+            window_pad: 6,
+            slack_x: 0,
+            slack_y: 0,
+            pane_gap: 0,
+            rail_gap: 0,
+            inner_pad: 2,
+            top_chrome_px: 32,
+            pane_header_px: 0,
+            scrollbar_gutter_px: 0,
+            rail_side: RailSide::Off,
+            rail_px: 0,
+            rail_chip_cols: 0,
+            sidebar_px: 0,
+            chrome: ChromeGeom::CLASSIC,
+        };
+        runtime.set_geom(classic).unwrap();
+        let stride = 600;
+        let agree = |runtime: &MuxRuntime, stride: usize| {
+            let rects = runtime.tab_rects(stride);
+            assert_eq!(rects.len(), runtime.tab_count());
+            for (index, rect) in rects.iter().enumerate() {
+                let Some(rect) = rect else { continue };
+                assert!(rect.w > 0 && rect.h > 0, "tab {index}: {rect:?}");
+                for (x, y) in [
+                    (rect.x, rect.y),
+                    (rect.x + rect.w / 2, rect.y + rect.h / 2),
+                    (rect.right() - 1, rect.y + rect.h - 1),
+                ] {
+                    let hit = runtime.tab_strip_hit(x, y, stride, false);
+                    assert!(
+                        matches!(hit, Some(StripHit::Tab { index: i, .. }) | Some(StripHit::Pane { tab: i, .. }) if i == index),
+                        "tab {index} at ({x}, {y}) hit {hit:?}"
+                    );
+                }
+                assert_eq!(
+                    runtime.tab_strip_hit(rect.x, rect.y + rect.h, stride, false),
+                    None
+                );
+            }
+            rects
+        };
+        let rects = agree(&runtime, stride);
+        assert!(rects.iter().all(Option::is_some), "{rects:?}");
+        assert_eq!(rects[0].unwrap().x, effective_tab_end_pad(6, stride));
+
+        // Graphite: the painted bar's chips; tabs that do not fit have none.
+        runtime
+            .set_geom(HostGeom {
+                top_chrome_px: 40,
+                chrome: ChromeGeom {
+                    graphite: true,
+                    scale_milli: 1000,
+                },
+                ..classic
+            })
+            .unwrap();
+        let text = |label: &str| crate::graphite::TabText {
+            label: label.into(),
+            meta: None,
+            dot: graphite_core::Dot::Idle,
+            attention: false,
+            selected: false,
+        };
+        let labels = [
+            text("main"),
+            text("logs"),
+            text("a much longer third tab title"),
+        ];
+        let chrome = runtime.geom().chrome;
+        let bar = |width| crate::graphite::bar_layout(chrome, width, 0, "default", &labels, "");
+        assert_eq!(bar(stride).tabs.len(), 3);
+        // The widest bar that leaves the last tab out but still shows the first.
+        let narrow = (100..stride)
+            .rev()
+            .find(|&width| (1..3).contains(&bar(width).tabs.len()))
+            .expect("some width drops a tab");
+        for width in [stride, narrow] {
+            runtime.set_graphite_bar(Some(bar(width)));
+            let rects = agree(&runtime, width);
+            assert!(rects[0].is_some(), "{width}: {rects:?}");
+            assert_eq!(rects[2].is_none(), width == narrow, "{width}: {rects:?}");
+        }
+        runtime.set_graphite_bar(None);
+        assert!(runtime.tab_rects(stride).iter().all(Option::is_none));
     }
 
     #[test]

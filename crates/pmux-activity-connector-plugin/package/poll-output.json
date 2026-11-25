@@ -197,6 +197,31 @@
                     "string",
                     "null"
                   ]
+                },
+                "message_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "room_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "sender_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "count": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0
                 }
               },
               "additionalProperties": false

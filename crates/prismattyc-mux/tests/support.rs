@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::path::Path;
 use std::process::Command;
 
 use portable_pty::CommandBuilder;
@@ -20,9 +22,41 @@ pub fn clear_pty_env(command: &mut CommandBuilder) {
     command.env_remove("PMUX_PANE_LOG");
 }
 
+/// Whether a daemon accepts connections on `socket`.
+///
+/// pmuxd binds its socket a moment before it listens, so the socket file can
+/// exist while a client is still refused. Wait on this, not on the file.
+#[cfg(unix)]
+pub fn accepts_connections(socket: &Path) -> bool {
+    std::os::unix::net::UnixStream::connect(socket).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_bound_socket_that_is_not_listening_does_not_accept() {
+        use std::os::unix::net::{UnixDatagram, UnixListener};
+        let dir = std::env::temp_dir().join(format!("pt-ready-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("test dir");
+        let bound = dir.join("bound.sock");
+        assert!(!accepts_connections(&bound), "no socket file yet");
+        // A bound socket file with nothing listening for stream clients: the
+        // state between pmuxd's bind and its listen.
+        let _bound = UnixDatagram::bind(&bound).expect("bind");
+        assert!(bound.exists());
+        assert!(
+            !accepts_connections(&bound),
+            "a socket file alone must not count as a ready daemon"
+        );
+        let listening = dir.join("listening.sock");
+        let _listener = UnixListener::bind(&listening).expect("listen");
+        assert!(accepts_connections(&listening));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     use std::process::Stdio;
 
     #[test]

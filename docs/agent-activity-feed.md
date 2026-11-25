@@ -96,18 +96,35 @@ The normalized event has these fields:
 | `source` | `notify`, `hooks`, or `runtime`. |
 | `kind` | Closed activity enum in `activity.rs`. |
 | `process_ids` | Optional process-lineage metadata for correlating hook and runtime ownership. It is omitted when unavailable and is not included in webhook payloads. |
-| `detail` | Optional bounded display metadata: tool, relative file label, redacted command summary, duration, exit code, task/ticket key, and opaque operation correlation. |
+| `detail` | Optional bounded display metadata: tool, relative file label, redacted command summary, duration, exit code, task/ticket key, opaque operation correlation, and arrival ids (`message_id`, `room_id`, `sender_id`, `count`). |
 
 Identifiers permit ASCII letters, digits, hyphens, underscores, periods, and
 colons. Seat identities follow the existing mailbox identity format. The
 optional `detail` record accepts only the named display fields, with printable
 values capped at 256 bytes. The hook adapter caps commands at 200 characters,
-redacts common credential flag/value patterns, and reports paths relative to
+redacts common credential flag/value patterns and unlabeled credentials (URL
+userinfo, basic-auth values, well-known token shapes and private key blocks),
+and reports paths relative to
 the hook cwd (or just a basename when the path is outside it). It discards
 prompts, responses, file contents, terminal output, and mail bodies. Upstream
 session and tool correlation values are hashed before publication. This format
 is data minimization, not authenticated seat attribution: any client with
 same-user socket access can assert a seat.
+
+A stored letter records `kind: mail_received`, `source: notify`, `run_id: mail`,
+and `event_id` set to the letter id. `detail.sender_id` is the sender mailbox id,
+`detail.count` is the recipient's open depth, and `detail.operation_id` repeats
+the sender id for readers that only see the original detail fields. A room push
+hint uses `kind: room_message`, `run_id` and `detail.room_id` set to the room id,
+and `event_id` set to the message id. Neither event carries subject, body, or
+display text. The daemon records mail when the feed is enabled. A room producer
+publishes the same request on the activity socket. The published read page
+keeps its existing event kinds, so a room arrival is not rewritten as another
+kind. `pmux_activity_wait` reads these events through the arrivals contract and
+the existing `activity.read` grant. Its `timeout_ms` is at
+most 60000, and a plug-in call returns within 750 ms. A match already in the
+feed returns on the first read. The caller passes that result's `next_cursor`
+as `cursor` on the next wait, which then starts after the delivered record.
 
 `process_ids` is a bounded list of process IDs: hook adapters report their
 nearest non-shell owner, and runtime projection reports the foreground or
@@ -412,8 +429,8 @@ Before opening the contained viewer, install and approve its exact package on th
 ```sh
 target/debug/pmux --socket /tmp/activity-demo/feed.sock plugin install org.moonbase.activity-monitor --version 1.0.0
 target/debug/pmux --socket /tmp/activity-demo/feed.sock plugin enable org.moonbase.activity-monitor --version 1.0.0 --allow activity.read:local
-target/debug/pmux --socket /tmp/activity-demo/feed.sock plugin install org.moonbase.activity-connector --version 1.0.0
-target/debug/pmux --socket /tmp/activity-demo/feed.sock plugin enable org.moonbase.activity-connector --version 1.0.0 --allow activity.read:local
+target/debug/pmux --socket /tmp/activity-demo/feed.sock plugin install org.moonbase.activity-connector --version 1.1.0
+target/debug/pmux --socket /tmp/activity-demo/feed.sock plugin enable org.moonbase.activity-connector --version 1.1.0 --allow activity.read:local
 ```
 
 Installation leaves both packages disabled. The connector serves JSON query modes and explicit native MCP exports. Settings > Plug-ins offers the same version and permission review. Existing 0.3.54 collection settings do not silently approve either package after upgrade.
@@ -520,9 +537,14 @@ Each POST uses `Content-Type: application/json`,
 and the exact raw request body. Receivers should reject timestamps more than 300
 seconds from their clock, then compare signatures with a constant-time function.
 The bounded payload has `seat`, `state`, `reason`, `pane_id`, `space`, and
-`timestamp`. The reason is a safe generic activity label; no prompt text is
+`timestamp`. Mail and room arrivals add `event` (`mail` or `room`), `message_id`,
+`sender_id`, and, when known, `room_id` and `count`. Those fields are identifiers
+and a count. The payload never includes a subject, a body, or a display name.
+Other events omit the arrival fields, so an older status body stays the same.
+The reason is a safe generic activity label; no prompt text is
 included. Pane and Space are `null` when the activity record does not identify
-them.
+them. Mail and room deliveries are not collapsed: each message is its own signed
+POST. The webhook stays opt-in, and there is no unsigned receiver.
 
 Hook events take precedence in webhook status while their run is active, so
 pane-state inference does not replace a specific tool failure or stop event.

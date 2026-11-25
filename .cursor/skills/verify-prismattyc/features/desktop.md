@@ -244,7 +244,13 @@ console) and follows render-status `space_details.selected` to the row it needs.
 Every modal (palette, pickers, settings, Transparency, the update panel and
 dialog, the new-space prompt, context menus) paints over one shared scrim,
 `modal_scrim.rs`: it dims the frame and blurs it slightly, fading in unless
-`reduced_motion = true`. `python3 tests/native/modal-scrim-e2e.py --bins
+`reduced_motion = true` or the system asks for reduced motion, and dimming
+without the blur when the system asks for reduced transparency (read when the
+modal opens or one dialog replaces another, menus included;
+`--system reduce-motion|reduce-transparency|both` tells the drive
+which setting the operator turned on first and what to require, and on Linux
+`--handover-system MODE` changes it just before the update panel
+hands over to the restart confirmation, which must follow the new setting). `python3 tests/native/modal-scrim-e2e.py --bins
 "$verify_bins" --out "$verify_evidence/scrim" --screenshots` opens eight of
 them in a real window over a session showing text. It keeps `before.png`,
 one PNG per modal, `after.png`, and with `--screenshots` the whole screen at

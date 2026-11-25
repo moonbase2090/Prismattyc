@@ -582,6 +582,10 @@ mod tests {
             task: None,
             operation_id: Some("op-1".into()),
             model: None,
+            message_id: None,
+            room_id: None,
+            sender_id: None,
+            count: None,
         });
         let mut history_page = page(vec![record], None)?;
         history_page.current_sequence = 4;

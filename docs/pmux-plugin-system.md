@@ -81,14 +81,16 @@ The connector is another package using the same installation and capability
 contracts:
 
 ```sh
-pmux plugin install org.moonbase.activity-connector@1.0.1
+pmux plugin install org.moonbase.activity-connector@1.1.0
 pmux plugin enable org.moonbase.activity-connector --allow activity.read:local
 pmux plugin invoke org.moonbase.activity-connector:seats --json '{}'
+pmux plugin invoke org.moonbase.activity-connector:wait --json '{"seat":"worker-a","kinds":["mail_received","room_message"],"timeout_ms":750}'
+pmux plugin invoke org.moonbase.activity-connector:wait --json '{"seat":"worker-a","kinds":["mail_received"],"timeout_ms":0,"cursor":"a0:7"}'
 pmux-mcp --activity-only
 ```
 
 The last command preserves the held connector's intended client interface.
-It explicitly selects that package's four activity exports and advertises them
+It explicitly selects that package's activity exports and advertises them
 only while the package is enabled. A full MCP server retains its existing tools
 and accepts an explicit `--plugins org.moonbase.activity-connector` allowlist.
 Its default plug-in allowlist is empty. A package cannot replace a core tool
@@ -474,7 +476,7 @@ nor component replies can supply executable paths or argv. The adapter owns
 validation, SSH-safe argument construction, rate limits, streaming output
 limits, deadlines and child cleanup. A read grant does not sandbox an
 owner-selected helper or authorize creating one. No bot-provider credential or
-outbound Grok API capability is needed for the four activity tools.
+outbound model API capability is needed for the activity tools.
 
 ## Safe terminal views
 
@@ -495,6 +497,10 @@ whole frame before output:
 - Check tile rectangles, dimensions and exactly four bytes per RGBA pixel with
   checked multiplication. Guests supply no terminal image identifiers or
   encoded escape sequences.
+- Hold a frame to at most 256 tiles and 6 MiB in all, so a full-pane Graphite
+  view fits. Earlier hosts allowed 32 tiles and 2 MiB. A guest reads which
+  applies from the `frame-bytes` limit its host grants: a host that grants
+  2 MiB accepts 32 tiles (`tile_limit` in `pmux-plugin-api`).
 - Construct all terminal commands in trusted code. Invalid frames return
   `invalid_frame` before any bytes reach the terminal.
 

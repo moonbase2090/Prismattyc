@@ -85,6 +85,7 @@ mod sidebar_width;
 mod snapshot_client;
 #[cfg(any(target_os = "macos", test))]
 mod surface_damage;
+mod system_accessibility;
 mod terminal_switcher;
 #[cfg(test)]
 mod test_support;
@@ -93,7 +94,6 @@ mod ui_events;
 mod update_check;
 mod update_flow;
 mod update_meter;
-#[cfg(any(target_os = "macos", test))]
 mod update_notes;
 // cargo-mutants 27.1 does not recognize nested cfg(all(test, ...)).
 // Keep cfg(test) separate so mutation targets exclude the test fixture.
@@ -5226,6 +5226,7 @@ fn chrome_snapshot(host: &HostState, live: Option<a11y::LiveSnap>) -> a11y::Chro
         })
         .collect();
     let overlay = chrome_overlay(host);
+    let bounds = chrome_bounds(host, &overlay);
     let scroll = {
         let pane = host.mux.focused();
         let content = pane.content();
@@ -5272,7 +5273,105 @@ fn chrome_snapshot(host: &HostState, live: Option<a11y::LiveSnap>) -> a11y::Chro
             Vec::new()
         },
         arrange_current: host.mux.current_arrange().map(mux::ArrangeTarget::button),
+        bounds,
     }
+}
+
+/// Where the chrome tree's nodes are painted, read from the layouts the
+/// pointer hit tests use, so the accessibility frame of a control is the
+/// area a click on it lands in.
+fn chrome_bounds(host: &HostState, overlay: &a11y::OverlayKind) -> a11y::ChromeBounds {
+    let size = host.window.inner_size();
+    let (width, height) = (size.width as usize, size.height as usize);
+    let rect = |(x, y, w, h): (usize, usize, usize, usize)| graphite::Rect::new(x, y, w, h);
+    let mut bounds = a11y::ChromeBounds {
+        window: Some(graphite::Rect::new(0, 0, width, height)),
+        ..Default::default()
+    };
+    if sidebar_mode(host) {
+        // The painted rows: list rows when expanded, the icon strip when
+        // collapsed. Both are what the sidebar hit test reads.
+        let row_rect = |want: &dyn Fn(&sidebar::TreeRow, &sidebar::SpaceNode) -> bool| {
+            host.sidebar_rows.iter().find_map(|(slot, row)| {
+                let space = host.sidebar_tree.spaces.get(row.space)?;
+                want(row, space).then_some(*slot)
+            })
+        };
+        bounds.tabs = (0..host.mux.tab_count())
+            .map(|i| {
+                row_rect(&|row, space| {
+                    row.kind == sidebar::RowKind::Tab && space.current && row.tab == Some(i)
+                })
+            })
+            .collect();
+        bounds.rail = host
+            .space_rail
+            .names
+            .iter()
+            .map(|name| {
+                row_rect(&|row, space| row.kind == sidebar::RowKind::Space && space.name == *name)
+            })
+            .collect();
+    } else {
+        if show_tab_strip(host) {
+            bounds.tabs = host.mux.tab_rects(width);
+        }
+        if let Some(layout) = host.space_rail.layout(
+            host.mux.geom(),
+            width,
+            height,
+            host.spacing.space_rail_pane_names,
+        ) {
+            let n = host.space_rail.names.len();
+            bounds.rail = (0..n).map(|i| layout.chip_bounds(i, n).map(rect)).collect();
+            bounds.remote = (0..host.space_rail.destinations.len())
+                .map(|i| layout.dest_bounds(i, n).map(rect))
+                .collect();
+        }
+    }
+    if pane_header_shown(host) {
+        bounds.arrange = host.sidebar_arrange.iter().copied().map(Some).collect();
+    }
+    let focused = host.mux.focused_id();
+    bounds.document = host
+        .mux
+        .panes_and_rects()
+        .find(|(pane, _, _)| *pane == focused)
+        .map(|(_, _, cells)| rect(host.mux.geom().pane_slot_px(cells)));
+    // Overlays whose rows are the painted palette rows, in the same order.
+    let palette_rows = match overlay {
+        a11y::OverlayKind::RestorePrompt { .. } => true,
+        a11y::OverlayKind::Palette { .. } => {
+            host.settings.is_none() && host.space_panel.is_none() && host.palette.is_some()
+        }
+        _ => false,
+    };
+    if let Some(layout) = host.palette_layout.as_ref().filter(|_| palette_rows) {
+        bounds.overlay = Some(graphite::Rect::new(
+            layout.panel_x,
+            layout.panel_y,
+            layout.panel_w,
+            layout.panel_h,
+        ));
+        let count = layout
+            .rows
+            .iter()
+            .map(|row| row.global + 1)
+            .max()
+            .unwrap_or(0);
+        bounds.overlay_rows = (0..count)
+            .map(|i| {
+                let row = layout.rows.iter().find(|row| row.global == i)?;
+                Some(graphite::Rect::new(
+                    layout.panel_x,
+                    row.y,
+                    layout.panel_w,
+                    layout.geom.row_pitch_px,
+                ))
+            })
+            .collect();
+    }
+    bounds
 }
 
 /// Sidebar layout. Graphite and classic both honor `layout = "sidebar"`.
@@ -6178,7 +6277,17 @@ fn open_modal(host: &HostState) -> Option<&'static str> {
 /// Paint the modal scrim when a modal is open, and keep frames coming while
 /// it fades in.
 fn paint_modal_scrim(host: &mut HostState, buffer: &mut [u32], width: usize, height: usize) {
-    let open = open_modal(host).is_some();
+    let modal = open_modal(host).map(|name| modal_scrim::Dialog {
+        name,
+        // Menus are made one at a time, each with its own number; the other
+        // dialogs open from closed, so their kind says which one it is.
+        opening: host.context_menu.as_ref().map_or(0, |menu| menu.opening),
+    });
+    let open = modal.is_some();
+    if host.modal_scrim.opens_with(modal) {
+        host.modal_scrim
+            .follow_system(modal, system_accessibility::read());
+    }
     let Some(level) = host
         .modal_scrim
         .level(open, Instant::now(), host.reduced_motion)

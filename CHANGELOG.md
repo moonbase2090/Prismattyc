@@ -5,16 +5,54 @@
 ### Added
 
 - The settings **Plug-ins** page says when an update installed newer official plug-ins that wait for a daemon restart, names each one with the version it changes from and to, and offers **Restart now**, which opens **Update and restart**. `pmux plugin pending` lists the same.
+- The activity monitor draws in Graphite mode wherever the terminal shows pixels: proportional type, state chips in the header and on flagged rows, keycaps in the footer, and the selected row as a list row with its state icon. Terminals without pixels, and `p` with pixels turned off, get the same layout in cells, with chips and keycaps drawn as cells. The pane keeps the text under the pixels, so copying, search and saved pane text still read the monitor. When a frame does not fit the plug-in frame budget, the whole frame is drawn in cells instead of a mix of the two. Graphite text uses fonts bundled with the plug-in, whose licenses ship in the package. The monitor opens in cells and switches to Graphite on its next frame, once those fonts are loaded, so it never opens blank. Graphite text uses compact copies of Inter and JetBrains Mono that cover Latin, punctuation, arrows, symbols, box drawing and shapes; other characters, such as Greek, Cyrillic or emoji, draw as a missing-glyph box in Graphite mode and as text in cells. The activity monitor package is now 1.4.0.
+- Plug-in frames can hold up to 256 tiles and 6 MiB, up from 32 tiles and 2 MiB, so a full-pane Graphite view fits at the default macOS cell size. The view interface is unchanged. A plug-in reads which limit applies from the frame budget its host grants, so a new plug-in on an older core keeps to 32 tiles and 2 MiB; the activity monitor then draws in cells.
+- The activity feed records a metadata-only mail event when a letter is stored, and it accepts a metadata-only room event on the existing publish path. The signed webhook delivers each of those events immediately. The activity connector adds `pmux_activity_wait`, which returns as soon as a matching event is already queued and otherwise waits at most one bounded timeout. The read grant still covers these events. The published activity read contract is unchanged, and the wait uses an arrivals contract in the same package. A wait scans past the first retained page, so a matching arrival later in the feed is returned. A later wait passes the cursor from the previous result and does not return that match again. Letter and room text stay out of the feed.
+
+## [0.3.76] - 2026-11-23
+
+### Fixed
+
+- On Windows, uninstalling after **Update and restart** no longer leaves an empty `bin` folder in the install location. Stopping the daemon now closes each session's console, so its console host exits too, and the daemon no longer keeps the folder it was started from in use. A new daemon started from the install folder opens its first session in your home folder.
+
+## [0.3.75] - 2026-11-23
+
+### Changed
+
+- Agent panes resume the same conversation after the mux restarts instead of starting a new one.
+
+### Fixed
+
+- Credential prefixes used to hide access tokens in command summaries are stored as separate strings. A release build no longer contains one token-shaped value made by placing those prefixes next to each other. The recognized token formats are unchanged.
+
+## [0.3.74] - 2026-11-22
+
+### Changed
+
+- The update-available notice no longer shows the whole changelog. On macOS the alert shows the version, up to three one-line highlights and how many more changes there are, and **Release Notes** opens the full notes in the browser and returns to the alert. On Linux and Windows the notice names the version and its top change, and **Restart to update** has a **Release notes** link to the same page.
+- The activity feed and monitor now also hide credentials that are not behind a label in a command summary: the password in a URL such as `https://user:password@host`, the `user:password` value of `curl -u` or `--user`, the value after `Basic` or `Digest`, well-known access token formats, long random keys (including a signature inside a query or header value), and pasted private key blocks. Ordinary commands, paths, commit hashes and `user@host` addresses are shown as typed.
+
+### Fixed
+
+- Screen readers and accessibility clients on macOS can find and press the app's own controls. Tabs, Spaces (in the sidebar, expanded or collapsed), the Arrange buttons, the focused pane, the restore prompt and the command palette now report the rectangle they are drawn in; before, every one of them was reported as offscreen.
+- Updated `url` to 2.5.9 to address an advisory about a stack overflow on nested `blob:` URLs.
+
+## [0.3.73] - 2026-11-21
+
+### Added
+
+- Experimental native terminal grids and uploaded images for direct local PTY applications on supported Linux and Apple Silicon macOS hosts, enabled with `--experimental-rich`. Native content supplies rendering and text readers; release, resize or lease expiry restores the retained ANSI terminal. The feature remains off by default.
 
 ### Changed
 
 - The settings **Plug-ins** page shows each plug-in's installed version and state (enabled, disabled, update available, failed, incompatible), has one row per permission in plain words with the manifest's required ones pre-selected, and updates a plug-in in one step while keeping its granted permissions (a plug-in you turned off stays off). New command-palette commands check for plug-in updates and update and enable plug-ins. `pmux plugin update [ID]` does the same from the command line, `pmux plugin enable` without `--allow` grants what the manifest requires, and a refused permission scope now lists the valid ones.
 - `pmux update` (and `prismattyc update`) is now the one update command: it installs the newest release, includes its official monitor launcher on Linux and Windows, restarts what can restart without stopping a session, and prints one receipt that names anything left waiting and what to do next. `--no-restart` installs without restarting. `pmux update --json` keeps its install-only report; add `--restart` or `--no-restart` for the complete update with a JSON receipt. On Linux and Windows, clicking the update notice opens the **Restart to update** review, and **Update and restart** in the app also includes the monitor launcher.
-- Every dialog, picker and modal menu (the command palette, settings, the theme picker, Transparency, Update and restart, confirmations and the rest) now dims the app behind it and blurs it slightly, so the dialog stands out. The backdrop fades in; with `reduced_motion = true` it appears at once. On a very large window, or where the blur would slow the frame, it only dims. Clicking outside a dialog works as before.
+- Every dialog, picker and modal menu (the command palette, settings, the theme picker, Transparency, Update and restart, confirmations and the rest) now dims the app behind it and blurs it slightly, so the dialog stands out. The backdrop fades in; with `reduced_motion = true`, or the system's Reduce motion (macOS), Animation effects off (Windows) or GNOME animations off, it appears at once, and with the system's Reduce transparency (macOS), Transparency effects off (Windows) or GNOME's high-contrast theme it dims without blurring. On a very large window, or where the blur would slow the frame, it only dims. Clicking outside a dialog works as before.
 - **Update and restart** shows each step of the restart (saving or stopping the sessions, stopping the old daemon, starting the new one, checking the restored sessions, reconciling the official plug-ins, the MCP adapter and the relaunch), and the relaunched app continues the same progress: it opens the windows, then shows **Update finished** with each step's outcome until you close it. A failed update shows the same list with the step that failed. A session started while the dialog is open now fails on **Checking the sessions** by name. `pmux restart` prints the same steps on stderr, and `pmux restart --progress` reports them as progress lines; `pmux update` also prints its verify and install steps.
 
 ### Fixed
 
+- `pmux update` no longer says Updated and exits 0 when official plug-in reconciliation failed. The receipt names each failure and the command exits non-zero.
 - An open app window with nothing to draw stopped renewing its registration, so `pmux restart` and **Update and restart all components** skipped it as if no window were open. Windows now renew it while idle, and `pmux restart` reports a window from an older release that stopped answering as `idle` instead of leaving it out.
 - **Restart components** no longer fails with "expected" the newest release's version when the installed Prismattyc is newer than that release; it restarts on the installed version.
 - On Linux and Windows, a key held while a window gains focus is no longer applied twice. One Escape pressed as the app reopened after an update closed both the update dialog and the result notice under it.
@@ -25,7 +63,6 @@
 ### Added
 
 - **Update and restart** shows the update's progress in the Restart to update dialog: bytes downloaded of the whole release, each component as it is verified, the install step, and each component as it restarts, with what happens to your sessions. If the update fails, the dialog keeps the failed step and its error and offers **Check again** or **Close**. `pmux update --progress` reports the same stages on stderr for other tools.
-- Experimental native terminal grids and uploaded images for direct local PTY applications on supported Linux and Apple Silicon macOS hosts, enabled with `--experimental-rich`. Native content supplies rendering and text readers; release, resize or lease expiry restores the retained ANSI terminal. The feature remains off by default.
 
 ### Changed
 

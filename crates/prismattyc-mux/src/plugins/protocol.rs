@@ -14,6 +14,9 @@ pub enum Request {
     },
     List,
     StartupReconciliation,
+    /// Official plug-ins that the installed daemon would install or update when it
+    /// next starts.
+    RestartPending,
     Endpoints,
     Inspect {
         id: String,
@@ -123,6 +126,12 @@ pub enum Reply {
     StartupReconciliation {
         changed: Vec<String>,
         failures: Vec<String>,
+    },
+    RestartPending {
+        plugins: Vec<super::PendingPlugin>,
+        /// Why the installed daemon could not be checked, when it could not.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        unchecked: Option<String>,
     },
     Inspection {
         state: Status,

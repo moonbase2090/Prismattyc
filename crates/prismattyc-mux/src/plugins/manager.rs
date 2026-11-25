@@ -471,6 +471,33 @@ impl Manager {
             }
             Request::Admin { retry_id, action } => self.admin(retry_id, action),
             Request::StartupReconciliation => unreachable!("handled by the plug-in service"),
+            Request::RestartPending => {
+                let selections = {
+                    let state = self.state.lock().unwrap();
+                    DEFAULT_PLUGINS
+                        .iter()
+                        .filter_map(|id| {
+                            let selection = match state.journal.selections.get(*id)? {
+                                Desired::Disabled { .. } => super::restart::Selection::Disabled,
+                                Desired::Enabled { selected, .. } => {
+                                    super::restart::Selection::Enabled(selected.version.clone())
+                                }
+                            };
+                            Some(((*id).to_owned(), selection))
+                        })
+                        .collect()
+                };
+                Ok(match installed_bundles() {
+                    Ok(installed) => Reply::RestartPending {
+                        plugins: super::restart::pending(&installed, &selections),
+                        unchecked: None,
+                    },
+                    Err(error) => Reply::RestartPending {
+                        plugins: Vec::new(),
+                        unchecked: Some(format!("{error:#}")),
+                    },
+                })
+            }
             Request::Invoke {
                 id,
                 contribution,
@@ -889,6 +916,12 @@ fn inspection(store: &Store, current: Status, version: Option<&str>) -> Result<R
     })
 }
 
+/// The official plug-ins the installed `pmuxd` bundles. A development build with no
+/// installed release compares against itself.
+fn installed_bundles() -> Result<super::Bundled> {
+    super::restart::bundled_by(crate::release_update::installed_binary("pmuxd").as_deref())
+}
+
 /// Verified read-only metadata. This path cannot acquire the journal writer,
 /// create storage, fetch packages, change permissions or start a worker.
 pub fn inspect_offline(socket: &Path, request: Request) -> Result<Reply> {
@@ -899,9 +932,18 @@ pub fn inspect_offline(socket: &Path, request: Request) -> Result<Reply> {
                 | Request::List
                 | Request::Inspect { .. }
                 | Request::Endpoints
+                | Request::RestartPending
         ),
         "plug-in mutations and refresh require a running daemon"
     );
+    if matches!(request, Request::RestartPending) {
+        // No daemon is running, so the next one reconciles the installed bundles as
+        // it starts: nothing waits for a restart.
+        return Ok(Reply::RestartPending {
+            plugins: Vec::new(),
+            unchecked: None,
+        });
+    }
     if matches!(request, Request::Discover { .. }) {
         let catalog = Catalog::bundled()?;
         Store::new(Store::default_root()?)?.check_catalog(&catalog.list())?;

@@ -785,6 +785,16 @@ pub fn version_label(executable: &Path) -> Result<String> {
     executable_probe(executable, "--version", 4096, "version")
 }
 
+/// `pmuxd --bundled-plugins`: the official plug-in versions that binary bundles.
+pub fn bundled_plugins_label(executable: &Path) -> Result<String> {
+    executable_probe(
+        executable,
+        "--bundled-plugins",
+        16 * 1024,
+        "bundled plug-ins",
+    )
+}
+
 fn executable_probe(executable: &Path, argument: &str, cap: usize, label: &str) -> Result<String> {
     let mut command = Command::new(executable);
     #[cfg(unix)]

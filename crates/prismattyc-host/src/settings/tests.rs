@@ -1300,7 +1300,7 @@ fn the_settings_panel_and_its_label_column_keep_one_width_in_every_section() {
 }
 
 #[test]
-fn the_label_column_fits_the_longest_built_in_label_and_cuts_longer_ones() {
+fn the_label_column_fits_the_longest_built_in_label() {
     let widest = Panel::widest_label();
     let labels = controls::catalog()
         .into_iter()
@@ -1317,14 +1317,97 @@ fn the_label_column_fits_the_longest_built_in_label_and_cuts_longer_ones() {
         .iter()
         .all(|label| crate::raster::text_cells(label) <= cells));
     // At a wide window the column is exactly that label's width in every section.
-    let geometry = section_geometry(
-        || crate::raster::PaletteLayoutMode::FixedPanel {
-            widest_label: widest,
-        },
-        200,
-        50,
-    );
+    let geometry = section_geometry(Panel::layout_mode, 200, 50);
     assert!(geometry.iter().all(|each| each.3 == cells));
+}
+
+/// The rightmost column with ink in the given row's band, in pixels.
+fn ink_right(pixels: &[u32], width: usize, top: usize, height: usize, background: &[u32]) -> usize {
+    (top..top + height)
+        .flat_map(|y| (0..width).map(move |x| (x, y)))
+        .filter(|&(x, y)| pixels[y * width + x] != background[y * width + x])
+        .map(|(x, _)| x)
+        .max()
+        .unwrap_or(0)
+}
+
+#[test]
+fn a_label_longer_than_the_column_is_cut_at_its_edge_in_both_painters() {
+    use crate::raster::{FontMetrics, OverlaySurface, PaletteFrame, PaletteSection};
+    let font = FontMetrics::load_with(15.0, None, &[]).unwrap();
+    let theme = crate::theme::shipped_default();
+    let widest = Panel::widest_label();
+    let long = format!("org.example.{}", "very-long-plug-in-name-".repeat(4));
+    assert!(crate::raster::text_cells(&long) > 2 * crate::raster::text_cells(widest));
+    let (width, height) = (1400, 820);
+    for graphite in [false, true] {
+        // The right edge of the second row's label, with no description beside it.
+        let paint = |label: &str| {
+            let rows = vec![
+                PaletteRow::plain("Plug-ins".into(), String::new(), String::new()),
+                PaletteRow::plain(label.to_owned(), String::new(), String::new()),
+            ];
+            let sections = [PaletteSection {
+                header: "SETTINGS — Plug-ins",
+                subtitle: "",
+                rows: &rows,
+            }];
+            let frame = PaletteFrame {
+                layout_mode: Panel::layout_mode(),
+                query: None,
+                query_focused: false,
+                chips: None,
+                sections: &sections,
+                selected: 0,
+                scroll: 0,
+                detail: None,
+                footer: "",
+            };
+            let paint_rows = |rows: &[PaletteRow]| {
+                let sections = [PaletteSection {
+                    rows,
+                    ..sections[0]
+                }];
+                let mut pixels =
+                    vec![crate::raster::pack_argb(255, theme.default_bg); width * height];
+                let layout = crate::paint_palette_overlay(
+                    &font,
+                    &theme,
+                    crate::mux::ChromeGeom {
+                        graphite,
+                        scale_milli: 1000,
+                    },
+                    [0x62, 0xa8, 0xff],
+                    &PaletteFrame {
+                        sections: &sections,
+                        ..frame
+                    },
+                    OverlaySurface::default(),
+                    &mut pixels,
+                    width,
+                    height,
+                )
+                .expect("panel paints");
+                (pixels, layout)
+            };
+            let (pixels, layout) = paint_rows(&rows);
+            let mut blank = rows.clone();
+            blank[1].name.clear();
+            let (background, _) = paint_rows(&blank);
+            let row = layout.rows.iter().find(|row| row.global == 1).unwrap();
+            ink_right(&pixels, width, row.y, layout.geom.row_pitch_px, &background)
+        };
+        let fits = paint(widest);
+        let cut = paint(&long);
+        let chrome = if graphite { "Graphite" } else { "cell" };
+        // The cut label ends at the column edge: no further right than the widest
+        // built-in label plus one ellipsis.
+        assert!(cut > fits / 2, "{chrome}: the long label painted nothing");
+        assert!(
+            cut <= fits + font.cell_w,
+            "{chrome}: a long label ran to x {cut}, past the column that ends near x {fits}"
+        );
+    }
 }
 
 /// Paint three sections, before and after the fixed panel, through the host's palette

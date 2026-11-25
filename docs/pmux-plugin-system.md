@@ -299,7 +299,7 @@ Keep these versions separate:
 | --- | --- |
 | Manifest version | Package metadata grammar, initially 1. |
 | Plug-in API | Component lifecycle/event/reply contract, now `pmux:plugin@2.0.0`. |
-| Capability version | Each typed host contract: activity read, frame view and tool call. Frame view is at 2.0.0. |
+| Capability version | Each typed host contract: activity read, frame view, theme colors and tool call. Frame view is at 2.0.0; theme colors is at 1.0.0. |
 | Activity schema | Existing metadata record schema 1. |
 | Query JSON schema | Connector/CLI result contract, initially the held connector's schema 1. |
 | Core protocol and package release | Existing control protocol and independently versioned app/plug-in releases. Neither implies component compatibility. |
@@ -322,6 +322,17 @@ itself as incompatible, and a catalog keeps it only as a retained older version.
 An enabled plug-in whose selected package is incompatible moves to the newest
 bundled version that this core can run, keeping its grants. When the bundle has no
 such version it stays put and is reported as incompatible.
+
+`pmux:theme/colors@1.0.0` gives a view the colors of the host it is shown
+in: whether the theme is dark, its default text and background colors, and its
+16 ANSI colors. The registered host shares the focused window's theme beside
+its registration whenever it changes, and `current` returns the latest one, or
+none when no live host has shared one. A view that reads it while drawing
+follows a theme change on its next frame. Adding the interface changed no
+existing type, so components built without it keep working; a package that
+requires it is incompatible with cores that do not offer it. The activity
+monitor requires it and follows the host's theme unless
+`pmux plugin run --theme dark|light` picks a palette.
 
 The initial `start` context contains the selected exact versions, admitted
 contributions, resource limits and feature flags. `ready` confirms that context

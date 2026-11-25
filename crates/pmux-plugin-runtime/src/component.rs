@@ -10,6 +10,7 @@ use pmux_plugin_api::host::pmux::{
     activity::{arrivals, manage, read},
     plugin::host,
     plugin::lifecycle,
+    theme::colors,
     view::frame,
 };
 use pmux_plugin_api::host::{Plugin, PluginPre};
@@ -38,6 +39,10 @@ pub trait ActivityProvider: Send {
     ) -> Result<domain::ActivityPage, read::Error>;
     fn remove_stopped(&mut self, endpoint: u64, session_id: u64)
         -> Result<manage::Removal, String>;
+    /// The colors of the host the view is shown in, when it has shared them.
+    fn theme(&mut self) -> Option<colors::Theme> {
+        None
+    }
 }
 
 pub struct Runtime {
@@ -316,6 +321,17 @@ impl manage::Host for HostState {
         }
         self.calls += 1;
         self.provider.remove_stopped(endpoint, session_id)
+    }
+}
+impl colors::Host for HostState {
+    fn current(&mut self) -> Option<colors::Theme> {
+        if !matches!(self.phase, Phase::Active)
+            || self.calls >= pmux_plugin_api::MAX_HOST_IMPORTS_PER_CALL
+        {
+            return None;
+        }
+        self.calls += 1;
+        self.provider.theme()
     }
 }
 impl pmux_plugin_api::host::pmux::tool::call::Host for HostState {}

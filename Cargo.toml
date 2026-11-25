@@ -38,11 +38,15 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 unicode-width = "0.2"
 vte = "0.15"
-lunatui-core = { git = "https://github.com/moonbase2090/lunatui", rev = "25f3ecf8dceb52a546770cddeae396ce1a345c44" }
-lunatui-image = { git = "https://github.com/moonbase2090/lunatui", rev = "25f3ecf8dceb52a546770cddeae396ce1a345c44" }
-lunatui-term = { git = "https://github.com/moonbase2090/lunatui", rev = "25f3ecf8dceb52a546770cddeae396ce1a345c44" }
-lunatui-theme = { git = "https://github.com/moonbase2090/lunatui", rev = "25f3ecf8dceb52a546770cddeae396ce1a345c44" }
-lunatui-widgets = { git = "https://github.com/moonbase2090/lunatui", rev = "25f3ecf8dceb52a546770cddeae396ce1a345c44", default-features = false, features = ["pixel-sparkline", "canvas"] }
+lunatui-badge = { git = "https://github.com/moonbase2090/lunatui", rev = "558607b54e7b55e033d9af7de57e4dd8f174e1a5" }
+lunatui-core = { git = "https://github.com/moonbase2090/lunatui", rev = "558607b54e7b55e033d9af7de57e4dd8f174e1a5" }
+lunatui-image = { git = "https://github.com/moonbase2090/lunatui", rev = "558607b54e7b55e033d9af7de57e4dd8f174e1a5" }
+lunatui-runtime = { git = "https://github.com/moonbase2090/lunatui", rev = "558607b54e7b55e033d9af7de57e4dd8f174e1a5" }
+lunatui-term = { git = "https://github.com/moonbase2090/lunatui", rev = "558607b54e7b55e033d9af7de57e4dd8f174e1a5" }
+lunatui-text = { git = "https://github.com/moonbase2090/lunatui", rev = "558607b54e7b55e033d9af7de57e4dd8f174e1a5" }
+lunatui-theme = { git = "https://github.com/moonbase2090/lunatui", rev = "558607b54e7b55e033d9af7de57e4dd8f174e1a5" }
+lunatui-widgets = { git = "https://github.com/moonbase2090/lunatui", rev = "558607b54e7b55e033d9af7de57e4dd8f174e1a5", default-features = false, features = ["pixel-sparkline", "canvas"] }
+lunatui-ui-tokens = { git = "https://github.com/moonbase2090/lunatui", rev = "558607b54e7b55e033d9af7de57e4dd8f174e1a5" }
 
 [profile.mutants]
 inherits = "test"

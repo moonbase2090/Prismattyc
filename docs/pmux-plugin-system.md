@@ -469,6 +469,10 @@ whole frame before output:
 - Check tile rectangles, dimensions and exactly four bytes per RGBA pixel with
   checked multiplication. Guests supply no terminal image identifiers or
   encoded escape sequences.
+- Hold a frame to at most 256 tiles and 6 MiB in all, so a full-pane Graphite
+  view fits. Earlier hosts allowed 32 tiles and 2 MiB. A guest reads which
+  applies from the `frame-bytes` limit its host grants: a host that grants
+  2 MiB accepts 32 tiles (`tile_limit` in `pmux-plugin-api`).
 - Construct all terminal commands in trusted code. Invalid frames return
   `invalid_frame` before any bytes reach the terminal.
 

@@ -241,7 +241,13 @@ impl View {
             self.frame_bytes,
         )?;
         Ok(lifecycle::Reply::Frame(lifecycle::ViewFrame {
-            next_tick_ms: if self.monitor.animating(self.clock.monotonic_ms) {
+            // Come back at once when Graphite waits on its fonts: they are
+            // parsed in the next call.
+            next_tick_ms: if self.monitor.animating(self.clock.monotonic_ms)
+                || self
+                    .monitor
+                    .fonts_pending(self.reference.viewport.pixels.is_some())
+            {
                 33
             } else {
                 POLL_INTERVAL_MS

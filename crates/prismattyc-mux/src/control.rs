@@ -46,7 +46,12 @@ const DEFAULT_EVENT_CAPACITY: usize = 256;
 const MAX_EVENT_CAPACITY: usize = 4096;
 const MAX_EVENT_BATCH: usize = 256;
 pub(crate) const MAX_REQUEST_BYTES: usize = 1024 * 1024;
-pub(crate) const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+/// Holds a plug-in frame at its largest: base64 of `MAX_FRAME_BYTES` plus the envelope.
+pub(crate) const MAX_RESPONSE_BYTES: usize = 9 * 1024 * 1024;
+const _: () = assert!(
+    pmux_plugin_api::MAX_FRAME_BYTES.div_ceil(3) * 4 + 64 * 1024 <= MAX_RESPONSE_BYTES,
+    "a plug-in frame must fit one control response"
+);
 /// Pane-state recovery is streamed in bounded response frames.
 const PANE_STATE_CHUNK_BYTES: usize = 128 * 1024;
 pub const MAX_PANE_STATE_BYTES: usize = 256 * 1024 * 1024;

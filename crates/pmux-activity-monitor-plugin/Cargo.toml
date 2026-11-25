@@ -16,8 +16,12 @@ pmux-plugin-api = { path = "../pmux-plugin-api", features = ["guest"] }
 prismattyc-core = { path = "../prismattyc-core" }
 serde.workspace = true
 serde_json = "1.0"
+lunatui-badge.workspace = true
 lunatui-core.workspace = true
 lunatui-image.workspace = true
+lunatui-runtime.workspace = true
 lunatui-term.workspace = true
+lunatui-text.workspace = true
 lunatui-theme.workspace = true
-lunatui-widgets.workspace = true
+lunatui-ui-tokens.workspace = true
+lunatui-widgets = { workspace = true, features = ["graphite-text", "widget-list"] }

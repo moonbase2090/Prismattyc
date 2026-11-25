@@ -1320,7 +1320,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1453,9 +1453,9 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "fontdue"
-version = "0.9.4"
+version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7894823fa221401399e2598f8b63f81ac77ff5c63248b7656779bff1632d7d3d"
+checksum = "e796cb6894e6418daacea84b28dd4f98d3b32c74d5bb452ba1ecfbf5ad8e84ca"
 dependencies = [
  "hashbrown 0.15.5",
  "ttf-parser",
@@ -2372,25 +2372,40 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
+name = "lunatui-badge"
+version = "0.1.41"
+source = "git+https://github.com/moonbase2090/lunatui?rev=558607b54e7b55e033d9af7de57e4dd8f174e1a5#558607b54e7b55e033d9af7de57e4dd8f174e1a5"
+dependencies = [
+ "lunatui-core",
+ "lunatui-ui-tokens",
+ "lunatui-widgets",
+]
+
+[[package]]
 name = "lunatui-core"
-version = "0.1.29"
-source = "git+https://github.com/moonbase2090/lunatui?rev=25f3ecf8dceb52a546770cddeae396ce1a345c44#25f3ecf8dceb52a546770cddeae396ce1a345c44"
+version = "0.1.41"
+source = "git+https://github.com/moonbase2090/lunatui?rev=558607b54e7b55e033d9af7de57e4dd8f174e1a5#558607b54e7b55e033d9af7de57e4dd8f174e1a5"
 dependencies = [
  "unicode-segmentation",
 ]
 
 [[package]]
+name = "lunatui-fonts"
+version = "0.1.41"
+source = "git+https://github.com/moonbase2090/lunatui?rev=558607b54e7b55e033d9af7de57e4dd8f174e1a5#558607b54e7b55e033d9af7de57e4dd8f174e1a5"
+
+[[package]]
 name = "lunatui-image"
-version = "0.1.29"
-source = "git+https://github.com/moonbase2090/lunatui?rev=25f3ecf8dceb52a546770cddeae396ce1a345c44#25f3ecf8dceb52a546770cddeae396ce1a345c44"
+version = "0.1.41"
+source = "git+https://github.com/moonbase2090/lunatui?rev=558607b54e7b55e033d9af7de57e4dd8f174e1a5#558607b54e7b55e033d9af7de57e4dd8f174e1a5"
 dependencies = [
  "lunatui-core",
 ]
 
 [[package]]
 name = "lunatui-layout"
-version = "0.1.29"
-source = "git+https://github.com/moonbase2090/lunatui?rev=25f3ecf8dceb52a546770cddeae396ce1a345c44#25f3ecf8dceb52a546770cddeae396ce1a345c44"
+version = "0.1.41"
+source = "git+https://github.com/moonbase2090/lunatui?rev=558607b54e7b55e033d9af7de57e4dd8f174e1a5#558607b54e7b55e033d9af7de57e4dd8f174e1a5"
 dependencies = [
  "lunatui-core",
  "num-bigint",
@@ -2398,9 +2413,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "lunatui-runtime"
+version = "0.1.41"
+source = "git+https://github.com/moonbase2090/lunatui?rev=558607b54e7b55e033d9af7de57e4dd8f174e1a5#558607b54e7b55e033d9af7de57e4dd8f174e1a5"
+dependencies = [
+ "lunatui-core",
+ "lunatui-image",
+ "lunatui-term",
+]
+
+[[package]]
 name = "lunatui-term"
-version = "0.1.29"
-source = "git+https://github.com/moonbase2090/lunatui?rev=25f3ecf8dceb52a546770cddeae396ce1a345c44#25f3ecf8dceb52a546770cddeae396ce1a345c44"
+version = "0.1.41"
+source = "git+https://github.com/moonbase2090/lunatui?rev=558607b54e7b55e033d9af7de57e4dd8f174e1a5#558607b54e7b55e033d9af7de57e4dd8f174e1a5"
 dependencies = [
  "crossterm",
  "libc",
@@ -2412,8 +2437,8 @@ dependencies = [
 
 [[package]]
 name = "lunatui-text"
-version = "0.1.29"
-source = "git+https://github.com/moonbase2090/lunatui?rev=25f3ecf8dceb52a546770cddeae396ce1a345c44#25f3ecf8dceb52a546770cddeae396ce1a345c44"
+version = "0.1.41"
+source = "git+https://github.com/moonbase2090/lunatui?rev=558607b54e7b55e033d9af7de57e4dd8f174e1a5#558607b54e7b55e033d9af7de57e4dd8f174e1a5"
 dependencies = [
  "lunatui-core",
  "unicode-segmentation",
@@ -2421,8 +2446,8 @@ dependencies = [
 
 [[package]]
 name = "lunatui-theme"
-version = "0.1.29"
-source = "git+https://github.com/moonbase2090/lunatui?rev=25f3ecf8dceb52a546770cddeae396ce1a345c44#25f3ecf8dceb52a546770cddeae396ce1a345c44"
+version = "0.1.41"
+source = "git+https://github.com/moonbase2090/lunatui?rev=558607b54e7b55e033d9af7de57e4dd8f174e1a5#558607b54e7b55e033d9af7de57e4dd8f174e1a5"
 dependencies = [
  "lunatui-core",
  "serde",
@@ -2431,13 +2456,26 @@ dependencies = [
 ]
 
 [[package]]
-name = "lunatui-widgets"
-version = "0.1.29"
-source = "git+https://github.com/moonbase2090/lunatui?rev=25f3ecf8dceb52a546770cddeae396ce1a345c44#25f3ecf8dceb52a546770cddeae396ce1a345c44"
+name = "lunatui-ui-tokens"
+version = "0.1.41"
+source = "git+https://github.com/moonbase2090/lunatui?rev=558607b54e7b55e033d9af7de57e4dd8f174e1a5#558607b54e7b55e033d9af7de57e4dd8f174e1a5"
 dependencies = [
  "lunatui-core",
+ "lunatui-theme",
+ "lunatui-widgets",
+]
+
+[[package]]
+name = "lunatui-widgets"
+version = "0.1.41"
+source = "git+https://github.com/moonbase2090/lunatui?rev=558607b54e7b55e033d9af7de57e4dd8f174e1a5#558607b54e7b55e033d9af7de57e4dd8f174e1a5"
+dependencies = [
+ "fontdue",
+ "lunatui-core",
+ "lunatui-fonts",
  "lunatui-image",
  "lunatui-layout",
+ "lunatui-runtime",
  "lunatui-text",
  "lunatui-theme",
  "tiny-skia 0.12.0",
@@ -3114,7 +3152,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3299,10 +3337,14 @@ name = "pmux-activity-monitor-plugin"
 version = "0.3.76"
 dependencies = [
  "anyhow",
+ "lunatui-badge",
  "lunatui-core",
  "lunatui-image",
+ "lunatui-runtime",
  "lunatui-term",
+ "lunatui-text",
  "lunatui-theme",
+ "lunatui-ui-tokens",
  "lunatui-widgets",
  "pmux-plugin-api",
  "prismattyc-core",
@@ -4033,7 +4075,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4046,7 +4088,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4451,7 +4493,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4634,7 +4676,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.6",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4988,7 +5030,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5842,7 +5884,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6121,15 +6163,6 @@ name = "windows-sys"
 version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
-dependencies = [
- "windows-targets 0.52.6",
-]
-
-[[package]]
-name = "windows-sys"
-version = "0.59.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
 dependencies = [
  "windows-targets 0.52.6",
 ]

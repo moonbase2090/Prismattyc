@@ -16,7 +16,7 @@ The check is a TLA+ model of one mailbox. TLC explores orders of the steps. Read
 Apply this skill when a change touches any of these:
 
 - `Store::send`, `Store::broadcast`, `Store::claim`, `Store::commit`, `Store::release`, or `set_state_or_delete` in `crates/prismattyc-mux/src/mailbox/store.rs`
-- `mail_hello`, `mail_agent`, `mail_send`, `mail_claim`, `mail_commit`, `mail_release`, or `mail_broadcast` in `crates/prismattyc-mux/src/control.rs`
+- `mail_hello`, `mail_agent`, `mail_send`, `mail_claim`, `mail_commit`, `mail_release`, `mail_broadcast`, `create_session`, or `destroy_session` in `crates/prismattyc-mux/src/control.rs`
 - the mailbox open in `crates/prismattyc-mux/src/bin/pmuxd.rs`
 - `open_and_held_letters_survive_pmuxd_restart` in `crates/prismattyc-mux/tests/mail_restart.rs`
 
@@ -42,7 +42,7 @@ That line means two things. The code contract found no error at the bounds below
 
 A code-contract failure names one of `NoLetterLost`, `CommittedStaysGone`, `CommitOnlyByRecipient`, `SendStoresOne`, `RestartKeepsMailbox`, `ClaimHoldsOpen`, `BroadcastOneEach`, or `ReleaseReturnsToOpen`.
 
-Replay that trace on the functions above, one model step for one transaction. `Hello` is `mail_hello`. `Send` is `Store::send`. `Broadcast` is `mail_broadcast`. `Claim` is `Store::claim`. `Commit` is `Store::commit`. `Release` is `Store::release`. `Restart` is a new process opening the same database: `client_agents` is empty and letter rows are unchanged.
+Replay that trace on the functions above, one model step for one transaction. `Hello` is `mail_hello`. `Send` is `Store::send`. `CreateSession` is `create_session` recording that agent id. `DestroySession` is `destroy_session` dropping it. `Broadcast` is `mail_broadcast`. `Claim` is `Store::claim`. `Commit` is `Store::commit`. `Release` is `Store::release`. `Restart` is a new process opening the same database: `client_agents` is empty and letter rows are unchanged. That restart step does not add or remove session agent ids.
 
 Call it a bug when every step can happen in those functions and the named property fails. State the harm in one sentence and keep the property. Call it a modeling error when a step cannot happen. Fix the action so it matches the function, then run the check again.
 
@@ -64,7 +64,7 @@ Each property is one sentence. The harm is the sentence under it.
 - `SendStoresOne`: one send stores one letter. Harm: one send delivers two copies.
 - `RestartKeepsMailbox`: a restart leaves every letter in the state it had. Harm: held mail is dropped or put back on restart.
 - `ClaimHoldsOpen`: a claim marks that agent's open letters held. Harm: the letter stays open and can be claimed again as new.
-- `BroadcastOneEach`: a broadcast stores one open letter for each other seated agent, in one step. Harm: one of those agents never gets the letter.
+- `BroadcastOneEach`: a broadcast stores one open letter for each other live session agent, in one step. Harm: one of those sessions never gets the letter.
 - `ReleaseReturnsToOpen`: a release sets that held letter back to open. Harm: the letter is deleted, or some other letter moves.
 
 ## Known wordings
@@ -77,7 +77,7 @@ These three are checked against the same steps and fail. The store comments, `op
 
 ## Bounds
 
-Three agents (`a`, `b`, `d`), three connections, two letters. Commit and release act on one id, which is one id inside `set_state_or_delete`. A multi-id call is that transaction repeated for each parsed id. Broadcast's recipients are the other agents that currently have a connection. The reachable graph for the code contract is 252779 distinct states and depth 13.
+Three agents (`a`, `b`, `d`), three connections, two letters. Commit and release act on one id, which is one id inside `set_state_or_delete`. A multi-id call is that transaction repeated for each parsed id. `sessions` is the set of live session agent ids. `mail_broadcast` targets that set minus the sender's agent. A `MailHello` binding is a separate map and does not add a target. The code-contract run found 2987009 distinct states.
 
 Left out: mailbox rename and aliases, the in-memory lab mailbox (it mirrors claim, commit, and release and has no restart), `MailWait`, the doorbell, depth peek, letter text, and a crash inside a SQLite transaction. The store mutex makes the transactions the interleaving. An unknown id or a letter this agent does not hold changes zero rows, so the model omits that call.
 

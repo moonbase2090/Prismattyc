@@ -11,7 +11,7 @@
 (*   Store::release, set_state_or_delete                                   *)
 (*     crates/prismattyc-mux/src/mailbox/store.rs                          *)
 (*   mail_hello, mail_agent, mail_send, mail_claim, mail_commit,           *)
-(*   mail_release, mail_broadcast                                          *)
+(*   mail_release, mail_broadcast, create_session, destroy_session         *)
 (*     crates/prismattyc-mux/src/control.rs                                *)
 (*   open_and_held_letters_survive_pmuxd_restart                           *)
 (*     crates/prismattyc-mux/tests/mail_restart.rs                         *)
@@ -34,9 +34,10 @@ VARIABLES
   claimer,      \* letter -> client | none; ghost, the store does not keep it
   presented,    \* letters a claim has already returned
   redelivered,  \* a later claim returned a letter that was already presented
-  actor         \* the step that produced this state
+  actor,        \* the step that produced this state
+  sessions      \* agent ids of live sessions; mail_broadcast reads this, not Hello
 
-vars == <<phase, recipient, created, seated, claimer, presented, redelivered, actor>>
+vars == <<phase, recipient, created, seated, claimer, presented, redelivered, actor, sessions>>
 
 Defects == {
   "none",
@@ -70,7 +71,7 @@ Unused == {id \in LetterIds : phase[id] = "unused"}
 Hello(c, a) ==
   /\ seated' = [seated EXCEPT ![c] = a]
   /\ actor' = Actor("hello", c, Dummy)
-  /\ UNCHANGED <<phase, recipient, created, claimer, presented, redelivered>>
+  /\ UNCHANGED <<phase, recipient, created, claimer, presented, redelivered, sessions>>
 
 \* Store::send inserts one open row. send_duplicates inserts a second row
 \* for the same recipient when another unused id exists.
@@ -85,14 +86,28 @@ Send(c, a) ==
         /\ recipient' = [id \in LetterIds |-> IF id \in fresh THEN a ELSE recipient[id]]
         /\ created' = [id \in LetterIds |-> IF id \in fresh THEN TRUE ELSE created[id]]
         /\ actor' = Actor("send", c, id1)
-        /\ UNCHANGED <<seated, claimer, presented, redelivered>>
+        /\ UNCHANGED <<seated, claimer, presented, redelivered, sessions>>
 
-\* mail_broadcast walks other live session agents and inserts one open row
-\* each, in one transaction. A seated client stands for that agent's session.
-\* Two clients on one agent are one recipient. broadcast_drops_rest inserts
-\* only one of those recipients.
+\* create_session records one agent id on the new session. The id is unique
+\* across sessions. destroy_session drops that id. Neither step is MailHello.
+CreateSession(a) ==
+  /\ a \notin sessions
+  /\ sessions' = sessions \cup {a}
+  /\ actor' = Actor("create-session", none, Dummy)
+  /\ UNCHANGED <<phase, recipient, created, seated, claimer, presented, redelivered>>
+
+DestroySession(a) ==
+  /\ a \in sessions
+  /\ sessions' = sessions \ {a}
+  /\ actor' = Actor("destroy-session", none, Dummy)
+  /\ UNCHANGED <<phase, recipient, created, seated, claimer, presented, redelivered>>
+
+\* mail_broadcast walks domain.sessions(), skips a session with no agent id,
+\* skips the sender's agent id, and inserts one open row per remaining id.
+\* A MailHello binding does not add a target. broadcast_drops_rest inserts
+\* only one of those session ids.
 OtherAgents(c) ==
-  {seated[d] : d \in {d2 \in Clients : seated[d2] # none /\ seated[d2] # seated[c]}}
+  sessions \ {seated[c]}
 
 Broadcast(c) ==
   /\ seated[c] # none
@@ -113,7 +128,7 @@ Broadcast(c) ==
                    ELSE recipient[id]]
               /\ created' = [id \in LetterIds |-> IF id \in fresh THEN TRUE ELSE created[id]]
               /\ actor' = Actor("broadcast", c, id1)
-              /\ UNCHANGED <<seated, claimer, presented, redelivered>>
+              /\ UNCHANGED <<seated, claimer, presented, redelivered, sessions>>
 
 Mine(c) ==
   {id \in LetterIds :
@@ -135,7 +150,7 @@ Claim(c) ==
   /\ redelivered' = (redelivered \/ ((Mine(c) \cap presented) # {}))
   /\ presented' = presented \cup Mine(c)
   /\ actor' = Actor("claim", c, Some(Mine(c)))
-  /\ UNCHANGED <<recipient, created, seated>>
+  /\ UNCHANGED <<recipient, created, seated, sessions>>
 
 CommitCandidates(c) ==
   {id \in LetterIds :
@@ -154,7 +169,7 @@ Commit(c) ==
   /\ LET id == Some(CommitCandidates(c))
      IN /\ phase' = [phase EXCEPT ![id] = "committed"]
         /\ actor' = Actor("commit", c, id)
-        /\ UNCHANGED <<recipient, created, seated, claimer, presented, redelivered>>
+        /\ UNCHANGED <<recipient, created, seated, claimer, presented, redelivered, sessions>>
 
 ReleaseCandidates(c) ==
   {id \in LetterIds :
@@ -169,7 +184,7 @@ Release(c) ==
           IF Defect = "release_deletes" THEN "lost" ELSE "open"]
         /\ claimer' = [claimer EXCEPT ![id] = none]
         /\ actor' = Actor("release", c, id)
-        /\ UNCHANGED <<recipient, created, seated, presented, redelivered>>
+        /\ UNCHANGED <<recipient, created, seated, presented, redelivered, sessions>>
 
 \* Process exit and a new process opening the same database. Bindings live
 \* in memory, so they come back empty. Rows are unchanged.
@@ -181,7 +196,7 @@ Restart ==
   /\ phase' = [id \in LetterIds |->
        IF Defect = "restart_drops_held" /\ phase[id] = "held" THEN "lost" ELSE phase[id]]
   /\ actor' = Actor("restart", none, Dummy)
-  /\ UNCHANGED <<recipient, created, claimer, presented, redelivered>>
+  /\ UNCHANGED <<recipient, created, claimer, presented, redelivered, sessions>>
 
 Init ==
   /\ phase = [id \in LetterIds |-> "unused"]
@@ -192,6 +207,7 @@ Init ==
   /\ presented = {}
   /\ redelivered = FALSE
   /\ actor = Actor("init", none, Dummy)
+  /\ sessions = {}
 
 Next ==
   \/ \E c \in Clients, a \in Agents : Hello(c, a)
@@ -200,6 +216,8 @@ Next ==
   \/ \E c \in Clients : Commit(c)
   \/ \E c \in Clients : Release(c)
   \/ \E c \in Clients : Broadcast(c)
+  \/ \E a \in Agents : CreateSession(a)
+  \/ \E a \in Agents : DestroySession(a)
   \/ Restart
 
 Spec == Init /\ [][Next]_vars
@@ -249,7 +267,7 @@ ClaimHoldsOpen ==
         => phase'[id] = "held"
   ]_vars
 
-\* Broadcast stores one new open letter for every other seated agent.
+\* Broadcast stores one new open letter for every other live session agent.
 BroadcastOneEach ==
   [][
     actor'.kind = "broadcast" =>

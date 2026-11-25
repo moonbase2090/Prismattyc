@@ -8,6 +8,10 @@
 - Plug-in frames can hold up to 256 tiles and 6 MiB, up from 32 tiles and 2 MiB, so a full-pane Graphite view fits at the default macOS cell size. The view interface is unchanged. A plug-in reads which limit applies from the frame budget its host grants, so a new plug-in on an older core keeps to 32 tiles and 2 MiB; the activity monitor then draws in cells.
 - The activity feed records a metadata-only mail event when a letter is stored, and it accepts a metadata-only room event on the existing publish path. The signed webhook delivers each of those events immediately. The activity connector adds `pmux_activity_wait`, which returns as soon as a matching event is already queued and otherwise waits at most one bounded timeout. The read grant still covers these events. The published activity read contract is unchanged, and the wait uses an arrivals contract in the same package. A wait scans past the first retained page, so a matching arrival later in the feed is returned. A later wait passes the cursor from the previous result and does not return that match again. Letter and room text stay out of the feed.
 
+### Changed
+
+- The activity monitor follows the Prismattyc theme. Its background, text, dim text and dividers come from the theme's own background and text colors, the selected row and focus mark from its blue, and working, waiting and failed seats from its green, yellow and red, in cells and in Graphite mode. A theme change shows on the monitor's next frame, within a quarter of a second, without reopening it. `pmux plugin run --theme dark|light` still picks a fixed palette, and outside Prismattyc the monitor keeps choosing its dark or light palette from the terminal background. Plug-ins get the host's theme through the new `pmux:theme/colors` 1.0.0 interface.
+
 ## [0.3.76] - 2026-11-23
 
 ### Fixed

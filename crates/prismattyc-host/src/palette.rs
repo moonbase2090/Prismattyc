@@ -752,6 +752,9 @@ pub struct ContextMenu {
     pub selected: usize,
     /// A destructive item that needs a second Enter.
     pub confirm: Option<usize>,
+    /// Which opening this is: every menu made gets its own number, so a
+    /// menu replacing another of the same kind is still a new dialog.
+    pub opening: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -765,10 +768,12 @@ pub enum ContextMenuVerdict {
 impl ContextMenu {
     #[must_use]
     pub fn new(kind: ContextMenuKind) -> Self {
+        static OPENINGS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {
             kind,
             selected: 0,
             confirm: None,
+            opening: OPENINGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         }
     }
 
@@ -1131,6 +1136,14 @@ fn folded(text: &str) -> Vec<char> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_context_menu_made_is_a_new_opening() {
+        let first = ContextMenu::new(ContextMenuKind::Pane);
+        let second = ContextMenu::new(ContextMenuKind::Pane);
+        assert_ne!(first.opening, second.opening);
+        assert_ne!(first.opening, 0, "0 is for dialogs that are not menus");
+    }
 
     fn empty_mods() -> ModifiersState {
         ModifiersState::empty()

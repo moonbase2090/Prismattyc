@@ -17,6 +17,198 @@ pub(super) fn verify(host: &mut HostState) {
     verify_close_target_tab(host);
     verify_find_and_theme_modals(host);
     verify_find_alt_screen_routing(host);
+    verify_accessibility_bounds(host);
+}
+
+fn center(rect: graphite::Rect) -> (usize, usize) {
+    (rect.x + rect.w / 2, rect.y + rect.h / 2)
+}
+
+/// Each chrome node's accessibility frame is where a pointer hit finds that
+/// same control, so a client that locates or clicks by frame lands on it.
+fn verify_accessibility_bounds(host: &mut HostState) {
+    host.mux
+        .new_tab("/bin/sh", &["-c".into(), "sleep 60".into()])
+        .unwrap();
+    host.space_rail.names = vec!["alpha".into(), "beta".into()];
+    App::paint(host).unwrap();
+    let size = host.window.inner_size();
+    let (width, height) = (size.width as usize, size.height as usize);
+    let snap = chrome_snapshot(host, None);
+    let bounds = &snap.bounds;
+    assert_eq!(
+        bounds.window,
+        Some(graphite::Rect::new(0, 0, width, height))
+    );
+
+    assert!(show_tab_strip(host), "two tabs show the strip");
+    assert_eq!(bounds.tabs.len(), host.mux.tab_count());
+    for (index, rect) in bounds.tabs.iter().enumerate() {
+        let (x, y) = center(rect.expect("every tab fits a wide window"));
+        let hit = host.mux.tab_strip_hit(x, y, width, false);
+        assert!(
+            matches!(hit, Some(mux::StripHit::Tab { index: i, .. }) | Some(mux::StripHit::Pane { tab: i, .. }) if i == index),
+            "tab {index} frame center hit {hit:?}"
+        );
+    }
+
+    let rail = host
+        .space_rail
+        .layout(
+            host.mux.geom(),
+            width,
+            height,
+            host.spacing.space_rail_pane_names,
+        )
+        .expect("the contract docks the rail");
+    assert_eq!(bounds.rail.len(), 2);
+    for (index, rect) in bounds.rail.iter().enumerate() {
+        let (x, y) = center(rect.expect("both chips are painted"));
+        assert!(
+            matches!(rail.hit(x, y, 2), Some(space_rail::RailHit::Chip { index: i, .. }) if i == index),
+            "chip {index} frame center hit {:?}",
+            rail.hit(x, y, 2)
+        );
+    }
+
+    if pane_header_shown(host) {
+        assert_eq!(bounds.arrange.len(), 3);
+        for (index, rect) in bounds.arrange.iter().enumerate() {
+            let (x, y) = center(rect.expect("the header paints Arrange"));
+            assert_eq!(arrange_hit_at(host, x, y), Some(index), "Arrange {index}");
+        }
+    }
+
+    let focused = host.mux.focused_id();
+    let (_, _, cells) = host
+        .mux
+        .panes_and_rects()
+        .find(|(pane, _, _)| *pane == focused)
+        .unwrap();
+    let (x, y, w, h) = host.mux.geom().pane_slot_px(cells);
+    assert_eq!(bounds.document, Some(graphite::Rect::new(x, y, w, h)));
+    assert!(w > 0 && h > 0 && x + w <= width && y + h <= height);
+
+    open_command_palette(host, keybind::Action::CommandPalette);
+    App::paint(host).unwrap();
+    let snap = chrome_snapshot(host, None);
+    let layout = host.palette_layout.as_ref().unwrap();
+    let panel = snap.bounds.overlay.expect("the palette panel has a frame");
+    let painted: Vec<usize> = layout.rows.iter().map(|row| row.global).collect();
+    assert!(!painted.is_empty());
+    for index in painted {
+        let rect = snap.bounds.overlay_rows[index].expect("painted rows have frames");
+        let (x, y) = center(rect);
+        assert!(panel.contains(x, y));
+        assert_eq!(
+            palette_hit(layout, x, y),
+            Some(index),
+            "palette row {index}"
+        );
+    }
+    let update = a11y::tree_update(&snap);
+    let framed = |id: u64| {
+        update
+            .nodes
+            .iter()
+            .find(|(node, _)| node.0 == id)
+            .and_then(|(_, node)| node.bounds())
+            .is_some()
+    };
+    assert!(framed(a11y::WINDOW_ID));
+    assert!(framed(a11y::TAB_BASE));
+    assert!(framed(a11y::OVERLAY_ROW_BASE));
+    host.palette = None;
+    host.palette_layout = None;
+    App::paint(host).unwrap();
+    verify_sidebar_accessibility_bounds(host);
+}
+
+/// In the sidebar layout, expanded or collapsed to its icon strip, every
+/// painted tab and Space row gives its node a frame, and the frame's center
+/// is where the sidebar hit test finds that same tab or Space.
+fn verify_sidebar_accessibility_bounds(host: &mut HostState) {
+    let layout = host.spacing.layout;
+    let collapsed = host.spacing.sidebar_collapsed;
+    let current = host.space_rail.current.replace("alpha".into());
+    host.spacing.layout = config::LayoutMode::Sidebar;
+    for strip in [false, true] {
+        host.spacing.sidebar_collapsed = strip;
+        App::paint(host).unwrap();
+        let snap = chrome_snapshot(host, None);
+        let mode = if strip { "collapsed" } else { "expanded" };
+        let row_at = |rect: graphite::Rect| {
+            let (x, y) = center(rect);
+            match sidebar_hit_at(host, x, y) {
+                Some(graphite::SidebarHit::Row(index)) => {
+                    host.sidebar_rows.get(index).map(|(_, row)| row.clone())
+                }
+                _ => None,
+            }
+        };
+        let painted = |kind: sidebar::RowKind| {
+            host.sidebar_rows
+                .iter()
+                .filter(|(slot, row)| {
+                    slot.w > 0
+                        && slot.h > 0
+                        && row.kind == kind
+                        && (kind == sidebar::RowKind::Space
+                            || host.sidebar_tree.spaces[row.space].current)
+                })
+                .count()
+        };
+        let tabs: Vec<_> = snap
+            .bounds
+            .tabs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| r.map(|r| (i, r)))
+            .collect();
+        assert!(
+            !tabs.is_empty() && tabs.len() == painted(sidebar::RowKind::Tab),
+            "{mode} sidebar: {} painted tab rows in the current Space, {} tab frames",
+            painted(sidebar::RowKind::Tab),
+            tabs.len()
+        );
+        for (index, rect) in tabs {
+            let row = row_at(rect);
+            assert!(
+                row.as_ref()
+                    .is_some_and(|row| row.kind == sidebar::RowKind::Tab
+                        && row.tab == Some(index)
+                        && host.sidebar_tree.spaces[row.space].current),
+                "{mode} sidebar: tab {index} frame center hit {row:?}"
+            );
+        }
+        let spaces: Vec<_> = snap
+            .bounds
+            .rail
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| r.map(|r| (i, r)))
+            .collect();
+        assert!(
+            !spaces.is_empty() && spaces.len() == painted(sidebar::RowKind::Space),
+            "{mode} sidebar: {} painted Space rows, {} Space frames",
+            painted(sidebar::RowKind::Space),
+            spaces.len()
+        );
+        for (index, rect) in spaces {
+            let row = row_at(rect);
+            assert!(
+                row.as_ref()
+                    .is_some_and(|row| row.kind == sidebar::RowKind::Space
+                        && host.sidebar_tree.spaces[row.space].name
+                            == host.space_rail.names[index]),
+                "{mode} sidebar: Space {index} frame center hit {row:?}"
+            );
+        }
+    }
+    host.spacing.layout = layout;
+    host.spacing.sidebar_collapsed = collapsed;
+    host.space_rail.current = current;
+    App::paint(host).unwrap();
 }
 
 fn verify_find_and_theme_modals(host: &mut HostState) {

@@ -13,15 +13,15 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool, Sel};
 use objc2::{define_class, msg_send, sel, DefinedClass, Encode, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSControlStateValueOff,
-    NSControlStateValueOn, NSEventModifierFlags, NSMenu, NSMenuItem, NSModalResponseOK,
-    NSResponder, NSSavePanel, NSView,
+    NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSApplication,
+    NSControlStateValueOff, NSControlStateValueOn, NSEventModifierFlags, NSMenu, NSMenuItem,
+    NSModalResponseOK, NSResponder, NSSavePanel, NSView,
 };
 use objc2_foundation::{NSObjectProtocol, NSString};
 use winit::event_loop::EventLoopProxy;
 
 use crate::keybind::{Action, Chord, KeyMap, KeySpec};
-use crate::update_notes::prepare_update_release_notes;
+use crate::update_notes::{release_notes_url, update_notice_text};
 use crate::UserAction;
 use winit::keyboard::NamedKey;
 
@@ -652,16 +652,19 @@ pub fn prompt_update(version: &str, release_notes: &str) -> bool {
     alert.setMessageText(&NSString::from_str(&format!(
         "Prismattyc {version} is available"
     )));
-    let notes = prepare_update_release_notes(version, release_notes);
-    let notes = if notes.is_empty() {
-        "No release notes were published.".to_string()
-    } else {
-        notes
-    };
-    alert.setInformativeText(&NSString::from_str(&notes));
+    alert.setInformativeText(&NSString::from_str(&update_notice_text(release_notes)));
     alert.addButtonWithTitle(&NSString::from_str("Review Update"));
+    alert.addButtonWithTitle(&NSString::from_str("Release Notes"));
     alert.addButtonWithTitle(&NSString::from_str("Later"));
-    alert.runModal() == NSAlertFirstButtonReturn
+    // Release Notes opens the full notes in the browser and keeps the
+    // choice open, so the update can still be reviewed afterwards.
+    loop {
+        let choice = alert.runModal();
+        if choice != NSAlertSecondButtonReturn {
+            return choice == NSAlertFirstButtonReturn;
+        }
+        let _ = crate::open_url(&release_notes_url(version));
+    }
 }
 
 pub fn confirm_rollback() -> bool {

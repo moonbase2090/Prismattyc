@@ -426,6 +426,14 @@ impl Workspace {
     }
 
     pub fn restore(&self, socket: &Path) -> Result<ControlPlane> {
+        let (mut plane, commands) = self.restore_plane(socket)?;
+        for (pane_id, command) in commands {
+            plane.resume_workspace_command(pane_id, &command)?;
+        }
+        Ok(plane)
+    }
+
+    pub fn restore_plane(&self, socket: &Path) -> Result<(ControlPlane, Vec<(u64, String)>)> {
         let domain = Domain::from_workspace(self)?;
         let bounds = self
             .sessions
@@ -444,7 +452,7 @@ impl Workspace {
                     .flat_map(move |w| w.panes.iter().map(move |p| (s, p)))
             })
             .collect();
-        let mut plane = ControlPlane::new_live(
+        let plane = ControlPlane::new_live(
             domain,
             bounds,
             None,
@@ -454,15 +462,32 @@ impl Workspace {
         // Replay into the original interactive shell. Its launch spec stays
         // unchanged across checkpoints, and the shell remains after the job
         // exits. Replacing argv with -c would permanently bake in old jobs.
+        let mut commands = Vec::new();
         for (session, pane) in panes {
             let resume = self.resume_commands
                 || policy == crate::SpaceOpenRunsCommands::All
                 || (policy == crate::SpaceOpenRunsCommands::Agents && session.agent_id.is_some());
             if let Some(command) = pane.resume_command.as_ref().filter(|_| resume) {
-                plane.resume_workspace_command(pane.id, command)?;
+                commands.push((pane.id, command.clone()));
             }
         }
-        Ok(plane)
+        Ok((plane, commands))
+    }
+
+    pub fn resume_panes(
+        plane: &std::sync::Arc<std::sync::Mutex<ControlPlane>>,
+        commands: &[(u64, String)],
+    ) -> Result<()> {
+        if commands.is_empty() {
+            return Ok(());
+        }
+        let mut guard = plane
+            .lock()
+            .map_err(|_| anyhow::anyhow!("control plane mutex poisoned"))?;
+        for (pane_id, command) in commands {
+            guard.resume_workspace_command(*pane_id, command)?;
+        }
+        Ok(())
     }
 
     fn refresh_process_metadata(&mut self) -> Result<()> {
@@ -471,7 +496,8 @@ impl Workspace {
             .space_open_runs_commands
             .unwrap_or_default();
         for session in &mut self.sessions {
-            let resume = policy == SpaceOpenRunsCommands::All
+            let resume = self.resume_commands
+                || policy == SpaceOpenRunsCommands::All
                 || (policy == SpaceOpenRunsCommands::Agents && session.agent_id.is_some());
             for pane in session.windows.iter_mut().flat_map(|w| &mut w.panes) {
                 let Some(pid) = pane.observed_pid else {
@@ -480,10 +506,18 @@ impl Workspace {
                 if let Some(cwd) = crate::procinfo::cwd_of(pid).filter(|p| p.is_absolute()) {
                     pane.spawn.cwd = Some(cwd);
                 }
-                // Explicit launch commands already have a complete argv.
-                // Only an interactive shell needs its foreground job resumed.
-                if resume && crate::procinfo::interactive_shell(&pane.spawn) {
-                    pane.resume_command = crate::procinfo::live_foreground_command(pid);
+                if resume {
+                    if crate::procinfo::interactive_shell(&pane.spawn) {
+                        pane.resume_command = crate::procinfo::live_foreground_command(pid);
+                    } else if crate::procinfo::spawn_needs_resume_rewrite(&pane.spawn, pid) {
+                        pane.resume_command =
+                            crate::procinfo::replay_spawn_command(&pane.spawn, Some(pid));
+                        let mut shell = crate::platform::default_shell_command();
+                        if !shell.is_empty() {
+                            pane.spawn.program = shell.remove(0);
+                            pane.spawn.argv = shell;
+                        }
+                    }
                 }
                 if let Ok(path) = std::env::var("PATH") {
                     pane.spawn.env.entry("PATH".into()).or_insert(path);

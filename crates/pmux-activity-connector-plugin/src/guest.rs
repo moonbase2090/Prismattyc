@@ -9,7 +9,10 @@ use pmux_plugin_api::{
     },
     API_VERSION,
 };
-use prismattyc_core::activity::{ActivityCursor, ActivityPage};
+use prismattyc_core::{
+    activity::{ActivityCursor, ActivityKind, ActivityPage},
+    AgentId,
+};
 use std::cell::Cell;
 
 struct NativeMetadata;
@@ -28,6 +31,33 @@ impl Metadata for NativeMetadata {
             sequence: cursor.sequence,
         });
         activity::poll(endpoint, cursor.as_ref(), limit)
+    }
+
+    fn wait(
+        &mut self,
+        endpoint: u64,
+        seat: &AgentId,
+        kinds: &[ActivityKind],
+        after: Option<&ActivityCursor>,
+        timeout_ms: u64,
+    ) -> Result<ActivityPage, read::Error> {
+        let names = kinds
+            .iter()
+            .map(|kind| {
+                serde_json::to_value(kind)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>();
+        let timeout =
+            u32::try_from(timeout_ms.min(prismattyc_core::activity::PLUGIN_ACTIVITY_WAIT_MS))
+                .unwrap_or(u32::MAX);
+        let cursor = after.map(|cursor| read::Cursor {
+            epoch: cursor.epoch.clone(),
+            sequence: cursor.sequence,
+        });
+        activity::wait(endpoint, seat.as_str(), &names, timeout, cursor.as_ref())
     }
 }
 

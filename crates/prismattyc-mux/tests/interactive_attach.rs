@@ -72,7 +72,7 @@ fn start_server_shell(socket: &Path, script: &str) -> ServerGuard {
     let start = Instant::now();
     let budget = test_time_budget(Duration::from_secs(2));
     while start.elapsed() < budget {
-        if socket.exists() {
+        if support::accepts_connections(socket) {
             return guard;
         }
         std::thread::sleep(Duration::from_millis(20));

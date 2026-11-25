@@ -3,10 +3,14 @@
 //! Layout and drawing. Everything here is a pure function of the model, the UI state,
 //! the pane size and the clock, so every tier can be rendered and checked in tests.
 
+use lunatui_badge::{Badge, Kbd, Look, Marker};
+use lunatui_core::Size;
 use lunatui_core::{Attrs, Color, Rect, Style};
 use lunatui_term::{Event, KeyCode, KeyEvent, KeyKind, MouseButton, MouseEvent, MouseKind, Scroll};
+use lunatui_text::source::VecSource;
 use lunatui_theme::{Theme, Token, Variant};
-use lunatui_widgets::RenderCx;
+use lunatui_ui_tokens::Tone;
+use lunatui_widgets::{List, RenderCx, Widget};
 use pmux_plugin_api::guest::pmux::activity::manage;
 use pmux_plugin_api::monitor::GraphStyle;
 use prismattyc_core::activity::{ActivityKind, ActivityRecord};
@@ -839,6 +843,8 @@ struct Painter<'a, 'b> {
     palette: &'a Palette,
     pixels: bool,
     graph_style: GraphStyle,
+    /// Graphite type size as a share of the cell height.
+    size: f32,
 }
 
 fn fg(color: Color) -> Style {
@@ -866,6 +872,165 @@ fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
+/// In Graphite mode, redraws `text` over `area` in proportional type. Cell mode keeps the cells.
+fn graphite_text(
+    cx: &mut RenderCx<'_>,
+    area: Rect,
+    text: &str,
+    style: Style,
+    size: f32,
+    right: bool,
+) {
+    use lunatui_widgets::graphite::Face;
+    let face = if style.attrs.bold() {
+        Face::SemiBold
+    } else {
+        Face::Regular
+    };
+    cx.replace_with_pixels(area, |px| {
+        let height = f32::from(px.cell_size().height_px());
+        let size = height * size;
+        let room = px.width() as f32;
+        // The UI font has no diamond, square or heavy cross: draw those as shapes.
+        if let Some(shape) = text.chars().next().filter(|_| text.chars().count() == 1) {
+            let (x, y, half) = (
+                px.cell_size().width_px() as f32 / 2.0,
+                height / 2.0,
+                size * 0.32,
+            );
+            match shape {
+                '◆' => {
+                    px.polygon(
+                        &[(x, y - half), (x + half, y), (x, y + half), (x - half, y)],
+                        style.fg,
+                    );
+                    return;
+                }
+                '■' => {
+                    let edge = (half * 1.4).round() as usize;
+                    let rect = lunatui_widgets::graphite::Rect {
+                        x: (x - half * 0.7) as usize,
+                        y: (y - half * 0.7) as usize,
+                        w: edge,
+                        h: edge,
+                    };
+                    px.fill_rect(rect, edge as f32 * 0.18, style.fg);
+                    return;
+                }
+                '✕' => {
+                    let arm = half * 0.7;
+                    let width = (size * 0.12).max(1.0);
+                    px.line((x - arm, y - arm), (x + arm, y + arm), width, style.fg);
+                    px.line((x - arm, y + arm), (x + arm, y - arm), width, style.fg);
+                    return;
+                }
+                _ => {}
+            }
+        }
+        let shown = px.fit(face, size, text, room).into_owned();
+        let left = if right {
+            room - px.measure(face, size, &shown)
+        } else {
+            0.0
+        };
+        let baseline = px.line_metrics(face, size).map_or(height * 0.7, |line| {
+            (height + line.ascent - line.descent) / 2.0
+        });
+        px.text(face, size, (left, baseline), &shown, style.fg);
+    });
+}
+
+/// A one-pixel rule through the middle of `area`, in Graphite mode.
+fn graphite_rule(cx: &mut RenderCx<'_>, area: Rect, style: Style, vertical: bool) {
+    use lunatui_widgets::graphite::Rect as PixelRect;
+    cx.replace_with_pixels(area, |px| {
+        let width = px.width() as usize;
+        let height = px.height() as usize;
+        let rect = if vertical {
+            PixelRect {
+                x: width / 2,
+                y: 0,
+                w: 1,
+                h: height,
+            }
+        } else {
+            PixelRect {
+                x: 0,
+                y: height / 2,
+                w: width,
+                h: 1,
+            }
+        };
+        px.fill_rect_with_opacity(rect, 0.0, style.fg, 0.8);
+    });
+}
+
+fn state_tone(state: SeatState) -> Tone {
+    match state {
+        SeatState::Working => Tone::Success,
+        SeatState::Waiting | SeatState::Stuck => Tone::Warning,
+        SeatState::Failed => Tone::Danger,
+        _ => Tone::Neutral,
+    }
+}
+
+fn state_marker(state: SeatState) -> Option<Marker> {
+    match state {
+        SeatState::Working => Some(Marker::Dot),
+        SeatState::Waiting => Some(Marker::Diamond),
+        SeatState::Idle => Some(Marker::Ring),
+        SeatState::Stuck => Some(Marker::Bang),
+        SeatState::Failed => Some(Marker::Cross),
+        SeatState::Stopped => Some(Marker::Square),
+        SeatState::Unknown | SeatState::NoAgent => None,
+    }
+}
+
+fn badge(text: &str, state: Option<SeatState>) -> Badge<'_> {
+    let mut badge = Badge::new(text).look(Look::Subtle);
+    if let Some(state) = state {
+        badge = badge.tone(state_tone(state));
+        if let Some(marker) = state_marker(state) {
+            badge = badge.marker(marker);
+        }
+    }
+    badge
+}
+
+fn badge_width(badge: &Badge<'_>) -> u16 {
+    badge.measure(Size::new(u16::MAX, 1)).width
+}
+
+/// A subtle chip at `x`; returns the column after it, or `x` when the whole
+/// chip does not fit before `limit`. A chip is never cut short.
+fn chip(
+    cx: &mut RenderCx<'_>,
+    x: u16,
+    y: u16,
+    limit: u16,
+    text: &str,
+    state: Option<SeatState>,
+) -> u16 {
+    let badge = badge(text, state);
+    let width = badge_width(&badge);
+    if width == 0 || x.saturating_add(width) > limit {
+        return x;
+    }
+    badge.render(Rect::new(x, y, width, 1), cx);
+    x + width
+}
+
+/// The chip in a seat row's flag column: a state that needs a word, or stale.
+fn flag_chip(seat: &Seat, stale: bool) -> Option<(&'static str, Option<SeatState>)> {
+    match seat.state {
+        SeatState::Idle | SeatState::Stuck | SeatState::Stopped | SeatState::NoAgent => {
+            Some((seat.state.word(), Some(seat.state)))
+        }
+        _ if stale => Some(("stale", None)),
+        _ => None,
+    }
+}
+
 impl Painter<'_, '_> {
     fn lane_width(&self, columns: u16) -> usize {
         usize::from(columns)
@@ -885,7 +1050,16 @@ impl Painter<'_, '_> {
             return x;
         }
         self.cx.put_str(x, y, &shown, style);
-        x + shown.chars().count() as u16
+        let len = shown.chars().count() as u16;
+        let area = Rect::new(x, y, len, 1);
+        if shown.chars().all(|c| c == '│') {
+            graphite_rule(self.cx, area, style, true);
+        } else if shown.chars().all(|c| c == '─') {
+            graphite_rule(self.cx, area, style, false);
+        } else {
+            graphite_text(self.cx, area, &shown, style, self.size, false);
+        }
+        x + len
     }
 
     /// Writes `text` right-aligned so it ends at `right` (exclusive).
@@ -896,6 +1070,14 @@ impl Painter<'_, '_> {
             return;
         }
         self.cx.put_str(right - len, y, &shown, style);
+        graphite_text(
+            self.cx,
+            Rect::new(right - len, y, len, 1),
+            &shown,
+            style,
+            self.size,
+            true,
+        );
     }
 
     fn fill(&mut self, area: Rect, style: Style) {
@@ -968,6 +1150,7 @@ pub fn render(
         palette,
         pixels,
         graph_style: ui.graph_style,
+        size: 0.5,
     };
     if tier == Tier::Tiny {
         draw_counts(
@@ -1043,6 +1226,34 @@ pub fn render(
     }
 }
 
+/// The header's state totals, in order. No agent shows only when a row has
+/// none, so a healthy fleet's header is unchanged.
+fn totals(hosts: &[Host]) -> impl Iterator<Item = (SeatState, usize)> {
+    SeatState::ALL
+        .into_iter()
+        .zip(counts(hosts))
+        .filter(|(state, count)| *state != SeatState::NoAgent || *count > 0)
+}
+
+/// A worded total as a chip: tinted with its state's marker when nonzero.
+fn total_chip(state: SeatState, count: usize) -> (String, Option<SeatState>) {
+    (
+        format!("{count} {}", state.word()),
+        (count > 0).then_some(state),
+    )
+}
+
+/// Columns the worded chips take, with one cell between them and the alarm mark.
+fn worded_width(hosts: &[Host]) -> u16 {
+    totals(hosts)
+        .map(|(state, count)| {
+            let (text, state) = total_chip(state, count);
+            badge_width(&badge(&text, state)) + 1
+        })
+        .sum::<u16>()
+        + 1
+}
+
 fn draw_counts(
     paint: &mut Painter<'_, '_>,
     x: u16,
@@ -1051,25 +1262,23 @@ fn draw_counts(
     hosts: &[Host],
     words: bool,
 ) -> u16 {
-    let totals = counts(hosts);
     let mut x = x;
-    for (state, count) in SeatState::ALL.iter().zip(totals) {
-        // Shown only when a row has no agent, so a healthy fleet's header is unchanged.
-        if *state == SeatState::NoAgent && count == 0 {
+    for (state, count) in totals(hosts) {
+        if words {
+            let (text, tint) = total_chip(state, count);
+            let next = chip(paint.cx, x, y, limit, &text, tint);
+            if next == x {
+                break;
+            }
+            x = next + 1;
             continue;
         }
-        let color = paint.palette.state(*state);
-        let text = if words {
-            format!("{} {count} {}  ", state.glyph(), state.word())
-        } else {
-            format!("{}{count} ", state.glyph())
-        };
         let style = if count == 0 {
             fg(paint.palette.muted)
         } else {
-            fg(color)
+            fg(paint.palette.state(state))
         };
-        x = paint.text(x, y, limit, &text, style);
+        x = paint.text(x, y, limit, &format!("{}{count} ", state.glyph()), style);
     }
     if hosts.iter().any(|host| !host.connected()) {
         x = paint.text(x, y, limit, "!", bold(fg(paint.palette.waiting)));
@@ -1082,6 +1291,7 @@ fn draw_header(paint: &mut Painter<'_, '_>, area: Rect, hosts: &[Host], ui: &Ui,
     let y = area.y;
     let mut x = area.x + 1;
     if tier != Tier::Small {
+        paint.size = 0.6;
         x = paint.text(
             x,
             y,
@@ -1089,6 +1299,7 @@ fn draw_header(paint: &mut Painter<'_, '_>, area: Rect, hosts: &[Host], ui: &Ui,
             "Activity monitor",
             bold(fg(paint.palette.strong)),
         );
+        paint.size = 0.5;
         x += 3;
     }
     let mut notes = Vec::new();
@@ -1102,7 +1313,7 @@ fn draw_header(paint: &mut Painter<'_, '_>, area: Rect, hosts: &[Host], ui: &Ui,
     let note_width = note.chars().count() as u16;
     let reserve = if note.is_empty() { 0 } else { note_width + 3 };
     // Spell out the states when they fit next to any filter or sort note.
-    let worded = 4 * 14 + 2;
+    let worded = worded_width(hosts);
     let words = matches!(tier, Tier::Medium | Tier::Wide) && x + worded + reserve <= limit;
     let end = draw_counts(paint, x, y, limit.saturating_sub(reserve), hosts, words);
     if !note.is_empty() && end + 2 + note_width < limit {
@@ -1175,6 +1386,16 @@ fn draw_list(
             .map(|host| model::source_label(host).chars().count())
             .max()
             .unwrap_or(0),
+        flag: hosts
+            .iter()
+            .flat_map(|host| {
+                host.seats.values().filter_map(move |seat| {
+                    flag_chip(seat, model::is_stale(host, seat, clock.wall_ms))
+                })
+            })
+            .map(|(text, state)| badge_width(&badge(text, state)))
+            .max()
+            .unwrap_or(0),
     };
     for (line, row) in rows.iter().skip(ui.list_offset).take(shown).enumerate() {
         let y = area.y + line as u16;
@@ -1212,6 +1433,8 @@ struct Widths {
     name: usize,
     /// Longest source label.
     source: usize,
+    /// Widest flag chip, or 0 when no row shows one.
+    flag: u16,
 }
 
 struct Columns {
@@ -1262,8 +1485,9 @@ fn columns(area: Rect, tier: Tier, widths: Widths) -> Columns {
             };
             let age = kind + KIND_WIDTH as u16 + 5;
             let flag = age + 2;
-            let lane_x = flag + 6;
-            let lane = (right > lane_x + 8).then(|| (lane_x, right - lane_x - 1));
+            // The flag column fits its widest chip; plain words took five cells.
+            let lane_x = flag + widths.flag.max(5) + 1;
+            let lane = (right > lane_x + 6).then(|| (lane_x, right - lane_x - 1));
             Columns {
                 name: left,
                 source: (source_width > 0).then_some(source),
@@ -1516,17 +1740,7 @@ fn draw_seat_row(
     };
     let base = Style::new().bg(bg);
     paint.fill(Rect::new(area.x, y, area.width, 1), base);
-    if selected {
-        paint.text(area.x, y, limit, "▌", base.fg(palette.focus));
-    }
     let state_color = palette.state(seat.state);
-    paint.text(
-        area.x + 1,
-        y,
-        limit,
-        &seat.state.glyph().to_string(),
-        base.fg(state_color),
-    );
     let cols = columns(area, tier, widths);
     let name_color = if matches!(seat.state, SeatState::Stopped | SeatState::NoAgent) {
         palette.muted
@@ -1542,7 +1756,29 @@ fn draw_seat_row(
         .source
         .or(cols.kind)
         .map_or(cols.age.saturating_sub(5), |next| next - 1);
-    paint.text(cols.name, y, name_limit, id.as_str(), name_style);
+    // The row's band, focus bar, state icon and name: one List row.
+    let band_end = cols
+        .lane
+        .map_or(limit, |(lane_x, _)| lane_x.saturating_sub(1));
+    let name = truncate(
+        id.as_str(),
+        usize::from(name_limit.saturating_sub(cols.name)),
+    );
+    List::new(VecSource::from_rows(vec![vec![name]]))
+        .style(name_style)
+        .highlight_style(
+            Style::new()
+                .bg(palette.selection)
+                .fg(palette.strong)
+                .with_attrs(Attrs::new().set_bold(true)),
+        )
+        .highlight_symbol("▌", Style::new().fg(palette.focus))
+        .icons(vec![(
+            seat.state.glyph().to_string(),
+            Style::new().fg(state_color),
+        )])
+        .selected(selected.then_some(0))
+        .render(Rect::new(area.x, y, band_end - area.x, 1), paint.cx);
     if let (Some(source), Some(kind)) = (cols.source, cols.kind) {
         paint.text(
             source,
@@ -1574,22 +1810,8 @@ fn draw_seat_row(
         base.fg(palette.muted)
     };
     paint.right(cols.age + 1, y, 4, &age, age_style);
-    if let Some(flag) = cols.flag {
-        match seat.state {
-            SeatState::Idle | SeatState::Stuck | SeatState::Stopped | SeatState::NoAgent => {
-                paint.text(
-                    flag,
-                    y,
-                    flag + 5,
-                    seat.state.word(),
-                    base.fg(palette.state(seat.state)),
-                );
-            }
-            _ if stale => {
-                paint.text(flag, y, flag + 5, "stale", base.fg(palette.waiting));
-            }
-            _ => {}
-        }
+    if let (Some(flag), Some((text, state))) = (cols.flag, flag_chip(seat, stale)) {
+        chip(paint.cx, flag, y, flag + widths.flag, text, state);
     }
     if let Some((lane_x, lane_w)) = cols.lane {
         paint.lane(
@@ -1615,6 +1837,7 @@ fn kind_glyph(kind: ActivityKind) -> (char, SeatState) {
         SessionStarted => ('○', SeatState::Waiting),
         MailSent => ('»', SeatState::Unknown),
         MailReceived => ('«', SeatState::Unknown),
+        RoomMessage => ('«', SeatState::Unknown),
     }
 }
 
@@ -1644,7 +1867,9 @@ fn draw_timeline(
     if full {
         x = paint.text(x, y, limit, "← ", fg(palette.muted));
     }
+    paint.size = 0.6;
     x = paint.text(x, y, limit, id.as_str(), bold(fg(palette.strong)));
+    paint.size = 0.5;
     x = paint.text(
         x + 1,
         y,
@@ -1653,25 +1878,13 @@ fn draw_timeline(
         fg(palette.muted),
     );
     let state = format!(
-        "{} {} for {}",
-        seat.state.glyph(),
+        "{} for {}",
         seat.state.word(),
         model::short_age(clock.wall_ms.saturating_sub(seat.state_since_ms))
     );
-    x = paint.text(x + 3, y, limit, &state, fg(palette.state(seat.state)));
-    if matches!(
-        seat.state,
-        SeatState::Idle | SeatState::Stuck | SeatState::Stopped | SeatState::NoAgent
-    ) {
-        paint.text(
-            x + 2,
-            y,
-            limit,
-            seat.state.word(),
-            fg(palette.state(seat.state)),
-        );
-    } else if model::is_stale(host, seat, clock.wall_ms) {
-        paint.text(x + 2, y, limit, "stale", fg(palette.waiting));
+    x = chip(paint.cx, x + 3, y, limit, &state, Some(seat.state));
+    if model::is_stale(host, seat, clock.wall_ms) {
+        chip(paint.cx, x + 1, y, limit, "stale", None);
     }
     y += 1;
     let left = area.x + u16::from(full);
@@ -1710,14 +1923,15 @@ fn draw_timeline(
     let lane_width = limit.saturating_sub(left + 1);
     if area.height >= 8 && y + 1 < bottom && lane_width >= 12 {
         y += u16::from(area.height >= 12);
+        let lane_rows = if area.height >= 16 { 3 } else { 1 };
         paint.lane(
-            Rect::new(left, y, lane_width, 1),
+            Rect::new(left, y, lane_width, lane_rows),
             seat,
             clock.wall_ms,
             DETAIL_LANE_WINDOW_MS,
             Color::Default,
         );
-        y += 1;
+        y += lane_rows;
         let axis = fg(palette.muted);
         paint.text(left, y, limit, "-10m", axis);
         paint.text(left + lane_width / 2 - 1, y, limit, "-5m", axis);
@@ -1923,12 +2137,11 @@ fn draw_details(
         fg(palette.muted),
     );
     let state = format!(
-        "{} {} for {}",
-        seat.state.glyph(),
+        "{} for {}",
         seat.state.word(),
         model::short_age(clock.wall_ms.saturating_sub(seat.state_since_ms))
     );
-    paint.text(x + 3, y, limit, &state, fg(palette.state(seat.state)));
+    chip(paint.cx, x + 3, y, limit, &state, Some(seat.state));
     y += 1;
 
     let groups = model::task_groups(seat);
@@ -2334,6 +2547,21 @@ impl Palette {
     }
 }
 
+/// The keycaps for a footer hint: the arrow pair is two keys.
+fn keycaps(key: &str) -> Vec<&str> {
+    if key == "↑↓" {
+        vec!["↑", "↓"]
+    } else {
+        vec![key]
+    }
+}
+
+fn keycap_width(key: &str) -> u16 {
+    Kbd::new(&keycaps(key))
+        .measure(Size::new(u16::MAX, 1))
+        .width
+}
+
 fn draw_footer(
     paint: &mut Painter<'_, '_>,
     area: Rect,
@@ -2387,7 +2615,7 @@ fn draw_footer(
     let mut budget = usize::from(area.width.saturating_sub(2));
     let mut keep = Vec::new();
     for (index, (key, label)) in hints.iter().enumerate() {
-        let cost = key.chars().count() + label.len() + 3;
+        let cost = usize::from(keycap_width(key)) + label.chars().count() + 3;
         if *key == "p" && !pixels_available {
             continue;
         }
@@ -2406,8 +2634,14 @@ fn draw_footer(
     let mut x = area.x + 1;
     for index in order.iter().filter(|index| keep.contains(index)) {
         let (key, label) = hints[*index];
-        x = paint.text(x, y, limit, key, fg(paint.palette.text));
-        x = paint.text(x + 1, y, limit, label, fg(paint.palette.muted));
+        let keys = keycaps(key);
+        let kbd = Kbd::new(&keys);
+        let width = keycap_width(key);
+        if x + width + 1 + label.chars().count() as u16 > limit {
+            break;
+        }
+        kbd.render(Rect::new(x, y, width, 1), paint.cx);
+        x = paint.text(x + width + 1, y, limit, label, fg(paint.palette.muted));
         x += 2;
     }
 }
@@ -2700,20 +2934,20 @@ mod tests {
             14,
             "",
             r#"
- Activity monitor   ● 2 working  ◆ 1 waiting  ○ 0 idle  ! 0 stuck  ✕ 1 failed  ■ 0 down  !
- mac  connected  3 seats  2 need you                               ▂       ▂    ▂   ▂    ▂  ▂    ▂▂
-▌✕ builder    mac      test_failed         2m                      ▃▁▁▁▁▁▁▁▃▁▁▁▁▃▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
- ◆ reviewer   mac      turn_finished      41s                                       ▃▁▁▁▁▁▁▁▃▁▁▁▁▁▁
- ● worker-a   mac      command_started     4s                                            ▃▁▁▁▁▁▁▁▃▃
+ Activity monitor    ● 2 working   ◆ 1 waiting   0 idle   0 stuck   × 1 failed   0 down  !
+ mac  connected  3 seats  2 need you                                 ▂      ▂    ▂   ▂    ▂ ▂    ▂▂
+▌✕ builder    mac      test_failed         2m                        ▃▁▁▁▁▁▁▃▁▁▁▁▃▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+ ◆ reviewer   mac      turn_finished      41s                                        ▃▁▁▁▁▁▁▃▁▁▁▁▁▁
+ ● worker-a   mac      command_started     4s                                             ▃▁▁▁▁▁▁▃▃
  windows  retrying for 12s  1 seat  cached                                                      ▂
- ● win-agent  windows  tool_started       19s stale                                             ▃▁▁
+ ● win-agent  windows  tool_started       19s  stale                                            ▃▁▁
 
 
 
 
 
 
- x remove  X clear  : commands  ↑↓ move  ⏎ timeline  q quit  ⇥ host  ? keys  f filter  d details"#,
+  x  remove   X  clear   :  commands   ↑   ↓  move   ⏎  timeline   q  quit   ⇥  host   d  details"#,
         ),
         (
             60,
@@ -2731,7 +2965,7 @@ mod tests {
 
 
 
- x remove  X clear  : commands  ↑↓ move  ⏎ timeline"#,
+  x  remove   X  clear   :  commands   ↑   ↓  move"#,
         ),
         (
             30,
@@ -2745,20 +2979,22 @@ mod tests {
  ● worker-a                 4s
  windows  retrying for 12s
  ● win-agent               19s
- x remove  X clear"#,
+  x  remove   X  clear"#,
         ),
         (
             120,
             20,
             "j",
             r#"
- Activity monitor   ● 2 working  ◆ 1 waiting  ○ 0 idle  ! 0 stuck  ✕ 1 failed  ■ 0 down  !
- mac  connected  3 seats  2 need you                   ▂▂▂▂▂▂ │ reviewer on mac   ◆ waiting for 41s
- ✕ builder    mac      test_failed         2m          ▃▃▃▁▁▁ │ 2 events  1 task  0 failures  last 41s ago
-▌◆ reviewer   mac      turn_finished      41s             ▃▃▁ │
- ● worker-a   mac      command_started     4s              ▃▅ │                                              ▃▁▁▁▁▃▁▁▁
- windows  retrying for 12s  1 seat  cached                  ▂ │ -10m                      -5m                      now
- ● win-agent  windows  tool_started       19s stale         ▃ │
+ Activity monitor    ● 2 working   ◆ 1 waiting   0 idle   0 stuck   × 1 failed   0 down  !
+ mac  connected  3 seats  2 need you                    ▂▂▂▂▂ │ reviewer on mac    ◆ waiting for 41s
+ ✕ builder    mac      test_failed         2m           ▃▃▃▁▁ │ 2 events  1 task  0 failures  last 41s ago
+▌◆ reviewer   mac      turn_finished      41s             ▃▁▃ │
+ ● worker-a   mac      command_started     4s              ▃▅ │
+ windows  retrying for 12s  1 seat  cached                  ▂ │                                              ▁    ▁
+ ● win-agent  windows  tool_started       19s  stale        ▃ │                                              █▃▃▃▃█▃▃▃
+                                                              │ -10m                      -5m                      now
+                                                              │
                                                               │   41s +49s   ◆ turn_finished    hooks
                                                               │    1m        ● turn_started     hooks
                                                               │
@@ -2769,17 +3005,15 @@ mod tests {
                                                               │
                                                               │
                                                               │
-                                                              │
-                                                              │
- x remove  X clear  : commands  ↑↓ move  ⏎ timeline  q quit  ⇥ host  ? keys  R rescan  s sort  f filter  d details"#,
+  x  remove   X  clear   :  commands   ↑   ↓  move   ⏎  timeline   q  quit   ⇥  host   f  filter   d  details"#,
         ),
         (
             90,
             16,
             "jl",
             r#"
- Activity monitor   ● 2 working  ◆ 1 waiting  ○ 0 idle  ! 0 stuck  ✕ 1 failed  ■ 0 down  !
- ← reviewer on mac   ◆ waiting for 41s
+ Activity monitor    ● 2 working   ◆ 1 waiting   0 idle   0 stuck   × 1 failed   0 down  !
+ ← reviewer on mac    ◆ waiting for 41s
  2 events  1 task  0 failures  last 41s ago
 
                                                                            ▃▁▁▁▁▁▁▃▁▁▁▁▁▁
@@ -2793,7 +3027,7 @@ mod tests {
 
 
 
- ↑↓ scroll  esc back  i IDs  q quit  ? keys"#,
+  ↑   ↓  scroll   esc  back   i  IDs   q  quit   ?  keys"#,
         ),
         (
             70,
@@ -2819,7 +3053,7 @@ mod tests {
       │ mouse       click selects, again opens; wheel moves    │
       │ q           quit                                       │
       ╰────────────────────────────────────────────────────────╯
- x remove  X clear  : commands  ↑↓ move  ⏎ timeline  d details"#,
+  x  remove   X  clear   :  commands   ↑   ↓  move   ⏎  timeline"#,
         ),
         (
             44,
@@ -2827,7 +3061,7 @@ mod tests {
             "l",
             r#"
  Activity monitor   ●2 ◆1 ○0 !0 ✕1 ■0 !
- ← builder on mac   ✕ failed for 2m
+ ← builder on mac    × failed for 2m
  3 events  1 task  1 failure  last 2m ago
                              ▃▁▁▃▁▃▁▁▁▁▁▁▁▁
  -10m                -5m                now
@@ -2835,7 +3069,7 @@ mod tests {
     2m +30s   ✕ test_failed
     2m +50s   ▸ test_started
     3m        ● turn_started
- ↑↓ scroll  esc back  i IDs  q quit"#,
+  ↑   ↓  scroll   esc  back   i  IDs"#,
         ),
     ];
 
@@ -2892,6 +3126,51 @@ mod tests {
         monitor.hosts[0].apply(page, 0);
         monitor.ui.selected = Some((0, seat));
         monitor
+    }
+
+    #[test]
+    fn flags_and_footer_keys_are_lunatui_chips_and_keycaps_in_cells() -> Result<()> {
+        let mut monitor = fleet()?;
+        let (text, grid, _) = draw(&mut monitor, 100, 14);
+        let lines: Vec<&str> = text.lines().collect();
+        let style = |x: u16, y: u16| grid.get(x, y).unwrap().style();
+        // The stale flag is a subtle badge: bold, on its own surface, padded both sides.
+        let y = lines.iter().position(|l| l.contains("win-agent")).unwrap() as u16;
+        let x = column_of(lines[usize::from(y)], "stale");
+        assert!(style(x, y).attrs.bold());
+        assert_ne!(
+            style(x, y).bg,
+            style(x - 3, y).bg,
+            "the chip has its own surface"
+        );
+        assert_eq!(style(x - 1, y).bg, style(x, y).bg);
+        assert_eq!(style(x + 5, y).bg, style(x, y).bg);
+        // Footer keys sit on raised keycaps; their labels do not.
+        let footer = 13;
+        let q = column_of(lines[usize::from(footer)], "q  quit");
+        let cap = style(q, footer).bg;
+        assert_eq!(style(q - 1, footer).bg, cap);
+        assert_eq!(style(q + 1, footer).bg, cap);
+        assert_ne!(style(q + 3, footer).bg, cap, "the label is not on the cap");
+        Ok(())
+    }
+
+    #[test]
+    fn the_flag_column_fits_its_widest_chip_and_the_lane_follows_it() {
+        use prismattyc_core::activity::ActivitySessionState;
+
+        let mut monitor = session_monitor(ActivitySessionState::Idle);
+        let (text, ..) = draw(&mut monitor, 100, 8);
+        let row = line_of(&text, "stopped-seat");
+        // The widest chip in the column is shown whole, never cut short.
+        assert!(row.contains(" no agent "), "{row}");
+        let chip_end = column_of(row, " no agent ") + 10;
+        let lane = row
+            .char_indices()
+            .find(|(_, c)| *c == '⣀')
+            .map(|(byte, _)| row[..byte].chars().count() as u16)
+            .unwrap_or_else(|| panic!("no lane: {row}"));
+        assert!(lane > chip_end, "the lane starts after the chip: {row}");
     }
 
     #[test]
@@ -3331,7 +3610,7 @@ mod tests {
         assert!(text.contains("older than the feed"));
         assert!(text.contains("mac  no activity feed"));
         let footer = text.lines().last().unwrap_or_default().trim();
-        assert_eq!(footer, "q quit", "nothing to move through yet");
+        assert_eq!(footer, "q  quit", "nothing to move through yet");
         assert!(!text.contains("Can't reach"));
         Ok(())
     }
@@ -3399,7 +3678,7 @@ mod tests {
         assert!(
             lines[0].contains("● 2 working")
                 && lines[0].contains("◆ 1 waiting")
-                && lines[0].contains("✕ 1 failed")
+                && lines[0].contains("× 1 failed")
         );
         let mac = lines
             .iter()
@@ -3418,7 +3697,7 @@ mod tests {
         assert!(lines[mac].contains("3 seats") && lines[mac].contains("2 need you"));
         assert!(lines[windows].contains("cached"));
         // The first seat is selected, and its timeline is beside the list.
-        assert!(lines[1].contains("builder on mac") && lines[1].contains("✕ failed for 2m"));
+        assert!(lines[1].contains("builder on mac") && lines[1].contains("× failed for 2m"));
         let timeline_row = text
             .lines()
             .filter(|line| line.contains("test_failed"))
@@ -3472,6 +3751,10 @@ mod tests {
                 exit_code,
                 operation_id: Some(format!("op-{}", record.sequence)),
                 model: None,
+                message_id: None,
+                room_id: None,
+                sender_id: None,
+                count: None,
             });
         }
         press(&mut monitor, KeyCode::End);
@@ -3602,7 +3885,7 @@ mod tests {
         let row = line_of(&text, "quiet-agent");
         assert!(row.contains("○ quiet-agent"), "{row}");
         assert!(row.contains("no events"), "{row}");
-        assert!(row.contains("12m idle"), "{row}");
+        assert!(row.contains("12m  ○ idle"), "{row}");
         assert!(!row.contains("working"), "{row}");
         Ok(())
     }

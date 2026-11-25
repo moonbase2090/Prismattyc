@@ -230,7 +230,8 @@ impl Store {
 
     /// Insert one letter per recipient in a **single transaction** —
     /// either everyone gets it or nobody does (no persist-then-fail
-    /// paths). Returns how many letters were inserted.
+    /// paths). Returns each letter id and that recipient's open depth,
+    /// in recipient order.
     ///
     /// # Errors
     ///
@@ -242,17 +243,25 @@ impl Store {
         recipients: &[AgentId],
         summary: &str,
         body: &str,
-    ) -> Result<u32> {
+    ) -> Result<Vec<(String, u32)>> {
         let tx = self.conn.transaction()?;
+        let mut stored = Vec::with_capacity(recipients.len());
         for agent in recipients {
             tx.execute(
                 "INSERT INTO letters (recipient, from_agent, to_agent, summary, body, state)
                  VALUES (?1, ?2, ?3, ?4, ?5, 'open')",
                 params![agent.as_str(), from, agent.as_str(), summary, body],
             )?;
+            let id = letter_id(tx.last_insert_rowid());
+            let open: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM letters WHERE recipient = ?1 AND state = 'open'",
+                params![agent.as_str()],
+                |row| row.get(0),
+            )?;
+            stored.push((id, u32::try_from(open).unwrap_or(u32::MAX)));
         }
         tx.commit()?;
-        Ok(u32::try_from(recipients.len()).unwrap_or(u32::MAX))
+        Ok(stored)
     }
 
     /// Claim every uncommitted letter for `agent`: open letters become
@@ -496,7 +505,8 @@ mod tests {
         let delivered = store
             .broadcast("operator-b", &recipients, "standup in 5", "body")
             .unwrap();
-        assert_eq!(delivered, 2);
+        assert_eq!(delivered.len(), 2);
+        assert_ne!(delivered[0].0, delivered[1].0);
         for name in ["operator-a", "operator-b"] {
             let claimed = store.claim(&agent(name)).unwrap();
             assert_eq!(claimed.len(), 1);
@@ -507,7 +517,7 @@ mod tests {
         let delivered = store
             .broadcast("operator-b", &[], "nobody home", "body")
             .unwrap();
-        assert_eq!(delivered, 0);
+        assert!(delivered.is_empty());
     }
 
     #[test]

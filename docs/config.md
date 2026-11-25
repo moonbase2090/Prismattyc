@@ -379,7 +379,7 @@ jump_needs_you = "ctrl+shift+u"
 # update_restart = []
 # check for plug-in updates.
 # plugins_check = []
-# update and enable plug-ins.
+# update plug-ins; ones you turned off stay off.
 # plugins_update = []
 # show recent status messages, including hidden toasts.
 # recent_messages = []

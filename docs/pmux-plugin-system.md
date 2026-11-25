@@ -42,8 +42,9 @@ Settings has the same on the **Plug-ins** page: each plug-in shows its
 installed version and its state, one row per permission in plain words (the
 manifest's required ones are pre-selected the first time), **Update to** and
 **Update to ... and enable** for a plug-in that is off. The command palette has
-**plugins_check** (check for plug-in updates) and **plugins_update** (update and
-enable plug-ins); both open the page and show the result there. They are on by
+**plugins_check** (check for plug-in updates) and **plugins_update** (update
+plug-ins: enabled ones move to the new version, ones you turned off stay off);
+both open the page and show the result there. They are on by
 default and bound to no key.
 
 The official Activity Monitor and activity connector start enabled. On startup,

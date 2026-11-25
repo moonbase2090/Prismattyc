@@ -8448,12 +8448,14 @@ fn rasterize_frame(
                     rows: &rows,
                 }]
             };
-            // Settings pages are fixed size and scroll inside (Graphite rule).
-            let layout_mode = if host.settings.is_some()
-                || host
-                    .space_panel
-                    .as_ref()
-                    .is_some_and(space_panel::Panel::fixed_size)
+            // Settings pages are fixed size and scroll inside (Graphite rule). The
+            // settings panel also keeps one width and label column for every section.
+            let layout_mode = if host.settings.is_some() {
+                settings::Panel::layout_mode()
+            } else if host
+                .space_panel
+                .as_ref()
+                .is_some_and(space_panel::Panel::fixed_size)
             {
                 PaletteLayoutMode::FixedHeight
             } else {

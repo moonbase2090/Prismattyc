@@ -15366,15 +15366,24 @@ fn graphite_chord_label(keymap: &keybind::KeyMap, action: keybind::Action) -> St
 /// Prismattyc Dark or Light from the window's system appearance; every other
 /// theme pins the window appearance to its own variant so the native title
 /// band matches the chrome and terminal below it.
-/// The theme plug-in views follow: the focused window's. With no window
-/// focused, the theme shared last stays.
+/// The theme plug-in views follow: the focused window's, or with no window
+/// focused, the one every window shows. When unfocused windows differ, the
+/// theme shared last stays.
 fn theme_for_plugins<'a>(
     windows: impl IntoIterator<Item = (bool, &'a theme::Theme)>,
 ) -> Option<prismattyc_mux::host_theme::ThemeColors> {
-    windows
+    let windows: Vec<_> = windows
         .into_iter()
-        .find(|(focused, _)| *focused)
-        .map(|(_, theme)| theme::shared_colors(theme))
+        .map(|(focused, theme)| (focused, theme::shared_colors(theme)))
+        .collect();
+    if let Some((_, colors)) = windows.iter().find(|(focused, _)| *focused) {
+        return Some(*colors);
+    }
+    let (_, first) = windows.first()?;
+    windows
+        .iter()
+        .all(|(_, colors)| colors == first)
+        .then_some(*first)
 }
 
 fn apply_host_theme(host: &mut HostState, theme: theme::Theme) {
@@ -23020,6 +23029,10 @@ mod tests {
         assert!(shared.dark);
         assert_eq!(shared.background, dark.default_bg);
         assert_eq!(theme_for_plugins([(false, dark), (false, light)]), None);
+        let unfocused = theme_for_plugins([(false, light)]).unwrap();
+        assert_eq!(unfocused.background, light.default_bg);
+        let same = theme_for_plugins([(false, dark), (false, dark)]).unwrap();
+        assert_eq!(same.background, dark.default_bg);
     }
 
     #[test]

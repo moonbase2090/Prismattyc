@@ -110,6 +110,7 @@ pub(crate) fn render(
         .min(MAX_FRAME_BYTES)
         .saturating_sub(cell_budget);
     let pixels = viewport.pixels.is_some();
+    monitor.load_fonts(pixels);
     let mut mode = monitor.mode(pixels);
     let capture = loop {
         let mut capture = Capture {
@@ -213,6 +214,7 @@ pub(crate) fn render(
             });
         }
     }
+    monitor.opened = true;
     Ok(frame::Content {
         columns: viewport.columns,
         rows: viewport.rows,
@@ -320,7 +322,7 @@ mod tests {
                     .map(move |(ago, kind, detail)| (*ago, *seat, *kind, detail.clone()))
             })
             .collect();
-        all.sort_by(|a, b| b.0.cmp(&a.0));
+        all.sort_by_key(|record| std::cmp::Reverse(record.0));
         let mut records = Vec::new();
         for (sequence, (ago, seat, kind, detail)) in all.into_iter().enumerate() {
             let run = format!("run-{seat}");
@@ -353,6 +355,8 @@ mod tests {
         monitor.hosts[1].disconnect(NOW - 12_000);
         monitor.ui.motion = false;
         monitor.ui.selected = Some((0, AgentId::new("reviewer")?));
+        // Already on screen, so the next frame loads the fonts and draws Graphite.
+        monitor.opened = true;
         Ok(monitor)
     }
 
@@ -393,7 +397,9 @@ mod tests {
     /// Pixels that differ from the pane ground: what was actually drawn.
     fn ink(tile: &frame::Tile, ground: [u8; 3]) -> usize {
         tile.rgba
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|pixel| pixel[..3] != ground)
             .count()
     }
@@ -488,6 +494,48 @@ mod tests {
     }
 
     #[test]
+    fn the_monitor_opens_in_cells_and_draws_graphite_from_the_next_frame() -> anyhow::Result<()> {
+        let mut monitor = comps_fleet()?;
+        monitor.opened = false;
+        // Only the activity lanes, which need no fonts, are pixels at first.
+        let first = wide(&mut monitor, MAX_FRAME_BYTES as u32)?;
+        let (column, row) = position(&first, "reviewer");
+        assert!(covering(&first, column, row).is_none());
+        assert!(monitor.fonts_pending(true));
+        let second = wide(&mut monitor, MAX_FRAME_BYTES as u32)?;
+        assert!(!monitor.fonts_pending(true));
+        let (column, row) = position(&second, "reviewer");
+        assert!(covering(&second, column, row).is_some());
+        assert!(second.tiles.len() > first.tiles.len() * 10);
+        Ok(())
+    }
+
+    #[test]
+    fn fonts_are_not_loaded_while_pixels_are_off_or_not_shown() -> anyhow::Result<()> {
+        let mut monitor = comps_fleet()?;
+        render(
+            &mut monitor,
+            &viewport(132, 30, None),
+            0,
+            MAX_FRAME_BYTES as u32,
+        )
+        .map_err(anyhow::Error::msg)?;
+        assert!(!monitor.fonts_pending(false));
+        monitor.ui.pixels = false;
+        let off = wide(&mut monitor, MAX_FRAME_BYTES as u32)?;
+        let (column, row) = position(&off, "reviewer");
+        assert!(covering(&off, column, row).is_none());
+        monitor.ui.pixels = true;
+        assert!(
+            monitor.fonts_pending(true),
+            "no frame so far loaded the fonts"
+        );
+        let on = wide(&mut monitor, MAX_FRAME_BYTES as u32)?;
+        assert!(covering(&on, column, row).is_some());
+        Ok(())
+    }
+
+    #[test]
     fn an_older_host_gets_only_frames_it_accepts() -> anyhow::Result<()> {
         use pmux_plugin_api::{LEGACY_FRAME_BYTES, LEGACY_MAX_TILES};
         // The narrow view's 39 tiles fit an older host's 2 MiB but not its
@@ -532,6 +580,7 @@ mod tests {
     #[test]
     fn actual_monitor_cells_and_rgba_lanes_cross_the_typed_adapter() -> anyhow::Result<()> {
         let mut monitor = Monitor::new(vec!["fixture".into()], Palette::DARK, 1_700_000_000_000);
+        monitor.opened = true;
         monitor.hosts[0].apply(
             page_in(
                 "e",

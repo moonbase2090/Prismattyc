@@ -90,7 +90,8 @@ All of these must hold:
 
 1. **Checkpoint first.** Force a full pane-log persist capture for the pane
    through the existing `capture_persist` path. Restore after exit then never
-   needs the parked file (see [Restore after exit](#restore-after-exit)).
+   needs the parked file (see [Restore after exit](#restore-after-exit)). When
+   pane-log persistence is off, this step is skipped.
    Today that capture is a full export under the plane lock, about 22 ms for a
    10,000-row pane, once per park. It can move to history paging later, along
    with the regular checkpoint.
@@ -162,13 +163,33 @@ today when a client falls behind (`subscribe_frame`, `control.rs:6892`).
 - **Key:** 32 random bytes from `getrandom` at server start. It is held only in
   memory, never written, and zeroized when the server stops (`zeroize` is
   already in the lockfile through `rustls`). The cipher is ChaCha20-Poly1305
-  (the `chacha20poly1305` crate). The nonce is the file id plus the part index,
-  and the authenticated data is the pane id plus the part header, so parts
-  cannot be swapped between files or panes.
-- **What this protects:** parked history in backups, disk images and local
-  snapshots, and in any file the server leaves behind after a crash. It does
-  not protect against a local user who can read the server's memory, who can
-  read the live panes anyway.
+  (the `chacha20poly1305` crate). The authenticated data is the pane id plus
+  the part header, so parts cannot be swapped between files or panes.
+- **Nonces:** the 96-bit nonce is a 64-bit file id followed by the 32-bit part
+  index. File ids come from one per-run counter (an `AtomicU64` on the server,
+  starting at 1). Every park attempt takes the next id, including attempts that
+  are abandoned and parks of a pane that parked before, so an id is never used
+  twice under a key. Parts are written once and never rewritten in place. A
+  file that has to change is written again under a new id. A file holds at most
+  2^32 − 1 parts, far above the 256 MiB per-pane cap. The counter cannot wrap
+  in practice; if it would, the server stops parking until it restarts. The key
+  changes every run, so ids restart safely at 1. Each (key, nonce) pair is used
+  for exactly one part.
+- **What this protects, and what it does not:**
+  - Parking does not add a readable copy of history to disk. Without the
+    envelope, every parked pane would leave a second plaintext copy of its
+    history in `parked/`, including after a crash.
+  - It does not make history at rest safer than today. With pane-log
+    persistence on (the default), the plaintext checkpoint written before the
+    pane parks holds the same history, as it does today for every pane, parked
+    or not. A copy of the data directory or a backup exposes that history
+    exactly as it does now.
+  - With persistence off (`PMUX_PANE_LOG=off`), there is no checkpoint, and the
+    encrypted parked file is the only copy of the history on disk.
+  - It does not protect against a local user who can read the server's memory,
+    who can read the live panes anyway.
+  - Protecting the checkpoint itself is part of the restart-persistence
+    decision noted in [Restore after exit](#restore-after-exit).
 - **Files:** one file per parked pane in a `parked/` directory under the
   server's per-instance data directory. The directory is 0700 and the files
   are 0600, created through `private_fs.rs` like the pane log. On macOS the
@@ -188,8 +209,14 @@ skips parked panes, because their checkpoint is already current. Restore after
 an update or restart works exactly as it does today, and v1 needs no long-lived
 key.
 
-The checkpoint is plaintext, as it is today. Encrypting restart persistence is
-its own decision and is not changed here.
+The checkpoint is plaintext, as it is today, so parking leaves history at rest
+exactly as exposed as it is now: no less, and no more. Encrypting restart
+persistence needs a key that outlives the server run, and is its own decision,
+not changed here. If that is decided later, it covers parked and resident panes
+alike, and the parked files need no change.
+
+With pane-log persistence off, parking skips the checkpoint, and a parked pane
+is not restored after exit, the same as any other pane with persistence off.
 
 A side effect: the shutdown flush is synchronous under the plane lock today, so
 skipping parked panes makes shutdown faster in a large session set.

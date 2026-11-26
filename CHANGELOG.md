@@ -4,7 +4,7 @@
 
 ### Changed
 
-- **Restart now** on the Plug-ins page, and the update notice, list the running sessions and confirm **Save and restart** in that same step. **Restart when idle** waits until the last session ends, then restarts the pmux server so a pending official plug-in can apply. **Update and restart all components** in the command palette still opens the full review. The server program is still named `pmuxd`.
+- **Restart now** on the Plug-ins page, and the update notice, list the running sessions and confirm **Save and restart** in that same step. **Restart when idle** waits until the last session ends, then restarts the pmux server so a pending official plug-in can apply. It remembers the release and the pending official plug-ins that were confirmed, restarts only if those are still waiting, and is withdrawn by **Cancel** or by a completed restart. When a release will be installed, the dialog names that version. **Update and restart all components** in the command palette still opens the full review. The server program is still named `pmuxd`.
 
 ## [0.3.78] - 2026-11-26
 

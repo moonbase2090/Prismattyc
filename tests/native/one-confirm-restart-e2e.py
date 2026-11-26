@@ -339,7 +339,8 @@ def main():
         assert 'alpha' in running.split() and 'beta' in running.split(), running
         marker = list((out / 'data').rglob('restart-when-idle'))
         assert len(marker) == 1, marker
-        assert marker[0].read_bytes() == b'waiting\n', marker[0].read_bytes()
+        body = marker[0].read_bytes()
+        assert body.startswith(b'v1\nrelease='), body
         assert str(marker[0]).startswith(str(out / 'data')), marker[0]
         result['sessions_still_running'] = running.split()
         record('Restart when idle leaves both sessions running')

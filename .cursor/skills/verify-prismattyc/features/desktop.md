@@ -241,7 +241,11 @@ the automatic update alert, keeps `sessions.png`, `idle-choice.png`, and
 `idle-waiting.png` (presented frames, not the desktop), and requires PASS:
 the dialog title is "Restart the pmux server", both sessions are listed, Save
 and restart is the first choice, Restart when idle is the next, and choosing
-it leaves both sessions running. It does not install a release.
+it leaves both sessions running. The remembered request starts with `v1` and
+names the release. It does not install a release. A clean guest must also
+show Save and restart bringing the sessions back, and Restart when idle
+restarting after the last session closes. The Linux or Windows notice click
+is the other required drive.
 
 ## Restart to update modal
 

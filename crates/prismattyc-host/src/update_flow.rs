@@ -244,30 +244,45 @@ fn start_prepare(app: &mut App) {
 pub(super) fn action(app: &mut App, action: Action) {
     // No session is running, so waiting would only delay the restart.
     let idle_sessions = match (&action, &app.full_update) {
-        (Action::RestartWhenIdle, Flow::Confirm(plan)) => Some(plan.sessions.is_empty()),
+        (Action::RestartWhenIdle, Flow::Confirm(plan)) => {
+            Some((plan.sessions.is_empty(), plan.clone()))
+        }
         (Action::RestartWhenIdle, _) => return,
         _ => None,
     };
-    let action = if idle_sessions == Some(true) {
-        Action::SaveAndContinue
-    } else if idle_sessions == Some(false) {
-        if let Err(error) = remember_idle_restart(&idle_restart_file()) {
+    let action = if let Some((empty, plan)) = idle_sessions {
+        if empty {
+            Action::SaveAndContinue
+        } else {
+            let consent = match idle_consent_for(&plan) {
+                Ok(consent) => consent,
+                Err(error) => {
+                    show(
+                        app,
+                        &format!("The pmux server was not set to restart later.\n{error:#}"),
+                        &[("Check again", check_again(app))],
+                    );
+                    return;
+                }
+            };
+            if let Err(error) = remember_idle_restart(&idle_restart_file(), &consent) {
+                show(
+                    app,
+                    &format!("The pmux server was not set to restart later.\n{error}"),
+                    &[("Check again", check_again(app))],
+                );
+                return;
+            }
+            restart_modal::close(app);
+            app.full_update = Flow::Idle;
             show(
                 app,
-                &format!("The pmux server was not set to restart later.\n{error}"),
-                &[("Check again", check_again(app))],
+                "The pmux server will restart after the last session ends. Nothing stops now.",
+                &[],
             );
+            ensure_idle_watch(app);
             return;
         }
-        restart_modal::close(app);
-        app.full_update = Flow::Idle;
-        show(
-            app,
-            "The pmux server will restart after the last session ends. Nothing stops now.",
-            &[],
-        );
-        ensure_idle_watch(app);
-        return;
     } else {
         action
     };
@@ -367,6 +382,7 @@ pub(super) fn action(app: &mut App, action: Action) {
         }
         Action::RestartWhenIdle => {}
         Action::Cancel => {
+            withdraw_idle_restart();
             restart_modal::close(app);
             app.full_update = Flow::Idle;
             show(
@@ -391,20 +407,7 @@ pub(super) fn event(app: &mut App, event: Event) {
     match event {
         Event::Prepared(Ok(plan)) => {
             if std::mem::take(&mut app.idle_restart_commit) {
-                if plan.sessions.is_empty() {
-                    let installed = plan.installed.clone();
-                    let available = plan.update_available.then(|| plan.available.clone());
-                    clear_idle_restart(&idle_restart_file());
-                    restart_modal::open(
-                        app,
-                        &installed,
-                        available.as_deref(),
-                        &[],
-                        ConfirmStyle::OneConfirm,
-                    );
-                    app.full_update = Flow::Confirm(plan);
-                    action(app, Action::SaveAndContinue);
-                } else {
+                if !plan.sessions.is_empty() {
                     app.full_update = Flow::Idle;
                     show(
                         app,
@@ -412,6 +415,45 @@ pub(super) fn event(app: &mut App, event: Event) {
                         &[],
                     );
                     ensure_idle_watch(app);
+                    return;
+                }
+                let saved = idle_restart_consent(&idle_restart_file());
+                let fresh = idle_consent_for(&plan);
+                match (saved, fresh) {
+                    (Some(saved), Ok(fresh)) if saved == fresh => {
+                        let installed = plan.installed.clone();
+                        let available = plan.update_available.then(|| plan.available.clone());
+                        clear_idle_restart(&idle_restart_file());
+                        restart_modal::open(
+                            app,
+                            &installed,
+                            available.as_deref(),
+                            &[],
+                            ConfirmStyle::OneConfirm,
+                        );
+                        app.full_update = Flow::Confirm(plan);
+                        action(app, Action::SaveAndContinue);
+                    }
+                    _ => {
+                        withdraw_idle_restart();
+                        let installed = plan.installed.clone();
+                        let available = plan.update_available.then(|| plan.available.clone());
+                        let names: Vec<String> =
+                            plan.sessions.iter().map(|(_, name)| name.clone()).collect();
+                        restart_modal::open(
+                            app,
+                            &installed,
+                            available.as_deref(),
+                            &names,
+                            ConfirmStyle::OneConfirm,
+                        );
+                        app.full_update = Flow::Confirm(plan);
+                        show(
+                            app,
+                            "The release or the pending plug-ins changed, so that restart was withdrawn. Review this one.",
+                            &[],
+                        );
+                    }
                 }
                 return;
             }
@@ -1088,33 +1130,130 @@ pub(super) fn resume(app: &mut App, unopened: &[String]) {
     }
 }
 
-const IDLE_MARK: &[u8] = b"waiting\n";
+/// A bare waiting file from before the consent was recorded. It is withdrawn.
+const STALE_IDLE_MARK: &[u8] = b"waiting\n";
+/// How often the idle watcher asks the daemon whether any session is left.
+/// The request can sit for days, so this is not once a second.
+const IDLE_POLL: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// The release and official plug-ins the user agreed would apply at idle.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct IdleConsent {
+    /// The release to install. None means restart without installing a release.
+    release: Option<String>,
+    /// Sorted `id`, previous version, and next version for each pending plug-in.
+    plugins: Vec<String>,
+}
 
 /// Where a restart-when-idle choice is remembered, next to this server's spaces.
 fn idle_restart_file() -> PathBuf {
     prismattyc_mux::spaces_dir().join("restart-when-idle")
 }
 
-/// Remember that the pmux server should restart once no session is running.
-pub(super) fn remember_idle_restart(path: &Path) -> std::io::Result<()> {
+fn idle_consent_for(plan: &Plan) -> Result<IdleConsent> {
+    Ok(IdleConsent {
+        release: plan.update_available.then(|| plan.available.clone()),
+        plugins: pending_plugins(&find_mux_bin())?,
+    })
+}
+
+fn pending_plugins(pmux: &Path) -> Result<Vec<String>> {
+    let value: Value = serde_json::from_str(&run(pmux, &["plugin", "pending"])?)
+        .context("the pending official plug-ins were not readable")?;
+    if let Some(reason) = value["unchecked"].as_str() {
+        anyhow::bail!("the pending official plug-ins could not be checked: {reason}");
+    }
+    anyhow::ensure!(
+        value["result"] == "restart_pending",
+        "the pending official plug-ins were not listed"
+    );
+    let mut plugins = Vec::new();
+    for plugin in value["plugins"]
+        .as_array()
+        .context("the pending official plug-ins were not listed")?
+    {
+        let id = plugin["id"]
+            .as_str()
+            .context("a pending plug-in omitted its id")?;
+        let from = plugin["from"].as_str().unwrap_or("");
+        let to = plugin["to"]
+            .as_str()
+            .context("a pending plug-in omitted its version")?;
+        anyhow::ensure!(
+            !id.contains(['\t', '\n', '\r'])
+                && !from.contains(['\t', '\n', '\r'])
+                && !to.contains(['\t', '\n', '\r']),
+            "a pending plug-in id or version is not a single line"
+        );
+        plugins.push(format!("{id}\t{from}\t{to}"));
+    }
+    plugins.sort();
+    plugins.dedup();
+    Ok(plugins)
+}
+
+fn encode_idle_consent(consent: &IdleConsent) -> String {
+    let mut text = format!("v1\nrelease={}\n", consent.release.as_deref().unwrap_or(""));
+    for plugin in &consent.plugins {
+        text.push_str("plugin=");
+        text.push_str(plugin);
+        text.push('\n');
+    }
+    text
+}
+
+fn decode_idle_consent(bytes: &[u8]) -> Option<IdleConsent> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let mut lines = text.lines();
+    if lines.next()? != "v1" {
+        return None;
+    }
+    let release = lines.next()?.strip_prefix("release=")?;
+    let release = if release.is_empty() {
+        None
+    } else {
+        Some(release.to_string())
+    };
+    let mut plugins = Vec::new();
+    for line in lines {
+        let record = line.strip_prefix("plugin=")?;
+        if record.split('\t').count() != 3 {
+            return None;
+        }
+        plugins.push(record.to_string());
+    }
+    Some(IdleConsent { release, plugins })
+}
+
+/// Remember the release and plug-ins the user agreed to, until no session is running.
+pub(super) fn remember_idle_restart(path: &Path, consent: &IdleConsent) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         prismattyc_mux::private_fs::create_dir(parent)?;
     }
-    prismattyc_mux::private_fs::write(path, IDLE_MARK)
+    prismattyc_mux::private_fs::write(path, encode_idle_consent(consent).as_bytes())
+}
+
+/// The consent stored at `path`, if it is one this build understands.
+pub(super) fn idle_restart_consent(path: &Path) -> Option<IdleConsent> {
+    let mut file =
+        match prismattyc_mux::private_fs::open(path, std::fs::OpenOptions::new().read(true)) {
+            Ok(file) => file,
+            Err(_) => return None,
+        };
+    let mut buf = Vec::new();
+    if file.read_to_end(&mut buf).is_err() {
+        return None;
+    }
+    if buf == STALE_IDLE_MARK {
+        clear_idle_restart(path);
+        return None;
+    }
+    decode_idle_consent(&buf)
 }
 
 /// Whether `path` is a restart-when-idle request. Anything else is ignored.
 pub(super) fn idle_restart_waiting(path: &Path) -> bool {
-    let mut file =
-        match prismattyc_mux::private_fs::open(path, std::fs::OpenOptions::new().read(true)) {
-            Ok(file) => file,
-            Err(_) => return false,
-        };
-    let mut buf = Vec::new();
-    if file.read_to_end(&mut buf).is_err() {
-        return false;
-    }
-    buf == IDLE_MARK
+    idle_restart_consent(path).is_some()
 }
 
 pub(super) fn clear_idle_restart(path: &Path) {
@@ -1125,6 +1264,11 @@ pub(super) fn clear_idle_restart(path: &Path) {
             eprintln!("prismattyc-host: could not clear the idle restart: {error}")
         }
     }
+}
+
+/// Withdraw a pending idle restart, including one left by an older build.
+pub(super) fn withdraw_idle_restart() {
+    clear_idle_restart(&idle_restart_file());
 }
 
 /// A waiting restart runs only after the last session has ended.
@@ -1147,7 +1291,7 @@ pub(super) fn ensure_idle_watch(app: &App) {
     let _ = std::thread::Builder::new()
         .name("idle-restart".into())
         .spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_secs(1));
+            std::thread::sleep(IDLE_POLL);
             if !idle_restart_waiting(&idle_restart_file()) {
                 flag.store(false, Ordering::Relaxed);
                 return;
@@ -1218,8 +1362,12 @@ mod tests {
             !idle_restart_ready(false, 0),
             "nothing was requested, so an empty server does not restart"
         );
-        remember_idle_restart(&file).expect("remember");
-        assert_eq!(std::fs::read(&file).unwrap(), b"waiting\n");
+        let consent = IdleConsent {
+            release: Some("0.3.78".into()),
+            plugins: vec!["monitor\t1.0.0\t1.1.0".into()],
+        };
+        remember_idle_restart(&file, &consent).expect("remember");
+        assert_eq!(idle_restart_consent(&file), Some(consent));
         assert!(idle_restart_waiting(&file));
         assert!(
             !idle_restart_ready(true, 2),
@@ -1231,11 +1379,55 @@ mod tests {
             !idle_restart_waiting(&file),
             "a different file is not a request"
         );
-        remember_idle_restart(&file).unwrap();
+        let again = IdleConsent {
+            release: None,
+            plugins: Vec::new(),
+        };
+        remember_idle_restart(&file, &again).unwrap();
         clear_idle_restart(&file);
         assert!(!idle_restart_waiting(&file));
         assert!(!file.exists());
+        std::fs::write(&file, STALE_IDLE_MARK).unwrap();
+        assert!(
+            idle_restart_consent(&file).is_none(),
+            "a bare waiting file is not consent"
+        );
+        assert!(!file.exists(), "a bare waiting file is withdrawn");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_idle_restart_runs_only_for_the_release_and_plug_ins_that_were_confirmed() {
+        let consent = IdleConsent {
+            release: Some("0.3.78".into()),
+            plugins: vec!["monitor\t1.0.0\t1.1.0".into()],
+        };
+        let same = decode_idle_consent(encode_idle_consent(&consent).as_bytes()).unwrap();
+        assert_eq!(same, consent);
+        let newer = IdleConsent {
+            release: Some("0.3.79".into()),
+            plugins: consent.plugins.clone(),
+        };
+        assert_ne!(newer, consent, "a later release was not confirmed");
+        let extra = IdleConsent {
+            release: consent.release.clone(),
+            plugins: vec!["monitor\t1.0.0\t1.1.0".into(), "other\t\t1.0.0".into()],
+        };
+        assert_ne!(extra, consent, "a new plug-in was not confirmed");
+        let none = IdleConsent {
+            release: None,
+            plugins: Vec::new(),
+        };
+        assert_ne!(
+            IdleConsent {
+                release: Some("0.3.78".into()),
+                plugins: Vec::new(),
+            },
+            none,
+            "a release that appeared later was not confirmed"
+        );
+        assert!(decode_idle_consent(b"waiting\n").is_none());
+        assert!(decode_idle_consent(b"v1\nrelease=0.3.78\nplugin=broken\n").is_none());
     }
 
     #[cfg(unix)]

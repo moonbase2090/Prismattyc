@@ -33,8 +33,13 @@ official plug-ins are waiting for the pmux server. The running sessions are
 listed immediately. **Save and restart** saves them and restarts the pmux
 server in that step, then brings them back. **Restart when idle** leaves them
 running and restarts the pmux server after the last one ends, so a pending
-official plug-in can apply. **Cancel** (or Esc) changes nothing. The server
-program is still named `pmuxd`.
+official plug-in can apply. That choice remembers the release and the pending
+official plug-ins that were shown. It restarts only if those are still the
+ones waiting when the last session ends. A newer release, or a different
+plug-in set, drops the request and shows the dialog again. **Cancel** (or Esc)
+withdraws a pending idle restart, and so does any completed restart. Deleting
+the `restart-when-idle` file next to this server's saved spaces withdraws it
+while sessions are still running. The server program is still named `pmuxd`.
 
 ## Restart without stopping sessions
 

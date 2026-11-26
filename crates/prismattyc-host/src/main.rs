@@ -22754,7 +22754,10 @@ impl ApplicationHandler<UserAction> for App {
                 Ok(plan) if macos_menu::confirm_restart(&safe_restart::preview_text(&plan)) => {
                     safe_restart::start_restart(self.event_proxy.clone());
                 }
-                Ok(_) => self.safe_restart_inflight = false,
+                Ok(_) => {
+                    update_flow::withdraw_idle_restart();
+                    self.safe_restart_inflight = false;
+                }
                 Err(error) => {
                     self.safe_restart_inflight = false;
                     macos_menu::show_update_message("Could Not Preview the Restart", &error);
@@ -22764,7 +22767,10 @@ impl ApplicationHandler<UserAction> for App {
             UserAction::SafeRestartFinished(result) => {
                 self.safe_restart_inflight = false;
                 match result {
-                    Ok(report) => macos_menu::show_update_message("Restart Finished", &report),
+                    Ok(report) => {
+                        update_flow::withdraw_idle_restart();
+                        macos_menu::show_update_message("Restart Finished", &report);
+                    }
                     Err(error) => macos_menu::show_update_message("Restart Failed", &error),
                 }
             }

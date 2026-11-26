@@ -123,10 +123,15 @@ impl RestartModal {
         }
     }
 
-    fn explanation(&self) -> &'static str {
+    fn explanation(&self) -> String {
         match self.style {
-            update_flow::ConfirmStyle::OneConfirm => ONE_EXPLANATION,
-            update_flow::ConfirmStyle::Review => EXPLANATION,
+            update_flow::ConfirmStyle::OneConfirm => match &self.available {
+                Some(available) => format!(
+                    "Save and restart installs {available} and restarts the pmux server, then brings these sessions back. Restart when idle waits until the last session ends and applies only this release. Unsaved work inside programs is not saved."
+                ),
+                None => ONE_EXPLANATION.to_string(),
+            },
+            update_flow::ConfirmStyle::Review => EXPLANATION.to_string(),
         }
     }
 
@@ -671,12 +676,8 @@ pub(super) fn paint(host: &mut HostState, buffer: &mut [u32], width: usize, heig
     let content_w = panel_w.saturating_sub(2 * pad);
     let line_h = s(22.0);
     let row_h = s(40.0);
-    let explanation = wrap(
-        Face::Regular,
-        body_px,
-        modal.explanation(),
-        content_w as f32,
-    );
+    let explanation_text = modal.explanation();
+    let explanation = wrap(Face::Regular, body_px, &explanation_text, content_w as f32);
     let names = if modal.expanded {
         flow(
             Face::Mono,
@@ -1367,6 +1368,10 @@ mod tests {
         );
         let mut m = one_confirm(&["alpha", "beta"]);
         assert_eq!(m.title(), "Restart the pmux server");
+        assert!(
+            m.explanation().contains("installs 0.3.78"),
+            "the confirm names the release it will install"
+        );
         assert!(m.expanded, "the session list is open without a second step");
         assert_eq!(m.status()["sessions_shown"], 2);
         let rows = m.rows();

@@ -760,7 +760,7 @@ def exercise(bins, scratch, feature="all", expected_catalog=None, frame_probe=No
             tools = request(2,"tools/list",{})["tools"]
             names = sorted(tool["name"] for tool in tools)
             if activity_only:
-                assert names == ["pmux_activity_hosts","pmux_activity_poll","pmux_activity_recent","pmux_activity_seats"], names
+                assert names == ["pmux_activity_hosts","pmux_activity_poll","pmux_activity_recent","pmux_activity_seats","pmux_activity_wait"], names
                 assert all("outputSchema" in tool for tool in tools)
                 result = request(3,"tools/call",{"name":"pmux_activity_hosts","arguments":{}})
                 assert not result.get("isError", False), result
@@ -812,7 +812,7 @@ def exercise(bins, scratch, feature="all", expected_catalog=None, frame_probe=No
             assert call(1, "initialize", initialize, bearer)[0] == 200
             status, reply = call(2, "tools/list", {}, bearer)
             names = sorted(tool["name"] for tool in reply["result"]["tools"])
-            assert status == 200 and names == ["pmux_activity_hosts","pmux_activity_poll","pmux_activity_recent","pmux_activity_seats"], (status, names)
+            assert status == 200 and names == ["pmux_activity_hosts","pmux_activity_poll","pmux_activity_recent","pmux_activity_seats","pmux_activity_wait"], (status, names)
             status, reply = call(3, "tools/call", {"name":"pmux_activity_hosts","arguments":{}}, bearer)
             assert status == 200 and not reply["result"].get("isError", False), reply
             assert json.loads(reply["result"]["content"][0]["text"])["hosts"] == [{"label":"local","endpoint":"local"}]
@@ -1257,7 +1257,7 @@ else:
             mcp_proof(["--activity-only","--supervise"],True,["fixture-seat"])
             mcp_http_proof(["fixture-seat"])
             exports = connection.plugin("exports",allowlist=[connector])["response"]["reply"]["tools"]
-            assert len(exports) == 4
+            assert len(exports) == 5
             cli("disable",connector)
             assert connection.plugin("exports",allowlist=[connector])["response"]["reply"]["tools"] == []
             assert connection.plugin("call_export",handle=exports[0]["handle"],arguments="{}")["status"] == "error"

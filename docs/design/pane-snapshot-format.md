@@ -116,7 +116,7 @@ Everything needed to paint the first frame and to resume the output stream:
 
 - **Cut identity:**
   - `pane_id`, and `through_seq`, the pane-log sequence at the cut. Output streaming resumes after it.
-  - `scrolled_lines`. Image placements anchor to absolute primary lines derived from it (`anchor_abs_line`, `crates/prismattyc-emulator/src/graphics/mod.rs:99`, `:126-134`), as do cell-rect anchors. A replica must continue from the same value.
+  - `scrolled_lines`. Image placements anchor to absolute primary lines derived from it (`anchor_abs_line`, `crates/prismattyc-emulator/src/graphics/mod.rs:99`, `:129-137`), as do cell-rect anchors. A replica must continue from the same value.
   - `history_generation`, which is bumped whenever history is rewritten (`CSI 3 J`, reflow, import).
   - `history_end`, the absolute index one past the newest history row at the cut.
   - `history_start`, the absolute index of the oldest row still held.

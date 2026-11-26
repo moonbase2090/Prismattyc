@@ -265,6 +265,31 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: scripts/release/smoke-linux-al2023.sh "target/$TARGET/release"
 
+  workspace-version:
+    name: Workspace version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The drift check needs the merge-base with the base branch.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch the base branch
+        env:
+          BASE: ${{ github.base_ref || 'main' }}
+        run: git fetch --no-tags origin "+refs/heads/${BASE}:refs/remotes/origin/${BASE}"
+
+      - name: Test the workspace version check
+        run: python3 scripts/check-workspace-version_test.py
+
+      - name: Check the workspace version
+        env:
+          VERSION_BASE_REF: origin/${{ github.base_ref || 'main' }}
+        run: scripts/check-workspace-version.sh
+
   check:
     name: Check
     runs-on: ubuntu-24.04

@@ -58,7 +58,8 @@ Feature and fix PRs leave the workspace version alone in all four files:
 - `docs/fidelity-matrix-v1.md`
 
 If a branch picked up a version bump, restore those four files to the base's
-version. Run `scripts/check-workspace-version.sh` before merging. Only the
+version. Run `scripts/check-workspace-version.sh` before merging. CI runs it
+and its tests on every push and pull request. Only the
 release PR (`release/vX.Y.Z-rc.N-changelog`, which adds the `## [X.Y.Z]` and
 `## [X.Y.Z-rc.N]` CHANGELOG sections before the signed tag) moves the
 version, and it updates all four files together. The workspace version is

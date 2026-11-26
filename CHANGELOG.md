@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Restart now** on the Plug-ins page, and the update notice, list the running sessions and confirm **Save and restart** in that same step. **Restart when idle** waits until the last session ends, then restarts the pmux server so a pending official plug-in can apply. **Update and restart all components** in the command palette still opens the full review. The server program is still named `pmuxd`.
+
 ## [0.3.78] - 2026-11-26
 
 ### Added

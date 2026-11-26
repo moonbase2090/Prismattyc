@@ -105,21 +105,6 @@ run_named() {
   done
 }
 
-rich_client_tests=(
-  "default_query_bytes_match_protocol"
-  "timeout_and_missing_body_are_classic"
-  "malformed_reply_is_classic"
-  "unsupported_reply_is_classic"
-  "events_drop_in_classic_and_accept_in_rich"
-  "detach_encodes_every_id_and_drop_is_safe"
-  "reply_must_echo_query_id"
-  "spike_grant_does_not_accept_focus_events"
-  "child_exit_reason_is_distinct_from_timeout"
-  "negotiate_skips_stale_and_unrelated_apc"
-  "surface_grant_builds_monotonic_workspace_snapshots"
-  "negotiation_rejects_reply_newer_than_requested_max"
-  "negotiation_stops_at_reply_terminator_without_eating_input"
-)
 rich_render_tests=(
   "workspace_layout_adapts_without_changing_logical_ids"
   "workspace_layout_clips_chrome_and_rejects_unsatisfiable_tree"
@@ -132,14 +117,12 @@ rich_render_tests=(
 require_tests prismattyc-protocol "${rich_protocol_tests[@]}"
 require_tests prismattyc-host "${rich_host_tests[@]}"
 require_tests prismattyc "${rich_tty_tests[@]}"
-require_tests prismattyc-rich-client "${rich_client_tests[@]}"
 require_tests prismattyc-render "${rich_render_tests[@]}"
 
 echo "phase3-rich: named protocol / host / TTY rich proofs"
 run_named prismattyc-protocol "${rich_protocol_tests[@]}"
 run_named prismattyc-host "${rich_host_tests[@]}"
 run_named prismattyc "${rich_tty_tests[@]}"
-run_named prismattyc-rich-client "${rich_client_tests[@]}"
 run_named prismattyc-render "${rich_render_tests[@]}"
 
 run_classic() {

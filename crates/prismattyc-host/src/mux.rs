@@ -27,7 +27,11 @@ use prismattyc_mux::{
 use prismattyc_protocol::{InputModifiers, PointerPhase, ViewerId};
 
 use crate::attach_log::{self, LogMessage};
-use crate::rich::{self, CapabilityGrant, ChildWrite, RichSession};
+pub(crate) use crate::capability::Experimental;
+#[cfg(native_transport)]
+use crate::capability::QueryReply;
+use crate::capability::{self, CapabilityGrant, ChildWrite};
+use crate::rich::{self, RichSession};
 
 const FROM_PTY_CAP: usize = 64;
 const TO_CHILD_CAP: usize = 32;
@@ -791,7 +795,7 @@ struct NativeFlow<'a> {
 }
 
 #[cfg(native_transport)]
-impl rich::RichHost for NativeFlow<'_> {
+impl capability::CapabilityHost for NativeFlow<'_> {
     fn before_bytes(&mut self, _emulator: &Emulator) -> bool {
         self.owner.authority.pty_bytes(self.now).unwrap_or(true)
     }
@@ -800,15 +804,14 @@ impl rich::RichHost for NativeFlow<'_> {
         &mut self,
         query: prismattyc_protocol::CapabilityQuery,
         emulator: &mut Emulator,
-        rich: &mut RichSession,
         to_child: &mpsc::SyncSender<ChildWrite>,
-    ) -> bool {
+    ) -> QueryReply {
         use crate::native::{authority::Geometry, profile};
         if query.max_version.major != 0
             || query.max_version.minor < 4
             || !self.owner.authority.available()
         {
-            return false;
+            return QueryReply::Pass;
         }
         let geometry = (|| {
             Geometry::new(
@@ -820,15 +823,16 @@ impl rich::RichHost for NativeFlow<'_> {
         })();
         let Some(geometry) = geometry else {
             self.owner.authority.close();
-            return false;
+            return QueryReply::Pass;
         };
         let now = self.now;
         if self.owner.authority.geometry() != geometry
             && self.owner.authority.resize(geometry, now).is_err()
         {
-            return false;
+            return QueryReply::Pass;
         }
-        *rich = RichSession::default();
+        // From here the PTY may take the outer rows, so state laid out for
+        // the old geometry (rich reservations) is stale even if this fails.
         if *self.rows != self.outer_rows {
             if self
                 .session
@@ -841,7 +845,7 @@ impl rich::RichHost for NativeFlow<'_> {
                 .is_err()
             {
                 self.owner.authority.close();
-                return false;
+                return QueryReply::Reset;
             }
             emulator.resize(self.columns, self.outer_rows);
             *self.rows = self.outer_rows;
@@ -851,18 +855,18 @@ impl rich::RichHost for NativeFlow<'_> {
             Ok(offer) => offer,
             Err(_) => {
                 self.owner.authority.close();
-                return false;
+                return QueryReply::Reset;
             }
         };
         let Some(bytes) = profile::encode_reply(&offer) else {
             self.owner.authority.close();
-            return false;
+            return QueryReply::Reset;
         };
         let message = ChildWrite::capability(bytes, CapabilityGrant::Native(offer.receipt));
         if to_child.try_send(message).is_err() {
             let _ = self.owner.authority.pty_bytes(now);
         }
-        true
+        QueryReply::Answered
     }
 }
 
@@ -966,12 +970,12 @@ fn log_backed_attach(
 fn new_emulator(
     cols: usize,
     rows: usize,
-    experimental_rich: bool,
+    experimental: Experimental,
     alt_screen_scrollback: bool,
     cell_w: usize,
     cell_h: usize,
 ) -> Emulator {
-    let mut emulator = if experimental_rich {
+    let mut emulator = if experimental.collects_apc() {
         Emulator::new_experimental(cols, rows, MAX_SCROLLBACK)
     } else {
         Emulator::new(cols, rows, MAX_SCROLLBACK)
@@ -1069,7 +1073,7 @@ pub(crate) struct PaneRuntime {
     grant_rx: mpsc::Receiver<CapabilityGrant>,
     pub(crate) rich: RichSession,
     rich_viewer_id: ViewerId,
-    experimental_rich: bool,
+    experimental: Experimental,
     /// Opt-in alternate-screen scrollback retention (B1 gate, default off).
     pub(crate) alt_screen_scrollback: bool,
     pub(crate) cols: usize,
@@ -1219,7 +1223,7 @@ impl PaneRuntime {
         cols: usize,
         rows: usize,
         cwd: Option<&Path>,
-        experimental_rich: bool,
+        experimental: Experimental,
         alt_screen_scrollback: bool,
         wake: Option<Wake>,
         cell_w: usize,
@@ -1238,7 +1242,7 @@ impl PaneRuntime {
                 grant_rx,
                 cols,
                 rows,
-                experimental_rich,
+                experimental,
                 alt_screen_scrollback,
                 cell_w,
                 cell_h,
@@ -1269,7 +1273,7 @@ impl PaneRuntime {
                     fallback,
                     cols,
                     rows,
-                    experimental_rich,
+                    experimental,
                     alt_screen_scrollback,
                     wake,
                     cell_w,
@@ -1285,7 +1289,7 @@ impl PaneRuntime {
                 connection,
                 cols,
                 rows,
-                experimental_rich,
+                experimental,
                 alt_screen_scrollback,
                 wake.clone(),
                 cell_w,
@@ -1305,7 +1309,7 @@ impl PaneRuntime {
             cols,
             rows,
             cwd,
-            experimental_rich,
+            experimental,
             alt_screen_scrollback,
             wake,
             cell_w,
@@ -1335,7 +1339,7 @@ impl PaneRuntime {
         cols: usize,
         rows: usize,
         cwd: Option<&Path>,
-        experimental_rich: bool,
+        experimental: Experimental,
         alt_screen_scrollback: bool,
         wake: Option<Wake>,
         cell_w: usize,
@@ -1363,7 +1367,8 @@ impl PaneRuntime {
         #[cfg(native_transport)]
         let (mut session, mut native) = {
             let geometry = (|| {
-                if !experimental_rich || !matches!(route, PtyRoute::DirectLocal) || wake.is_none() {
+                if !experimental.native || !matches!(route, PtyRoute::DirectLocal) || wake.is_none()
+                {
                     return None;
                 }
                 crate::native::authority::Geometry::new(
@@ -1468,7 +1473,7 @@ impl PaneRuntime {
             grant_rx,
             cols,
             rows,
-            experimental_rich,
+            experimental,
             alt_screen_scrollback,
             cell_w,
             cell_h,
@@ -1490,7 +1495,7 @@ impl PaneRuntime {
         connection: attach_log::LogConnection,
         cols: usize,
         rows: usize,
-        experimental_rich: bool,
+        experimental: Experimental,
         alt_screen_scrollback: bool,
         wake: Option<Wake>,
         cell_w: usize,
@@ -1513,7 +1518,7 @@ impl PaneRuntime {
             grant_rx,
             cols,
             rows,
-            experimental_rich,
+            experimental,
             alt_screen_scrollback,
             cell_w,
             cell_h,
@@ -1542,7 +1547,7 @@ impl PaneRuntime {
         fallback: PtyFallback,
         cols: usize,
         rows: usize,
-        experimental_rich: bool,
+        experimental: Experimental,
         alt_screen_scrollback: bool,
         wake: Option<Wake>,
         cell_w: usize,
@@ -1556,7 +1561,7 @@ impl PaneRuntime {
             grant_rx,
             cols,
             rows,
-            experimental_rich,
+            experimental,
             alt_screen_scrollback,
             cell_w,
             cell_h,
@@ -1681,7 +1686,7 @@ impl PaneRuntime {
             self.cols,
             self.outer_rows,
             fallback.cwd.as_deref(),
-            self.experimental_rich,
+            self.experimental,
             self.alt_screen_scrollback,
             wake,
             self.cell_w,
@@ -1795,7 +1800,7 @@ impl PaneRuntime {
         self.emulator = new_emulator(
             self.cols,
             self.outer_rows,
-            self.experimental_rich,
+            self.experimental,
             self.alt_screen_scrollback,
             self.cell_w,
             self.cell_h,
@@ -1826,7 +1831,7 @@ impl PaneRuntime {
         grant_rx: mpsc::Receiver<CapabilityGrant>,
         cols: usize,
         rows: usize,
-        experimental_rich: bool,
+        experimental: Experimental,
         alt_screen_scrollback: bool,
         cell_w: usize,
         cell_h: usize,
@@ -1834,7 +1839,7 @@ impl PaneRuntime {
         let emulator = new_emulator(
             cols,
             rows,
-            experimental_rich,
+            experimental,
             alt_screen_scrollback,
             cell_w,
             cell_h,
@@ -1872,7 +1877,7 @@ impl PaneRuntime {
             grant_rx,
             rich: RichSession::default(),
             rich_viewer_id: ViewerId::from_bytes(viewer_bytes),
-            experimental_rich,
+            experimental,
             alt_screen_scrollback,
             cols,
             outer_rows: rows,
@@ -2227,6 +2232,53 @@ impl PaneRuntime {
         }
     }
 
+    /// Feed one PTY chunk through rich, native sessions or the plain
+    /// emulator, as the pane's experimental features ask. True when a native
+    /// session revoked what the pane showed.
+    fn feed_pty_chunk(&mut self, bytes: &[u8]) -> bool {
+        #[cfg(native_transport)]
+        if let Some((owner, session)) = self.native.as_mut().zip(self.session.as_ref()) {
+            let mut flow = NativeFlow {
+                owner,
+                session,
+                columns: self.cols,
+                rows: &mut self.rows,
+                outer_rows: self.outer_rows,
+                cell_width: self.cell_w,
+                cell_height: self.cell_h,
+                now: Instant::now(),
+            };
+            return if self.experimental.rich {
+                rich::process_rich_chunk(
+                    &mut self.emulator,
+                    &mut self.rich,
+                    &self.to_child_tx,
+                    bytes,
+                    &mut flow,
+                )
+            } else {
+                capability::process_native_chunk(
+                    &mut self.emulator,
+                    &self.to_child_tx,
+                    bytes,
+                    &mut flow,
+                )
+            };
+        }
+        if self.experimental.rich {
+            return rich::process_rich_chunk(
+                &mut self.emulator,
+                &mut self.rich,
+                &self.to_child_tx,
+                bytes,
+                &mut (),
+            );
+        }
+        let _ = self.emulator.feed(bytes);
+        capability::drain_emulator_replies(&mut self.emulator, &self.to_child_tx);
+        false
+    }
+
     fn drain_pty(
         &mut self,
         from_pty_rx: &mpsc::Receiver<std::io::Result<Vec<u8>>>,
@@ -2247,58 +2299,17 @@ impl PaneRuntime {
                 }
                 Ok(Ok(bytes)) => {
                     let before = self.snapshot_chunk();
-                    if self.experimental_rich {
-                        #[cfg(native_transport)]
-                        let revoked = match self.native.as_mut().zip(self.session.as_ref()) {
-                            Some((owner, session)) => rich::process_rich_chunk(
-                                &mut self.emulator,
-                                &mut self.rich,
-                                &self.to_child_tx,
-                                &bytes,
-                                &mut NativeFlow {
-                                    owner,
-                                    session,
-                                    columns: self.cols,
-                                    rows: &mut self.rows,
-                                    outer_rows: self.outer_rows,
-                                    cell_width: self.cell_w,
-                                    cell_height: self.cell_h,
-                                    now: Instant::now(),
-                                },
-                            ),
-                            None => rich::process_rich_chunk(
-                                &mut self.emulator,
-                                &mut self.rich,
-                                &self.to_child_tx,
-                                &bytes,
-                                &mut (),
-                            ),
-                        };
-                        #[cfg(not(native_transport))]
-                        let revoked = rich::process_rich_chunk(
-                            &mut self.emulator,
-                            &mut self.rich,
-                            &self.to_child_tx,
-                            &bytes,
-                            &mut (),
-                        );
-                        if revoked {
-                            dirty = true;
-                            content_changed = true;
-                            self.selection.clear();
-                            self.keyboard_select_mode = false;
-                            self.view_scroll = 0;
-                        }
-                        if self.reconcile_workspace_geometry().is_err() {
-                            self.rich.drop_workspace();
-                            let _ = self.resize_guest(self.cols, self.outer_rows.max(1));
-                        }
-                    } else {
-                        let _ = self.emulator.feed(&bytes);
-                        let replies = self.emulator.take_pending_replies();
-                        for reply in replies {
-                            let _ = self.to_child_tx.try_send(ChildWrite::bytes(reply));
-                        }
+                    let revoked = self.feed_pty_chunk(&bytes);
+                    if revoked {
+                        dirty = true;
+                        content_changed = true;
+                        self.selection.clear();
+                        self.keyboard_select_mode = false;
+                        self.view_scroll = 0;
+                    }
+                    if self.experimental.rich && self.reconcile_workspace_geometry().is_err() {
+                        self.rich.drop_workspace();
+                        let _ = self.resize_guest(self.cols, self.outer_rows.max(1));
                     }
                     self.view_scroll = self
                         .view_scroll
@@ -2455,14 +2466,14 @@ impl PaneRuntime {
                     Ok(LogMessage::Reset) => {
                         // StaleSequence: the retained log was rebuilt. Drop replica
                         // history so a replay from seq 1 does not stack into it.
-                        let mut emulator = if self.experimental_rich {
-                            Emulator::new_experimental(self.cols, self.rows, MAX_SCROLLBACK)
-                        } else {
-                            Emulator::new(self.cols, self.rows, MAX_SCROLLBACK)
-                        };
-                        emulator.set_retain_alt_history(self.alt_screen_scrollback);
-                        emulator.set_cell_pixels(self.cell_w as u32, self.cell_h as u32);
-                        self.emulator = emulator;
+                        self.emulator = new_emulator(
+                            self.cols,
+                            self.rows,
+                            self.experimental,
+                            self.alt_screen_scrollback,
+                            self.cell_w,
+                            self.cell_h,
+                        );
                         self.restore_state_seq = None;
                         self.selection.clear();
                         self.keyboard_select_mode = false;
@@ -2695,7 +2706,7 @@ impl PaneRuntime {
     }
 
     pub(crate) fn experimental_rich(&self) -> bool {
-        self.experimental_rich
+        self.experimental.rich
     }
 }
 
@@ -2956,7 +2967,7 @@ pub(crate) struct MuxRuntime {
     cols: usize,
     rows: usize,
     geom: HostGeom,
-    experimental_rich: bool,
+    experimental: Experimental,
     alt_screen_scrollback: bool,
     wake: Option<Wake>,
     /// Connect and promote pmuxd panes off the main thread (render thread plan
@@ -3045,10 +3056,11 @@ impl MuxRuntime {
         cols: usize,
         rows: usize,
         geom: HostGeom,
-        experimental_rich: bool,
+        experimental: impl Into<Experimental>,
         alt_screen_scrollback: bool,
         wake: Option<Wake>,
     ) -> Result<Self> {
+        let experimental = experimental.into();
         let mut domain = Domain::bootstrap("default")?;
         let session = domain.sessions().next().context("bootstrap session")?.id;
         let window = domain
@@ -3075,7 +3087,7 @@ impl MuxRuntime {
             pty_cols,
             pty_rows,
             None,
-            experimental_rich,
+            experimental,
             alt_screen_scrollback,
             wake.clone(),
             geom.cell_w,
@@ -3096,7 +3108,7 @@ impl MuxRuntime {
             cols,
             rows,
             geom,
-            experimental_rich,
+            experimental,
             alt_screen_scrollback,
             wake,
             async_connect,
@@ -3121,7 +3133,7 @@ impl MuxRuntime {
             self.cols,
             self.rows,
             self.geom,
-            self.experimental_rich,
+            self.experimental,
             self.alt_screen_scrollback,
             self.wake.clone(),
         )
@@ -3637,7 +3649,7 @@ impl MuxRuntime {
             pty_cols,
             pty_rows,
             inherit_cwd.as_deref(),
-            self.experimental_rich,
+            self.experimental,
             self.alt_screen_scrollback,
             self.wake.clone(),
             self.geom.cell_w,
@@ -4860,7 +4872,7 @@ impl MuxRuntime {
             grant_rx,
             old.cols,
             old.outer_rows,
-            old.experimental_rich,
+            old.experimental,
             old.alt_screen_scrollback,
             old.cell_w,
             old.cell_h,
@@ -4958,7 +4970,7 @@ impl MuxRuntime {
         let rows = runtime.outer_rows;
         let cell_w = runtime.cell_w;
         let cell_h = runtime.cell_h;
-        let experimental_rich = runtime.experimental_rich;
+        let experimental = runtime.experimental;
         let alt_screen_scrollback = runtime.alt_screen_scrollback;
         let resolved = connection.session_key().to_string();
         let mut replacement = PaneRuntime::spawn_log_backed(
@@ -4966,7 +4978,7 @@ impl MuxRuntime {
             connection,
             cols,
             rows,
-            experimental_rich,
+            experimental,
             alt_screen_scrollback,
             self.wake.clone(),
             cell_w,
@@ -5071,7 +5083,7 @@ impl MuxRuntime {
         let rows = runtime.outer_rows;
         let cell_w = runtime.cell_w;
         let cell_h = runtime.cell_h;
-        let experimental_rich = runtime.experimental_rich;
+        let experimental = runtime.experimental;
         let alt_screen_scrollback = runtime.alt_screen_scrollback;
         let attach_session = runtime.attach_session.clone();
         let attach_name = runtime.attach_name.clone();
@@ -5083,7 +5095,7 @@ impl MuxRuntime {
             cols,
             rows,
             cwd.as_deref(),
-            experimental_rich,
+            experimental,
             alt_screen_scrollback,
             self.wake.clone(),
             cell_w,
@@ -5144,7 +5156,7 @@ impl MuxRuntime {
             pty_cols,
             pty_rows,
             None,
-            self.experimental_rich,
+            self.experimental,
             self.alt_screen_scrollback,
             self.wake.clone(),
             self.geom.cell_w,
@@ -6945,7 +6957,7 @@ mod tests {
             },
             80,
             24,
-            false,
+            Experimental::default(),
             false,
             None,
             1,
@@ -9980,7 +9992,7 @@ mod tests {
         let first = runtime.focused_id();
         {
             let pane = runtime.focused_mut();
-            pane.rich.apply_grant(rich::RichGrant {
+            pane.rich.apply_grant(capability::RichGrant {
                 features: prismattyc_protocol::Feature::V1.into_iter().collect(),
                 region_limit: 8,
             });

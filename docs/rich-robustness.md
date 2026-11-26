@@ -17,6 +17,6 @@ suspend, teardown.
 | Flood + rich active | `rich::tests::flood_with_live_region_updates_stays_responsive` | `yes` in a rich pane while a region ticks. Grid keeps painting; host stays `Wait`-silent when output stops. |
 
 The pin is `scripts/test-phase3-rich.sh`. It is not a required light
-Local Actions gate. Run it by hand, with
-`local-actions run --event pull_request --job phase3-rich`, or via the
-scheduled `phase3-rich-nightly` workflow.
+Local Actions gate. Run it by hand or with
+`local-actions run --event pull_request --job phase3-rich`. On GitHub the
+`phase3-rich` CI job runs it on every push, including each commit to main.

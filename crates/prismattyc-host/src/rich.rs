@@ -22,67 +22,8 @@ use prismattyc_render::{
     layout_workspace_with_status, CellRectOverlay, OverlayRun, WorkspaceLayout,
 };
 
-/// Bytes for the child PTY writer thread (keys, paste, DSR, capability replies).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ChildWrite {
-    pub bytes: Vec<u8>,
-    /// Applied to [`RichSession`] only after a successful PTY write.
-    pub capability_grant: Option<CapabilityGrant>,
-    /// An `async_paste` paste: its bytes (maybe still being produced) and
-    /// where the writer reports the outcome. `bytes` is empty when set.
-    pub paste: Option<crate::paste_job::PasteTicket>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CapabilityGrant {
-    Rich(RichGrant),
-    #[cfg(native_transport)]
-    Native(crate::native::authority::OfferReceipt),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RichGrant {
-    pub features: BTreeSet<Feature>,
-    pub region_limit: usize,
-}
-
-impl ChildWrite {
-    pub(crate) fn bytes(bytes: Vec<u8>) -> Self {
-        Self {
-            bytes,
-            capability_grant: None,
-            paste: None,
-        }
-    }
-
-    pub(crate) fn paste(ticket: crate::paste_job::PasteTicket) -> Self {
-        Self {
-            bytes: Vec::new(),
-            capability_grant: None,
-            paste: Some(ticket),
-        }
-    }
-
-    pub(crate) fn capability(bytes: Vec<u8>, grant: CapabilityGrant) -> Self {
-        Self {
-            bytes,
-            capability_grant: Some(grant),
-            paste: None,
-        }
-    }
-}
-
-impl From<Vec<u8>> for ChildWrite {
-    fn from(bytes: Vec<u8>) -> Self {
-        Self::bytes(bytes)
-    }
-}
-
-impl AsRef<[u8]> for ChildWrite {
-    fn as_ref(&self) -> &[u8] {
-        &self.bytes
-    }
-}
+use crate::capability::{drain_emulator_replies, slice_end, CapabilityHost, QueryReply};
+use crate::capability::{CapabilityGrant, ChildWrite, RichGrant};
 
 /// Host-side experimental rich session state (negotiation + attachments).
 #[derive(Debug, Default)]
@@ -613,67 +554,24 @@ struct HostAttachment {
     runs: Vec<StyledRun>,
 }
 
-pub(crate) fn drain_emulator_replies(
-    emulator: &mut Emulator,
-    to_child: &mpsc::SyncSender<ChildWrite>,
-) {
-    for reply in emulator.take_pending_replies() {
-        let _ = to_child.try_send(ChildWrite::bytes(reply));
-    }
-}
-
 /// Feed child output, preserving scroll-vs-APC order inside one PTY chunk.
 ///
-/// Hooks run in collector order, before byte parsing and after query decoding.
-pub(crate) trait RichHost {
-    fn before_bytes(&mut self, emulator: &Emulator) -> bool;
-    fn capability_reply(
-        &mut self,
-        query: prismattyc_protocol::CapabilityQuery,
-        emulator: &mut Emulator,
-        rich: &mut RichSession,
-        to_child: &mpsc::SyncSender<ChildWrite>,
-    ) -> bool;
-}
-
-impl RichHost for () {
-    fn before_bytes(&mut self, _emulator: &Emulator) -> bool {
-        false
-    }
-
-    fn capability_reply(
-        &mut self,
-        _query: prismattyc_protocol::CapabilityQuery,
-        _emulator: &mut Emulator,
-        _rich: &mut RichSession,
-        _to_child: &mpsc::SyncSender<ChildWrite>,
-    ) -> bool {
-        false
-    }
-}
-
-/// Plain-text floods (no ESC, collector idle) are fed as a single slice so
-/// `--experimental-rich` cannot stall the event loop. Control-bearing
-/// slices still split on ESC so a completed APC and a grid scroll cannot share
-/// one `feed` (collector runs before the VT parser).
+/// `host` hooks run in collector order, before byte parsing and after query
+/// decoding. A query `host` answers gets no rich reply.
+///
+/// Slices follow [`slice_end`], so a plain-text flood cannot stall the event
+/// loop.
 pub(crate) fn process_rich_chunk(
     emulator: &mut Emulator,
     rich: &mut RichSession,
     to_child: &mpsc::SyncSender<ChildWrite>,
     bytes: &[u8],
-    host: &mut impl RichHost,
+    host: &mut impl CapabilityHost,
 ) -> bool {
     let mut index = 0;
     let mut revoked = false;
     while index < bytes.len() {
-        let end = if emulator.apc_pending() || bytes[index] == 0x1b {
-            index + 1
-        } else {
-            bytes[index..]
-                .iter()
-                .position(|&b| b == 0x1b)
-                .map_or(bytes.len(), |rel| index + rel)
-        };
+        let end = slice_end(emulator, bytes, index);
         revoked |= host.before_bytes(emulator);
         feed_rich_slice(emulator, rich, to_child, &bytes[index..end], host);
         index = end;
@@ -686,7 +584,7 @@ fn feed_rich_slice(
     rich: &mut RichSession,
     to_child: &mpsc::SyncSender<ChildWrite>,
     slice: &[u8],
-    host: &mut impl RichHost,
+    host: &mut impl CapabilityHost,
 ) {
     if slice.is_empty() {
         return;
@@ -710,7 +608,7 @@ fn handle_control_events(
     emulator: &mut Emulator,
     rich: &mut RichSession,
     to_child: &mpsc::SyncSender<ChildWrite>,
-    host: &mut impl RichHost,
+    host: &mut impl CapabilityHost,
 ) {
     for event in events {
         match event {
@@ -718,8 +616,13 @@ fn handle_control_events(
             CollectedApc::Body(body) => {
                 match decode_body(body) {
                     Ok(ControlMessage::CapabilityQuery(query)) => {
-                        if host.capability_reply(query, emulator, rich, to_child) {
-                            continue;
+                        match host.capability_reply(query, emulator, to_child) {
+                            QueryReply::Pass => {}
+                            QueryReply::Reset => *rich = RichSession::default(),
+                            QueryReply::Answered => {
+                                *rich = RichSession::default();
+                                continue;
+                            }
                         }
                         if let Some(reply) = CapabilityReply::for_surface_query(query) {
                             if let Ok(bytes) = encode_capability_reply(&reply) {
@@ -1151,7 +1054,7 @@ mod tests {
     fn owner_observes_bytes_after_a_query_in_the_same_chunk_before_the_parser() {
         #[derive(Default)]
         struct ObservedHost(Vec<(&'static str, u32, char)>);
-        impl RichHost for ObservedHost {
+        impl CapabilityHost for ObservedHost {
             fn before_bytes(&mut self, emulator: &Emulator) -> bool {
                 self.0
                     .push(("before", 0, emulator.screen().view_cell(0, 0, 0).character));
@@ -1162,15 +1065,14 @@ mod tests {
                 &mut self,
                 query: CapabilityQuery,
                 emulator: &mut Emulator,
-                _rich: &mut RichSession,
                 _to_child: &mpsc::SyncSender<ChildWrite>,
-            ) -> bool {
+            ) -> QueryReply {
                 self.0.push((
                     "query",
                     query.request_id.get(),
                     emulator.screen().view_cell(0, 0, 0).character,
                 ));
-                false
+                QueryReply::Pass
             }
         }
         let mut emulator = Emulator::new_experimental(8, 2, 0);

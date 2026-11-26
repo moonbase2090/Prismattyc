@@ -24,7 +24,6 @@ Start with the [README](../README.md) for installation and basic use.
 | Reference | What it covers |
 | --- | --- |
 | [Pane messaging](pane-write-protocol.md) | Deliver text to a pane and inspect the result. |
-| [Rich clients](rich-client.md) | Build applications that use optional rich content. |
 | [Capability protocol](capability-protocol.md) | Discover supported application features. |
 | [Transport compatibility](capability-transport-matrix.md) | Protocol versions and transport behavior. |
 | [Rendering](rendering.md) | Presentation backends and transparency. |

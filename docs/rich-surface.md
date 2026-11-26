@@ -2,8 +2,8 @@
 
 This reference defines the wire format, limits, ownership, and input rules.
 Rich rendering remains optional and experimental. Query capabilities before
-sending rich content. See [capability discovery](capability-protocol.md) and
-[client integration](rich-client.md) for the implemented features.
+sending rich content. See [capability discovery](capability-protocol.md) for
+how to negotiate.
 
 Rich mode is being removed. `pmuxd` and `pmux-attach` no longer carry rich
 surfaces: daemon panes do not answer capability queries, and attach paints no

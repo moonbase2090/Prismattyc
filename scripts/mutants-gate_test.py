@@ -27,7 +27,6 @@ CRATES = [
     "prismattyc-mux",
     "prismattyc-protocol",
     "prismattyc-render",
-    "prismattyc-rich-client",
     "pmux-mcp",
 ]
 

@@ -23,8 +23,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 
+use crate::capability::ChildWrite;
 use crate::mux::Wake;
-use crate::rich::ChildWrite;
 
 /// Where a paste started: the mux runtime instance and the pane in it.
 /// Pane ids restart at 1 in each runtime, so the pane alone is ambiguous.
@@ -244,7 +244,7 @@ impl PtyWriter {
     pub(crate) fn run(
         &self,
         child: &mut dyn Write,
-        mut granted: impl FnMut(crate::rich::CapabilityGrant),
+        mut granted: impl FnMut(crate::capability::CapabilityGrant),
     ) {
         loop {
             let msg = {

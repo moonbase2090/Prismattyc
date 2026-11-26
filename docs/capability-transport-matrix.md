@@ -39,4 +39,5 @@ here are **inconclusive**; expected results are not rewritten after the fact.
 See [capability-protocol.md](capability-protocol.md) (harness checkbox),
 `./scripts/test-phase3-rich.sh`, and `./scripts/test-phase3-transport.sh`.
 Those scripts are a frozen regression pin. They are not a light-stage
-gate. Nightly exercise is `.github/workflows/phase3-rich-nightly.yml`.
+gate. The `phase3-rich` job in `.github/workflows/ci.yml` runs them on every
+push, including each commit to main.

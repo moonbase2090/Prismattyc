@@ -73,6 +73,15 @@ impl Cli {
                     println!("{}", prismattyc_core::bin_version("pmuxd"));
                     std::process::exit(0);
                 }
+                "--bundled-plugins" => {
+                    // A running daemon asks the installed one which official plug-in
+                    // versions it would set up at start.
+                    println!(
+                        "{}",
+                        serde_json::to_string(&prismattyc_mux::plugins::bundled_defaults()?)?
+                    );
+                    std::process::exit(0);
+                }
                 "--socket" if program.is_none() => {
                     socket = Some(PathBuf::from(
                         args.next().context("--socket requires an absolute path")?,
@@ -125,6 +134,7 @@ fn print_help() {
 pmuxd — long-lived local Prismattyc mux server
 
 USAGE:
+    pmuxd --bundled-plugins
     pmuxd [--socket PATH] [--cols N] [--rows N] [--experimental-rich] [--experimental-activity] [--restore-workspace] [PROGRAM [ARGS...]]
     pmuxd --socket /absolute/path.sock -- /bin/bash -l
 

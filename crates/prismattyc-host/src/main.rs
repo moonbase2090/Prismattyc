@@ -5666,6 +5666,7 @@ fn dispatch_overlay_activate(
         if let Some(menu) = host.context_menu.as_mut() {
             menu.selected = selected;
         }
+        settings::follow_up(host);
         host.dirty = true;
         host.window.request_redraw();
         return Dispatch::Handled;

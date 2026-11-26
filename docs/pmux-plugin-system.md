@@ -38,6 +38,15 @@ installs the version and says so. Each plug-in gets its own result (`updated`,
 does not stop the others. `enable` without `--allow` grants the permissions the
 package's manifest requires. A refused scope lists the valid ones.
 
+The official plug-ins ship inside `pmuxd`, and the daemon installs its bundled
+versions when it starts. After an update the installed `pmuxd` can bundle newer
+versions than the running daemon set up; those wait for a daemon restart.
+`pmux plugin pending` lists each one with the version it changes from and to.
+The daemon asks the installed `pmuxd` (`pmuxd --bundled-plugins`), but only when
+that binary reports a newer version than its own, and leaves out a plug-in the
+user turned off. With no daemon running nothing is pending: the next start sets
+them up.
+
 Settings has the same on the **Plug-ins** page: each plug-in shows its
 installed version and its state, one row per permission in plain words (the
 manifest's required ones are pre-selected the first time), **Update to** and
@@ -45,7 +54,12 @@ manifest's required ones are pre-selected the first time), **Update to** and
 **plugins_check** (check for plug-in updates) and **plugins_update** (update
 plug-ins: enabled ones move to the new version, ones you turned off stay off);
 both open the page and show the result there. They are on by
-default and bound to no key.
+default and bound to no key. When official plug-ins wait for a daemon restart,
+the page lists them and offers **Restart now**, which opens **Update and
+restart** with **Update and restart all components** selected. Enter lists the
+running sessions and asks before saving them and restarting the daemon. The
+plain **Restart** rows postpone the daemon while sessions run, so they do not
+finish the plug-in update.
 
 The official Activity Monitor and activity connector start enabled. On startup,
 pmuxd installs the newest compatible version in its verified bundle when a

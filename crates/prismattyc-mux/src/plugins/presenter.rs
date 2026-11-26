@@ -99,6 +99,20 @@ pub fn pixel_mode(
 #[cfg_attr(not(unix), allow(dead_code))]
 const PROBE_IMAGE: u32 = 4_242;
 
+/// One 1x1 raw RGBA upload, then device attributes. It names an image number, not an id:
+/// the terminal gives the upload a fresh id, so another program's image with id or number
+/// 4242 is neither replaced nor deleted.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn probe_upload() -> String {
+    format!("\x1b_Ga=t,I={PROBE_IMAGE},f=32,s=1,v=1;AAAAAA==\x1b\\\x1b[c")
+}
+
+/// Deletes the probe image, and only it, by the id the terminal assigned.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn probe_cleanup(id: u32) -> String {
+    format!("\x1b_Ga=d,d=I,i={id},q=2\x1b\\")
+}
+
 /// Uploads one 1x1 raw RGBA image with an image number, then asks for device attributes.
 /// A terminal that keeps the image answers `OK` before the attributes. The image is deleted
 /// again. Returns whether it was answered, and any other input read meanwhile.
@@ -120,7 +134,7 @@ fn raw_upload_shown(tty: &std::fs::File) -> (bool, Vec<u8>) {
         libc::tcsetattr(fd, libc::TCSANOW, &raw);
     }
     let mut out = tty;
-    let query = format!("\x1b_Ga=t,I={PROBE_IMAGE},f=32,s=1,v=1;AAAAAA==\x1b\\\x1b[c");
+    let query = probe_upload();
     let mut read = Vec::new();
     if out
         .write_all(query.as_bytes())
@@ -146,7 +160,7 @@ fn raw_upload_shown(tty: &std::fs::File) -> (bool, Vec<u8>) {
     }
     let scan = scan_raw_probe(&read);
     if let Some(id) = scan.image_id {
-        let _ = out.write_all(format!("\x1b_Ga=d,d=I,i={id},q=2\x1b\\").as_bytes());
+        let _ = out.write_all(probe_cleanup(id).as_bytes());
     }
     // SAFETY: restores the attributes saved above on the same descriptor.
     unsafe {
@@ -750,5 +764,48 @@ mod tests {
             !pending.answered,
             "keep reading until the attributes arrive"
         );
+    }
+
+    #[test]
+    fn the_probe_leaves_other_images_with_its_number_or_id_alone() {
+        use prismattyc_emulator::Emulator;
+
+        // Another program's images: one stored and placed under id 4242, one stored
+        // under number 4242. Kitty ids and numbers are shared by everything on the terminal.
+        let green = "AP8A/w==";
+        let mut terminal = Emulator::new(80, 24, 0);
+        terminal
+            .feed(format!("\x1b_Ga=T,i={PROBE_IMAGE},f=32,s=1,v=1,q=2;{green}\x1b\\").as_bytes());
+        terminal.feed(
+            format!("\x1b_Ga=t,i=77,I={PROBE_IMAGE},f=32,s=1,v=1,q=2;{green}\x1b\\").as_bytes(),
+        );
+        assert!(terminal.take_pending_replies().is_empty());
+
+        terminal.feed(probe_upload().as_bytes());
+        let probe = scan_raw_probe(&terminal.take_pending_replies().concat());
+        assert!(probe.answered);
+        let id = probe.image_id.expect("Prismattyc shows raw uploads");
+        terminal.feed(probe_cleanup(id).as_bytes());
+
+        assert!(
+            terminal.image_by_id(id).is_none(),
+            "the probe image is deleted"
+        );
+        let by_id = terminal
+            .image_by_id(PROBE_IMAGE)
+            .expect("image 4242 is kept");
+        assert_eq!(&*by_id.rgba, [0, 255, 0, 255]);
+        assert!(
+            terminal
+                .images()
+                .iter()
+                .any(|placed| placed.id == PROBE_IMAGE),
+            "image 4242 stays on screen"
+        );
+        let by_number = terminal
+            .image_by_id(77)
+            .expect("image numbered 4242 is kept");
+        assert_eq!(by_number.image_number, Some(PROBE_IMAGE));
+        assert_eq!(&*by_number.rgba, [0, 255, 0, 255]);
     }
 }

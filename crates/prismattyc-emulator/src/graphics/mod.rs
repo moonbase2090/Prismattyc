@@ -680,17 +680,16 @@ impl GraphicsState {
             return;
         };
         let placement = cmd.placement_id_present.then_some(cmd.placement_id);
-        match mode.kind {
-            command::DeleteKind::All => {
-                self.images.clear();
-                if mode.free {
-                    self.free_unreferenced();
-                }
-            }
+        // The images an uppercase delete may free: the ones it names, or whose placements it
+        // removed. Other stored images stay, even unplaced ones a program has yet to place.
+        let targets = match mode.kind {
+            command::DeleteKind::All => self.remove_placements(|_| true),
             command::DeleteKind::ImageId => {
-                if cmd.id != 0 {
-                    self.delete_id_placements(cmd.id, placement, mode.free);
+                if cmd.id == 0 {
+                    return;
                 }
+                self.delete_id_placements(cmd.id, placement);
+                vec![cmd.id]
             }
             command::DeleteKind::ImageNumber => {
                 let Some(number) = cmd.image_number else {
@@ -705,62 +704,56 @@ impl GraphicsState {
                 else {
                     return;
                 };
-                self.delete_id_placements(id, placement, mode.free);
+                self.delete_id_placements(id, placement);
+                vec![id]
             }
             command::DeleteKind::Cursor => {
                 let cursor = screen.cursor();
                 let row = screen.scrolled_lines().saturating_add(cursor.row as u64);
                 let col = cursor.column as u16;
-                self.delete_at(row, col, None, mode.free);
+                self.delete_at(row, col, None)
             }
             command::DeleteKind::Position => {
                 let (Some(x), Some(y)) = (cmd.x, cmd.y) else {
                     return;
                 };
-                if let Some((row, col)) = screen_position(screen, x, y) {
-                    self.delete_at(row, col, None, mode.free);
-                }
+                let Some((row, col)) = screen_position(screen, x, y) else {
+                    return;
+                };
+                self.delete_at(row, col, None)
             }
             command::DeleteKind::PositionZ => {
                 let (Some(x), Some(y), Some(z)) = (cmd.x, cmd.y, cmd.z) else {
                     return;
                 };
-                if let Some((row, col)) = screen_position(screen, x, y) {
-                    self.delete_at(row, col, Some(z), mode.free);
-                }
-            }
-            command::DeleteKind::Column => {
-                let Some(x) = cmd.x else {
+                let Some((row, col)) = screen_position(screen, x, y) else {
                     return;
                 };
-                if let Ok(col) = u16::try_from(x) {
-                    if col < screen.columns() as u16 {
-                        self.images.retain(|image| !column_contains(image, col));
-                        if mode.free {
-                            self.free_unreferenced();
-                        }
-                    }
+                self.delete_at(row, col, Some(z))
+            }
+            command::DeleteKind::Column => {
+                let Some(col) = cmd.x.and_then(|x| u16::try_from(x).ok()) else {
+                    return;
+                };
+                if col >= screen.columns() as u16 {
+                    return;
                 }
+                self.remove_placements(|image| column_contains(image, col))
             }
             command::DeleteKind::Row => {
                 let Some(y) = cmd.y else {
                     return;
                 };
-                if let Some((row, _)) = screen_position(screen, 0, y) {
-                    self.images.retain(|image| !row_contains(image, row));
-                    if mode.free {
-                        self.free_unreferenced();
-                    }
-                }
+                let Some((row, _)) = screen_position(screen, 0, y) else {
+                    return;
+                };
+                self.remove_placements(|image| row_contains(image, row))
             }
             command::DeleteKind::Z => {
                 let Some(z) = cmd.z else {
                     return;
                 };
-                self.images.retain(|image| image.z != z);
-                if mode.free {
-                    self.free_unreferenced();
-                }
+                self.remove_placements(|image| image.z == z)
             }
             command::DeleteKind::Range => {
                 let (Some(low), Some(high)) = (cmd.x, cmd.y) else {
@@ -769,56 +762,67 @@ impl GraphicsState {
                 if low > high {
                     return;
                 }
-                self.images.retain(|image| {
-                    !(i64::from(image.id) >= i64::from(low)
-                        && i64::from(image.id) <= i64::from(high))
-                });
-                self.virtuals.retain(|placement| {
-                    !(i64::from(placement.image_id) >= i64::from(low)
-                        && i64::from(placement.image_id) <= i64::from(high))
-                });
-                if mode.free {
-                    self.free_unreferenced();
-                }
+                let in_range =
+                    |id: u32| (i64::from(low)..=i64::from(high)).contains(&i64::from(id));
+                self.images.retain(|image| !in_range(image.id));
+                self.virtuals
+                    .retain(|placement| !in_range(placement.image_id));
+                self.registry
+                    .iter()
+                    .map(|image| image.id)
+                    .filter(|id| in_range(*id))
+                    .collect()
             }
-            command::DeleteKind::Frame => {}
+            command::DeleteKind::Frame => return,
+        };
+        if mode.free {
+            self.free_unreferenced(&targets);
         }
     }
 
-    fn delete_at(&mut self, row: u64, col: u16, z: Option<i32>, free: bool) {
+    /// Removes the direct placements `remove` matches and returns their image ids.
+    fn remove_placements(&mut self, mut remove: impl FnMut(&PlacedImage) -> bool) -> Vec<u32> {
+        let mut removed = Vec::new();
         self.images.retain(|image| {
-            !(row_contains(image, row)
-                && column_contains(image, col)
-                && z.is_none_or(|expected| image.z == expected))
+            let gone = remove(image);
+            if gone {
+                removed.push(image.id);
+            }
+            !gone
         });
-        if free {
-            self.free_unreferenced();
-        }
+        removed
     }
 
-    fn delete_id_placements(&mut self, id: u32, placement: Option<u32>, free: bool) {
+    fn delete_at(&mut self, row: u64, col: u16, z: Option<i32>) -> Vec<u32> {
+        self.remove_placements(|image| {
+            row_contains(image, row)
+                && column_contains(image, col)
+                && z.is_none_or(|expected| image.z == expected)
+        })
+    }
+
+    fn delete_id_placements(&mut self, id: u32, placement: Option<u32>) {
         self.images
             .retain(|image| image.id != id || placement.is_some_and(|p| image.placement_id != p));
         self.virtuals.retain(|item| {
             item.image_id != id || placement.is_some_and(|p| item.placement_id != p)
         });
-        if free {
-            self.free_unreferenced();
-        }
     }
 
-    fn free_unreferenced(&mut self) {
+    /// Frees the stored data of `targets` that no placement uses any more.
+    fn free_unreferenced(&mut self, targets: &[u32]) {
         let mut retained = 0usize;
         self.registry.retain(|image| {
-            let referenced = self.images.iter().any(|placed| placed.id == image.id)
+            let kept = !targets.contains(&image.id)
+                || self.images.iter().any(|placed| placed.id == image.id)
                 || self
                     .virtuals
                     .iter()
                     .any(|placed| placed.image_id == image.id);
-            if referenced {
+            if kept {
                 retained += image.rgba.len();
             }
-            referenced
+            kept
         });
         self.retained_bytes = retained;
     }
@@ -1220,6 +1224,40 @@ mod tests {
             assert_eq!(direct_ids(&g), expected_direct, "direct: {control}");
             assert_eq!(registry_ids(&g), expected_registry, "registry: {control}");
             assert_eq!(virtual_ids(&g), expected_virtual, "virtual: {control}");
+        }
+    }
+
+    #[test]
+    fn uppercase_deletes_free_only_the_images_they_target() {
+        for control in [
+            "a=d,d=A",
+            "a=d,d=I,i=1",
+            "a=d,d=N,I=11",
+            "a=d,d=C",
+            "a=d,d=P,x=3,y=0",
+            "a=d,d=Q,x=3,y=0,z=-1",
+            "a=d,d=X,x=3",
+            "a=d,d=Y,y=1",
+            "a=d,d=Z,z=2",
+            "a=d,d=R,x=1,y=3",
+            "a=d,d=I,i=8",
+        ] {
+            let (mut g, screen, mut replies) = seed_delete_state();
+            // Uploaded with a=t and not placed yet, as a program does before a=p.
+            for id in [8, 9] {
+                g.handle(
+                    &apc(&format!("a=t,t=d,f=100,i={id},q=2"), RED_1X1_PNG_B64),
+                    &screen,
+                    &mut replies,
+                );
+            }
+            g.handle(&apc(control, ""), &screen, &mut replies);
+            assert!(g.image_by_id(9).is_some(), "{control} freed image 9");
+            assert_eq!(
+                g.image_by_id(8).is_none(),
+                control.ends_with("i=8"),
+                "{control} and image 8"
+            );
         }
     }
 

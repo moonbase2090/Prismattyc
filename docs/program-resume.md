@@ -87,32 +87,46 @@ reset, the alternate screen, clearing the screen or prompt marks.
 ## Restoring
 
 Records are saved with the rest of the workspace, in a file only you can
-read and write. When the pmux server restores a pane, it uses the pane's
-record if all of these hold:
+read and write. Every program in the pane inherits the token, so a report
+only claims a command. The pmux server therefore also records the executable
+the reporting process is really running, and checks it again each time it
+checks the process is still alive. A wrapper that reports and then runs its
+target is bound once the target is running.
+
+When the pmux server restores a pane, it uses the pane's record if all of
+these hold:
 
 - saved commands are re-run for this restore (Update and restart always does;
   otherwise `[mux] space_open_runs_commands` decides);
-- the command's program name is trusted (see below);
+- the reported command is the program its owner was last seen running. An
+  absolute program path must be that same file. A bare name must be that
+  file's name, and the name must find that same file on the restored
+  shell's `PATH`, so another program of the same name earlier on `PATH`
+  cannot take its place;
+- that program's name is trusted (see below);
 - the record was made by the same user;
 - the reported directory still exists;
 - the last resume of this record started and stayed up for ten seconds. A
   resume that failed, or crashed the server, is not tried again.
 
 Otherwise it falls back to what it restored before: the command it finds by
-inspecting the pane's processes. A record it skips is logged with the
-reason.
+inspecting the pane's processes. A record it skips is kept, logged with the
+reason, and shows the reason as `not_resumed` in the pane snapshot. A record
+whose command never matched its program says "reported command does not
+match the running program".
 
 To resume, the server types `pmux resume-run ID` into the restored pane's
 shell, after the shell has read its startup files. That command fetches the
 record from the server over its private socket and replaces itself with the
-program. Each argument reaches the program unchanged; the shell never parses
-them. The program runs as the shell's foreground job, so suspending or
-quitting it returns to the shell. A bare program name is looked up on the
-shell's `PATH`. The ID works once.
+verified program file, giving it the reported name as `argv[0]`. Each
+argument reaches the program unchanged; the shell never parses them. The
+program runs as the shell's foreground job, so suspending or quitting it
+returns to the shell. The ID works once.
 
 ## Trust
 
-Only trusted commands are resumed without asking. By default these are
+Only trusted programs are resumed without asking, and trust applies to the
+verified program, not to the name a report claims. By default these are
 `nvim`, `vim`, `hx`, `emacs`, `kak`, `micro`, `lazygit` and `tig`: editors and
 Git interfaces that reopen files or a repository and do not run commands
 from their arguments. To choose your own list, set it under `[mux]`, matched

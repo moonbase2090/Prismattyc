@@ -8,8 +8,8 @@ user on a release that carries this change). The newest public release is
 newer. The drive then checks:
 
 * --notice (Linux, Windows): this build's app shows the update notice; a click
-  on it opens the Restart to update review, and Escape closes it again with
-  nothing installed.
+  on it opens the one-confirm dialog (sessions listed, Save and restart, and
+  Restart when idle), and Escape closes it again with nothing installed.
 * `pmux update` from this build installs the newest release, includes its
   monitor launcher (Linux, Windows; macOS carries it in the app), restarts the
   open app window, leaves the running sessions alone (the daemon is deferred
@@ -219,19 +219,26 @@ def main():
             screenshot('notice')
             x, y, w, h = notice['rect']
             click(host.pid, x + w // 2, y + h // 2)
-            change(lambda ui: ui.get('dialog') is not None and ui.get('modal') == 'restart',
-                   'the Restart to update review')
+            change(lambda ui: (ui.get('dialog') or {}).get('expanded') is True
+                   and ui.get('modal') == 'restart',
+                   'the one-confirm restart')
+            modal = json.loads(run(installed_pmux, 'render-status', '--json').stdout)['windows'][0]['restart_modal']
+            assert modal['title'] == 'Restart the pmux server', modal['title']
+            assert modal['expanded'] and modal['sessions_shown'] >= 2, modal
+            assert any(row.startswith('Save and restart:') for row in modal['rows']), modal['rows']
+            assert any(row.startswith('Restart when idle:') for row in modal['rows']), modal['rows']
+            assert not any('Restart without saving' in row for row in modal['rows']), modal['rows']
             screenshot('notice-review')
             keys = Keys(host.pid)
             keys.press('Escape')
-            # Escape closes the review; the update panel it opened over stays,
-            # as it does from the palette, until a second Escape.
-            ui = change(lambda ui: ui.get('dialog') is None, 'the review closed')
+            # Escape closes the dialog. A page left open underneath closes on
+            # the next Escape, as it does from the palette.
+            ui = change(lambda ui: ui.get('dialog') is None, 'the dialog closed')
             if ui.get('modal') is not None:
                 keys.press('Escape')
                 change(lambda ui: ui.get('modal') is None, 'the update panel closed')
             assert version_in(run(installed_pmux, '--version').stdout) == old, 'the notice installed something'
-            passed('a click on the update notice opens the Restart to update review; Escape closes it')
+            passed('a click on the update notice opens the one-confirm restart; Escape closes it')
             # Nothing to draw now: this build still renews its registration,
             # so `pmux restart` and `pmux update` keep seeing the window.
             idle_since = time.monotonic()

@@ -450,6 +450,23 @@ impl PaneResume {
         self.record.as_ref()
     }
 
+    /// The record as it should be saved or shown: when its owner is still the
+    /// same running process, with the executable it runs now. A wrapper that
+    /// reported and then ran a quiet program is bound even if no output has
+    /// arrived since.
+    pub(crate) fn current_record(&self, lookup: &dyn OwnerLookup) -> Option<ResumeRecord> {
+        let mut record = self.record.clone()?;
+        if let Some(owner) = record.owner {
+            let same = lookup
+                .identity(owner.pid)
+                .is_some_and(|identity| identity.start == owner.start);
+            if let Some(exe) = same.then(|| lookup.executable(owner.pid)).flatten() {
+                record.owner_exe = Some(exe);
+            }
+        }
+        Some(record)
+    }
+
     /// Install a record saved before a restart. It has no running owner
     /// until the resumed program starts or reports.
     pub(crate) fn restore(&mut self, mut record: ResumeRecord) {
@@ -1227,6 +1244,25 @@ mod tests {
             decide(pane.record().unwrap(), &ResumePolicy::default()),
             Ok(PathBuf::from("/opt/bin/nvim"))
         );
+    }
+
+    #[test]
+    fn a_saved_record_shows_what_its_owner_runs_now_without_waiting_for_output() {
+        let lookup = FakeLookup::new(&[7]);
+        lookup.runs(7, "/bin/sh");
+        let mut pane = PaneResume::new(Some(TOKEN.into()), None);
+        pane.receive(&set_report(7, NOW, "nvim"), NOW, &lookup);
+        lookup.runs(7, "/opt/bin/nvim");
+        let saved = pane.current_record(&lookup).unwrap();
+        assert_eq!(saved.owner_exe.as_deref(), Some(Path::new("/opt/bin/nvim")));
+        // A different process on the same pid is not the owner.
+        lookup
+            .processes
+            .borrow_mut()
+            .insert(7, ProcessIdentity { uid: 501, start: 1 });
+        lookup.runs(7, "/opt/bin/evil");
+        let saved = pane.current_record(&lookup).unwrap();
+        assert_eq!(saved.owner_exe.as_deref(), Some(Path::new("/bin/sh")));
     }
 
     #[test]

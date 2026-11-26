@@ -1069,9 +1069,11 @@ impl LiveRuntime {
         &self,
         pane_id: u64,
     ) -> Option<crate::program_resume::ResumeRecord> {
-        self.panes
-            .get(&pane_id)
-            .and_then(|pane| pane.resume.record().cloned())
+        let pane = self.panes.get(&pane_id)?;
+        pane.resume
+            .current_record(&crate::program_resume::SystemLookup {
+                root: pane.child_pid,
+            })
     }
 
     /// Give a restored pane its saved record, marked as being resumed when

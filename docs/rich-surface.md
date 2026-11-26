@@ -2,8 +2,8 @@
 
 This reference defines the wire format, limits, ownership, and input rules.
 Rich rendering remains optional and experimental. Query capabilities before
-sending rich content. See [capability discovery](capability-protocol.md) and
-[client integration](rich-client.md) for the implemented features.
+sending rich content. See [capability discovery](capability-protocol.md) for
+how to negotiate.
 
 ### 1. Compatibility profiles and capability cut
 

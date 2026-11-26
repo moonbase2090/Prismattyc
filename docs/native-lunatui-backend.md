@@ -1,8 +1,10 @@
 # Native terminal sessions and images
 
 Prismattyc accepts native cell grids and uploaded images from eligible direct
-local PTY children when started with `--experimental-rich`. The feature is off
-by default. Applications that do not negotiate a native session keep their
+local PTY children when started with `--experimental-native` (or
+`PRISMATTYC_EXPERIMENTAL_NATIVE=1`). The feature is off by default.
+`--experimental-rich` still turns it on as well, for one release; after that,
+native sessions need their own flag. Applications that do not negotiate a native session keep their
 ANSI output.
 
 This is the host implementation. The separately locked verification client
@@ -18,7 +20,10 @@ work. This feature does not change the published terminal compatibility claim.
 | Native Apple Silicon macOS | 2 | `native.images.v1` |
 | Windows, Intel macOS and other targets | None | None |
 
-The flag gates discovery, transport and native presentation together.
+The flag gates discovery, transport and native presentation together. It does
+not need rich overlays: with `--experimental-native` alone, the pane answers a
+native capability query and ignores rich messages, as a pane without rich
+does.
 Forwarded sessions and daemon-owned log views keep the Classic display source.
 Linux serves minor 0 through its sealed exact-length backing. Darwin uses
 rounded typed shared memory for minor 2 and does not advertise minor 0.

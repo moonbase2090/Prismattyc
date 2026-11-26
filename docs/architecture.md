@@ -63,8 +63,7 @@ multiple clients from writing conflicting input to a pane.
 
 Applications can negotiate optional rich-content capabilities. Programs
 that do not negotiate those capabilities continue to use ordinary terminal
-input and output. The protocol types live in `prismattyc-protocol`; the
-application-side library is `prismattyc-rich-client`.
+input and output. The protocol types live in `prismattyc-protocol`.
 
-See the [pmux reference](mux-cli.md), [capability protocol](capability-protocol.md),
-and [rich-client guide](rich-client.md) for those interfaces.
+See the [pmux reference](mux-cli.md), [capability protocol](capability-protocol.md)
+and [rich surface protocol](rich-surface.md) for those interfaces.

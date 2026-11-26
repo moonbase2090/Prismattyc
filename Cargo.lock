@@ -3713,14 +3713,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "prismattyc-rich-client"
-version = "0.3.78"
-dependencies = [
- "libc",
- "prismattyc-protocol",
-]
-
-[[package]]
 name = "prismattyc-winres"
 version = "0.3.78"
 dependencies = [

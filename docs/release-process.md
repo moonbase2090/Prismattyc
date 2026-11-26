@@ -12,6 +12,12 @@ and a signed universal macOS app distributed as a DMG and a zip.
    workspace entries in `Cargo.lock`. Also update the standalone activity
    monitor lockfile with
    `cargo update --manifest-path tools/activity-monitor/Cargo.toml --package prismattyc-core --package prismattyc-mux`.
+   The two verification fixture lockfiles,
+   `.cursor/skills/verify-prismattyc/scripts/native-client/Cargo.lock` and
+   `.cursor/skills/verify-prismattyc/scripts/native-components/Cargo.lock`,
+   also pin the workspace crates: set the version of each workspace entry
+   (one with no `source` line) to the new version, and confirm that
+   `cargo metadata --locked --manifest-path <fixture>/Cargo.toml` succeeds.
    Then update the README and fidelity-matrix sentences. Add the
    `## [X.Y.Z]` and `## [X.Y.Z-rc.N]` CHANGELOG sections,
    and run `scripts/check-workspace-version.sh`. The tag version must match

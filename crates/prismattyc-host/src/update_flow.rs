@@ -418,42 +418,39 @@ pub(super) fn event(app: &mut App, event: Event) {
                     return;
                 }
                 let saved = idle_restart_consent(&idle_restart_file());
-                let fresh = idle_consent_for(&plan);
-                match (saved, fresh) {
-                    (Some(saved), Ok(fresh)) if saved == fresh => {
-                        let installed = plan.installed.clone();
-                        let available = plan.update_available.then(|| plan.available.clone());
-                        clear_idle_restart(&idle_restart_file());
-                        restart_modal::open(
-                            app,
-                            &installed,
-                            available.as_deref(),
-                            &[],
-                            ConfirmStyle::OneConfirm,
-                        );
-                        app.full_update = Flow::Confirm(plan);
-                        action(app, Action::SaveAndContinue);
-                    }
-                    _ => {
-                        withdraw_idle_restart();
-                        let installed = plan.installed.clone();
-                        let available = plan.update_available.then(|| plan.available.clone());
-                        let names: Vec<String> =
-                            plan.sessions.iter().map(|(_, name)| name.clone()).collect();
-                        restart_modal::open(
-                            app,
-                            &installed,
-                            available.as_deref(),
-                            &names,
-                            ConfirmStyle::OneConfirm,
-                        );
-                        app.full_update = Flow::Confirm(plan);
-                        show(
+                let fresh = idle_consent_for(&plan).ok();
+                if idle_restart_matches(saved.as_ref(), fresh.as_ref()) {
+                    let installed = plan.installed.clone();
+                    let available = plan.update_available.then(|| plan.available.clone());
+                    clear_idle_restart(&idle_restart_file());
+                    restart_modal::open(
+                        app,
+                        &installed,
+                        available.as_deref(),
+                        &[],
+                        ConfirmStyle::OneConfirm,
+                    );
+                    app.full_update = Flow::Confirm(plan);
+                    action(app, Action::SaveAndContinue);
+                } else {
+                    withdraw_idle_restart();
+                    let installed = plan.installed.clone();
+                    let available = plan.update_available.then(|| plan.available.clone());
+                    let names: Vec<String> =
+                        plan.sessions.iter().map(|(_, name)| name.clone()).collect();
+                    restart_modal::open(
+                        app,
+                        &installed,
+                        available.as_deref(),
+                        &names,
+                        ConfirmStyle::OneConfirm,
+                    );
+                    app.full_update = Flow::Confirm(plan);
+                    show(
                             app,
                             "The release or the pending plug-ins changed, so that restart was withdrawn. Review this one.",
                             &[],
                         );
-                    }
                 }
                 return;
             }
@@ -1233,6 +1230,15 @@ pub(super) fn remember_idle_restart(path: &Path, consent: &IdleConsent) -> std::
     prismattyc_mux::private_fs::write(path, encode_idle_consent(consent).as_bytes())
 }
 
+/// Whether an idle restart may continue. A missing record, a failed fresh
+/// check, or any difference withdraws it.
+pub(super) fn idle_restart_matches(
+    saved: Option<&IdleConsent>,
+    fresh: Option<&IdleConsent>,
+) -> bool {
+    matches!((saved, fresh), (Some(saved), Some(fresh)) if saved == fresh)
+}
+
 /// The consent stored at `path`, if it is one this build understands.
 pub(super) fn idle_restart_consent(path: &Path) -> Option<IdleConsent> {
     let mut file =
@@ -1428,6 +1434,30 @@ mod tests {
         );
         assert!(decode_idle_consent(b"waiting\n").is_none());
         assert!(decode_idle_consent(b"v1\nrelease=0.3.78\nplugin=broken\n").is_none());
+        assert!(
+            idle_restart_matches(Some(&consent), Some(&consent)),
+            "the same release and plug-ins may restart"
+        );
+        assert!(
+            !idle_restart_matches(Some(&consent), Some(&newer)),
+            "a later release must not restart"
+        );
+        assert!(
+            !idle_restart_matches(Some(&consent), Some(&extra)),
+            "a new plug-in must not restart"
+        );
+        assert!(
+            !idle_restart_matches(Some(&none), Some(&consent)),
+            "a release that was not confirmed must not restart"
+        );
+        assert!(
+            !idle_restart_matches(None, Some(&consent)),
+            "a missing record must not restart"
+        );
+        assert!(
+            !idle_restart_matches(Some(&consent), None),
+            "a failed fresh check must not restart"
+        );
     }
 
     #[cfg(unix)]

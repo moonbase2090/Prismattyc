@@ -217,15 +217,41 @@ Grants are the same as `ReadPaneState` and `ReadPaneStyled`: an active client on
 
 ## Parking and at-rest
 
-This section is for the parking work to fill in. The starting outline:
+Parking writes this format to disk. The design is in `docs/design/park-idle-panes.md`. This section sets down what the format guarantees a parked file and what the store adds.
 
-1. A parked file is the screen part, then history chunks and gaps, then the trailer, in that order. The first frame for a new client comes from the screen part without reading the history.
-2. Gap records mark evicted or skipped rows, so a hydrated client knows history is missing.
-3. The plaintext parts carry no key fields. Encryption is an outer envelope per part (key id, nonce, AEAD tag), owned by the store. Parking uses an ephemeral key for each server run. Restore after the server exits uses its own key, so it can re-seal parts without re-encoding them.
-4. The trailer and its offsets let streaming start before all history is written, and let a reader tell a truncated file from a complete one.
-5. Images are separate image parts under the store's own size cap. The screen part refers to them by id.
+**File layout.** A parked file is the screen part, then history chunks and gaps from newest to oldest, then image parts, then the trailer. Every part is sealed separately. A new client's first frame comes from the screen part alone. In practice a parked pane keeps its screen in memory, so the file is read only for history.
 
-Also to settle here: how output that arrives while a pane is parked unparks it (one writer, no dropped bytes), and how `through_seq` and the pane log behave across a park and unpark.
+**Gaps.** Rows evicted between the cut and the page that would have written them go in as gap parts with the reason `evicted`. A pane restored from the file knows its history is missing there, not short.
+
+**Envelope.** The plaintext parts carry no key fields. A store seals each part in an envelope:
+
+```
+key_id     u32    which key sealed it (the per-run key for parking)
+nonce      12 B   file id (8 B) + part index (u32)
+ciphertext length bytes, ChaCha20-Poly1305
+tag        16 B
+```
+
+The authenticated data is the store's file header (pane id, file id) plus the part's own frame header. A part cannot be moved to another file or another position without failing to open. Because the envelope wraps whole parts, a store with a different key can re-seal parts without re-encoding them. Parking does not need to: restore after exit uses the plaintext checkpoint written just before the pane parked, and parked files are deleted at exit.
+
+**Trailer.** A parked file is complete only with a valid trailer. A file cut short by a crash still yields its whole parts. Since parking writes the trailer before it frees any history, a pane is never left depending on a file without one.
+
+**Images.** Image parts follow the history and count toward the store's cap. If a parked file would exceed it, the park writes no image parts, and the screen part's placements paint empty after unpark, as for an evicted image.
+
+**Output while parked.** Output unparks the pane, and the runtime thread remains the only writer:
+
+- In `LivePane::drain`, a parked pane with a chunk waiting stops draining and does not apply it.
+- Chunks wait in order in the bounded channel. Once it fills, the 8 MiB byte budget blocks the reader and the kernel holds back the child. No byte is dropped or reordered.
+- The park worker decodes the history chunks off the lock.
+- On the next tick the runtime prepends them to the screen-only emulator and drains the queue.
+
+No output was applied while the pane was parked, so the generation and `history_end` still match the file, and the prepend is exact.
+
+**`through_seq` and the pane log across a park:**
+
+- **At park:** the pane-log sequence continues and is not reset. The screen part records `through_seq`, and the in-memory log ring is cleared.
+- **While parked:** a client that subscribes from an earlier sequence gets a gap and a screen frame, as when a client falls behind today. A client that starts from the screen part subscribes from `through_seq` and misses nothing, because nothing was appended while parked.
+- **After unpark:** new output continues the sequence from `through_seq + 1`.
 
 ## Security
 
@@ -249,7 +275,7 @@ Also to settle here: how output that arrives while a pane is parked unparks it (
 | Piece | Agent-hours |
 |---|---|
 | Format types, encoder and decoder, `EmulatorStateV1` conversion, caps | 4 to 5 |
-| Core screen: `history_pushed`, generation, page export by absolute range, prepend API | 3 to 4 |
+| Core screen: `history_pushed`, generation, page export by absolute range, prepend API (the parking work uses the same prepend API, so it is counted here only) | 3 to 4 |
 | Control requests (`ReadPaneSnapshot`, `ReadPaneHistory`), short lock holds, typed generation error | 2 to 3 |
 | GPU host: screen-first restore, background history, fallback | 3 to 4 |
 | Tests: cut consistency, eviction gaps, clear and reflow generations, old/new pairings, a lock-hold bound | 2 to 3 |

@@ -28,7 +28,7 @@ The goal is to show the screen first and fill in history afterwards. The same sn
 
 ### Locks
 
-The pmux server has one control-plane mutex. Live panes (`LiveSessions` and its `panes` map, `crates/prismattyc-mux/src/live.rs:857`) are owned by the control plane, so every pane read and every PTY feed runs under that mutex.
+The pmux server has one control-plane mutex. Live panes (`LiveRuntime` and its `panes` map, `crates/prismattyc-mux/src/live.rs:856-857`) are owned by the control plane, so every pane read and every PTY feed runs under that mutex.
 
 - PTY output is fed to each pane's emulator on the `prism-server-runtime` thread. The thread holds the plane lock for `drain_live` (`crates/prismattyc-mux/src/control.rs:7671-7676`, `control.rs:3022`), which reaches `emulator.feed` at `live.rs:594`. The same lock hold also runs `maybe_persist_pane_logs`.
 - `ReadPaneState` is served on the client thread (`control.rs:4525`). It takes the plane lock, calls `pane_state_snapshot` → `Emulator::export_state()` (`control.rs:8224-8229`, `control.rs:6966-6993`, `live.rs:1272-1279`), releases the lock, and only then serializes to JSON and streams 128 KiB `PaneStateChunk` frames, capped at 256 MiB (`control.rs:56-57`, `control.rs:8230-8280`). The expensive part, `export_state()`, therefore runs under the lock.
@@ -104,7 +104,11 @@ length       u32       body length in bytes (cap below)
 body         length bytes
 ```
 
-The frame is little-endian. The body encoding is versioned with the frame. Version 1 uses the same field model as the existing `*StateV1` types, encoded as a compact binary (bincode-style, fixed field order). JSON is kept only for debug dumps. The control socket carries parts as base64 inside its existing JSON responses, the way `PaneStateChunk` carries bytes today.
+The frame is little-endian. The body encoding is versioned with the frame. Version 1 uses the same field model as the existing `*StateV1` types, encoded as a compact binary (bincode-style, fixed field order). JSON is kept only for debug dumps.
+
+**On the control socket**, a part travels as one or more `PaneSnapshotPart` responses. Each carries `part_index`, `kind`, `chunk_index`, `chunk_count`, `part_bytes` (the whole frame's length) and `data`. `data` is at most 128 KiB of the frame, sent as a JSON byte array, as `PaneStateChunk.data` is sent today (`crates/prismattyc-mux/src/control.rs:1563-1570`, `PANE_STATE_CHUNK_BYTES` at `control.rs:56`). A JSON byte array costs up to four bytes per byte, so one response stays near 512 KiB. That is well under `MAX_RESPONSE_BYTES` (9 MiB, `control.rs:50`). The limit matters for image parts: an 8 MiB image (`MAX_FRAME_BYTES`, `crates/prismattyc-emulator/src/graphics/mod.rs:18`) could never fit in one response.
+
+The reader reassembles chunks in `chunk_index` order. It rejects a part if a chunk index repeats or is missing, if `chunk_count` changes, or if the reassembled length differs from `part_bytes`. It also rejects one whose `part_bytes` exceeds the part's cap before allocating anything. Files store whole frames; chunking is only for the socket.
 
 ### Screen part (kind 1)
 
@@ -112,21 +116,25 @@ Everything needed to paint the first frame and to resume the output stream:
 
 - **Cut identity:**
   - `pane_id`, and `through_seq`, the pane-log sequence at the cut. Output streaming resumes after it.
+  - `scrolled_lines`. Image placements anchor to absolute primary lines derived from it (`anchor_abs_line`, `crates/prismattyc-emulator/src/graphics/mod.rs:99`, `:126-134`), as do cell-rect anchors. A replica must continue from the same value.
   - `history_generation`, which is bumped whenever history is rewritten (`CSI 3 J`, reflow, import).
   - `history_end`, the absolute index one past the newest history row at the cut.
   - `history_start`, the absolute index of the oldest row still held.
 - **Grid:** columns, rows, both grids (rows, cursor, saved cursor, margins, wrap state), `alternate_active`, `origin_mode`, `autowrap`.
-- **Modes:** mouse, keyboard stacks and `modifyOtherKeys`, bracketed paste, focus reporting, cursor keys, cursor shape and blink, `retain_alt_history`, `alt_history_rows`.
+- **Modes:** mouse, keyboard stacks and `modifyOtherKeys`, bracketed paste, focus reporting, cursor keys, cursor visibility, cursor shape and blink, `collects_apc`, `retain_alt_history`, `alt_history_rows`.
+- **History limits:** `max_scrollback` and `max_scrollback_bytes`, so a replica evicts at the same point as the server.
 - **Other state:** cwd, cell pixel size, `full_clears`, `content_epoch`, and the active hyperlink.
 - **Tables:** its own style and hyperlink tables, holding only the entries the visible grids use. Grapheme clusters are inlined in the row text, as `RowStateV1` already does.
-- **Images:** placements and virtual placements, each referring to images by `image_id`. It includes no image data (see the image part).
+- **Images:** placement metadata (id, image number, placement id, z, size in cells and pixels, anchor) and virtual placements, each referring to an image by `image_id`. It also carries the graphics `next_id`, which must be non-zero (`GraphicsState::import_state`, `graphics/mod.rs:259-262`). It includes no pixel data. Today a placed image carries its own pixels in `PlacedImageStateV1.rgba` (`graphics/mod.rs:89-100`), and the registry carries the uploaded data. In this format both come from image parts.
+
+Importing a screen part needs a change to the graphics import. Today `import_state` rejects a placement or virtual placement whose image is not in the registry (`graphics/mod.rs:294`, `:312`). It also checks `retained_bytes` against the registry it was given. The screen-part import must accept a placement whose image part arrives later, or was dropped under a cap. That placement paints empty until its image arrives, as an evicted image does today. Retained bytes are then counted from the images actually received. This change is in the build table below.
 
 ### History chunk (kind 2)
 
 Fields: `history_generation`, `first_row` (absolute index), `row_count`, the rows (text, style runs, hyperlink cells, wrapped flag, wrap padding), and its own style and hyperlink tables.
 
 - **Chunk size:** 256 rows, or 1 MiB of body, whichever comes first.
-- **Order:** chunks can arrive in any order. A reader places each one by `first_row`.
+- **Order:** in version 1, chunks are contiguous and run from newest to oldest. Each starts where the previous one ended, at `first_row + row_count` of the next older chunk. `ReadPaneSnapshot`, `ReadPaneHistory` and unpark all deliver them that way. The prepend API relies on it and needs no staging buffer. A reader that gets a chunk that does not join the rows it already holds discards it and requests that range again. Arbitrary order would need a staging buffer, which version 1 does not have.
 
 ### Gap (kind 3)
 
@@ -148,7 +156,11 @@ Fields: `image_id`, format, pixel size, and the decoded or encoded payload as th
 
 ### Trailer (kind 5)
 
-Fields: total parts, `history_start` and `history_end` as finally written, part offsets (for files), and a CRC32 of the preceding bytes.
+Fields: total parts, `history_start` and `history_end` as finally written, part offsets (for files), and a CRC32 over the plaintext bytes of the preceding parts' frames.
+
+- **Offsets:** in a file, the offsets point at the stored form of each part. Under an envelope that is the sealed part, so a reader can seek to any part without opening the others.
+- **CRC32:** it covers plaintext, so re-sealing parts under another key does not rewrite the trailer.
+- **Authentication:** in a parked file the trailer is itself a sealed part, as every part is (see "Parking and at-rest"). Its counts and offsets are therefore authenticated, not just checksummed.
 
 - **Files:** a file without a valid trailer is incomplete. A reader can still use any whole parts before the truncation point.
 - **Streams:** the trailer ends the history stream.
@@ -201,17 +213,26 @@ If paging under short lock holds proves awkward to build, the fallback is to clo
 
 New control requests, served on the client thread like `ReadPaneState`:
 
-- **`ReadPaneSnapshot { pane_id, history: none | recent(rows) | all }`:** streams `PaneSnapshotPart` responses: the screen part, then `Ready`, then history chunks and gaps from newest to oldest (as many as asked for), then the trailer.
+- **`ReadPaneSnapshot { pane_id, history: none | recent(rows) | all }`:** streams `PaneSnapshotPart` responses: the screen part, its image parts, then `Ready`, then history chunks and gaps from newest to oldest (as many as asked for), then the trailer.
 - **`ReadPaneHistory { pane_id, history_generation, before_row, max_rows }`:** returns chunks and gaps for one range, for clients that page on demand. A generation mismatch is a typed error that names the current generation.
 
 Grants are the same as `ReadPaneState` and `ReadPaneStyled`: an active client on this socket. No pane text goes anywhere it does not go today.
+
+### Connections
+
+A control connection serves one request at a time, to completion (`handle_client_loop`, `control.rs:8278`; the `ReadPaneState` branch at `:8485-8505`). The host's pane reader today runs `ReadPaneState` and then `SubscribePane` on the same connection (`crates/prismattyc-host/src/attach_log.rs:1472-1493`, `:1216`). The server accepts at most `MAX_CLIENTS = 64` connections (`control.rs:62`). So:
+
+- **Pane reader connection (one per open pane, as today):** sends `ReadPaneSnapshot { history: none }` or a small `recent(N)` that fits the first scroll screen. As soon as the trailer arrives, it sends `SubscribePane { from_seq: through_seq }` on the same connection. Output is never held back behind history.
+- **History connection (one per host, shared by all panes):** older history is paged with `ReadPaneHistory` on a separate connection that the host shares across panes and serves from one queue. Pages are taken newest first for the pane being looked at, then in the background for the rest. Paging therefore adds one connection per host, not one per pane, and does not multiply the 64-client limit.
+- **`ReadPaneSnapshot { history: all }`** is for single-shot readers: tools, and the parking writer inside the server. An interactive host does not use it.
 
 ### Clients
 
 - **GPU host:**
   - Tries `ReadPaneSnapshot` first, and falls back to `ReadPaneState` when the server rejects the request (the same pattern attach uses for `view_offset` today).
-  - Imports the screen part into an emulator with empty history, paints, and subscribes from `through_seq`.
-  - Prepends history chunks as they arrive. This needs one new core screen API, which inserts older rows at the front within the row and byte caps and ignores them if the generation has moved on.
+  - Imports the screen part into an emulator with empty history, paints, and subscribes from `through_seq` on the same connection.
+  - Pages older history over its shared history connection, and prepends the chunks in order. This needs one new core screen API, which inserts older rows at the front within the row and byte caps and ignores them if the generation has moved on.
+  - Hyperlinks: each chunk has its own small table, so the prepend maps its links into the screen's table and merges duplicate targets. The screen holds at most `MAX_HYPERLINKS = 4096` (`crates/prismattyc-core/src/lib.rs:178`, enforced at `:1266`). Once the table is full, a prepended cell keeps its text and loses its link, which is what the screen does today with a new link at the cap.
 - **`pmux-attach`:** no change needed. It can later use `ReadPaneHistory` for scroll mode instead of a full styled read per screen of history.
 - **Old pairings:** an old host on a new server keeps using `ReadPaneState`. A new host on an old server falls back.
 
@@ -274,12 +295,16 @@ No output was applied while the pane was parked, so the generation and `history_
 
 | Piece | Agent-hours |
 |---|---|
-| Format types, encoder and decoder, `EmulatorStateV1` conversion, caps | 4 to 5 |
-| Core screen: `history_pushed`, generation, page export by absolute range, prepend API (the parking work uses the same prepend API, so it is counted here only) | 3 to 4 |
+| Format types, encoder and decoder, `EmulatorStateV1` conversion, caps, socket chunking and reassembly | 4.5 to 6 |
+| Core screen: `history_pushed`, generation, page export by absolute range, prepend API with hyperlink remapping at the cap (the parking work uses the same prepend API, so it is counted here only) | 3.5 to 4.5 |
+| Graphics import: accept placements whose image parts arrive later or were dropped, `next_id`, retained-bytes accounting | 1 to 2 |
 | Control requests (`ReadPaneSnapshot`, `ReadPaneHistory`), short lock holds, typed generation error | 2 to 3 |
-| GPU host: screen-first restore, background history, fallback | 3 to 4 |
-| Tests: cut consistency, eviction gaps, clear and reflow generations, old/new pairings, a lock-hold bound | 2 to 3 |
+| GPU host: screen-first restore, then subscribe on the same connection; one shared history connection for every pane; background paging; fallback | 4 to 5 |
+| Tests: cut consistency, eviction gaps, clear and reflow generations, chunk reassembly and caps, missing images, hyperlink cap, old/new pairings, a lock-hold bound | 2.5 to 3.5 |
 | Proofs: large-history attach before and after (time to first frame, lock hold), on macOS and Linux | 1 to 2 |
-| **Total** | **15 to 21** |
+| **Total** | **18.5 to 26** |
 
-That is about 3.5 to 4.5 wall-clock days with review rounds, CI, and clean-machine proofs. This is above the 12 agent-hours planned. The difference is the core screen counter and the host's history prepend, which only became visible once the code was mapped.
+That is about 4 to 5 wall-clock days with review rounds, CI, and clean-machine proofs. It is above the 12 agent-hours planned for two reasons:
+
+- the core screen counter and the host's history prepend, which only became visible once the code was mapped;
+- the review's additions, which add 3.5 to 5 hours: socket chunking for large parts, the graphics import change, the shared history connection, and hyperlink remapping.

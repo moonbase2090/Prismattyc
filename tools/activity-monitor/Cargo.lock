@@ -1683,8 +1683,6 @@ dependencies = [
  "prismattyc-core",
  "prismattyc-emulator",
  "prismattyc-process",
- "prismattyc-protocol",
- "prismattyc-render",
  "prismattyc-winres",
  "rusqlite",
  "rustix",
@@ -1713,14 +1711,6 @@ dependencies = [
 [[package]]
 name = "prismattyc-protocol"
 version = "0.3.78"
-
-[[package]]
-name = "prismattyc-render"
-version = "0.3.78"
-dependencies = [
- "prismattyc-core",
- "prismattyc-protocol",
-]
 
 [[package]]
 name = "prismattyc-winres"

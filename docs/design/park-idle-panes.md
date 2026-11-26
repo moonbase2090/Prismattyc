@@ -19,7 +19,7 @@ pane back. A client that attaches to a parked pane gets its first frame from the
 in-memory screen part, without unparking.
 
 **Recommendation: go**, once the snapshot format has merged. The build is about
-26 agent-hours over 4 PRs, about 7 working days with review and the Windows
+23 agent-hours over 4 PRs, about 6 working days with review and the Windows
 proof (see [Build plan](#build-plan)).
 
 ## What parking saves
@@ -91,22 +91,28 @@ All of these must hold:
 1. **Checkpoint first.** Force a full pane-log persist capture for the pane
    through the existing `capture_persist` path. Restore after exit then never
    needs the parked file (see [Restore after exit](#restore-after-exit)).
-2. **Under the plane lock, briefly:** take the emulator state with a consuming
-   export, so the scrollback moves instead of being cloned and memory does not
-   double at park time. Keep the screen part in the pane as
-   `PaneBody::Parked`. Hand the history to the park worker. The plane lock is
-   never held while history is encoded, encrypted or written.
-3. **Park worker, off the lock:** encode the parts in the snapshot format,
-   encrypt each part, write the file, and fsync. Only then is the history
-   dropped. If the write fails, the worker hands the state back and the pane
-   unparks on the next tick. A failed park costs nothing but the attempt.
+   Today that capture is a full export under the plane lock, about 22 ms for a
+   10,000-row pane, once per park. It can move to history paging later, along
+   with the regular checkpoint.
+2. **Cut the screen part** under one short plane-lock hold, as the snapshot
+   format's cut procedure describes. The companion note measures this at about
+   0.03 ms for a 10,000-row pane, against 22 ms for today's full export.
+3. **Page the history out.** Each page takes the lock briefly and exports at
+   most 256 rows by absolute index (about 0.6 ms per page). The park worker
+   encodes, encrypts and appends each page off the lock, then writes the trailer
+   and fsyncs. Output during the park cancels it (see [Unpark](#unpark)).
+4. **Drop the history.** Under one more short hold, check that the history
+   generation and `through_seq` are unchanged since the cut. Then replace the
+   pane's emulator with a screen-only emulator, imported from the screen part
+   with empty history. If anything moved, abandon the park and delete the file.
+   A failed park costs nothing but the attempt.
 
-`LivePane.emulator` (`live.rs:164`) becomes an enum:
-`Resident(Emulator)`, `Parking { screen, pending }`, `Parked { screen, file }`
-and `Unparking { screen, pending }`. Every path that reads the emulator today
-(`content`, `styled`, `keyboard_flags`, `pane_state_snapshot`, `ReadPane`,
-`ReadPaneStyled`, guest keyboard flags) either answers from the screen part or
-asks for an unpark.
+A parked pane therefore still holds a real `Emulator` in `LivePane.emulator`
+(`live.rs:164`), just one with no history. Every path that reads the emulator
+today (`content`, `styled`, `keyboard_flags`, `pane_state_snapshot`,
+`ReadPane`, `ReadPaneStyled`, guest keyboard flags) keeps working unchanged. The
+pane carries a small `parked: Option<ParkedFile>` beside it with the file, the
+generation and the absolute history range.
 
 ### Unpark
 
@@ -125,14 +131,18 @@ Triggers:
 Input to a parked pane goes straight to the child, as today. The echo is
 output, so it unparks the pane.
 
-The park worker reads and decrypts the file and runs `import_state` off the
-lock. On the next tick the runtime swaps the emulator back in and drains the
-queued chunks normally. If the file is missing or does not decrypt or decode,
-the pane unparks from its screen part with a history gap and logs one warning,
-so output is never held back for long.
+The park worker reads, decrypts and decodes the history chunks off the lock. On
+the next tick the runtime prepends them to the screen-only emulator, using the
+core screen's new prepend API (the same one the host uses to fill history behind
+a screen-first attach), then drains the queued chunks normally. Nothing has
+changed the screen or history since the park, because no output was applied, so
+the generation still matches. If the file is missing or does not decrypt or
+decode, the pane unparks with a gap in its history and logs one warning, so
+output is never held back for long.
 
-If output arrives while a park is still being written, the worker cancels the
-write and hands the state straight back, so there is no disk round trip.
+If output arrives while a park is still paging out, the park is abandoned: the
+pane still holds its full emulator, so it just drains normally and the partial
+file is deleted.
 
 ### Attach to a parked pane
 
@@ -186,9 +196,9 @@ skipping parked panes makes shutdown faster in a large session set.
 
 ### Lock rules
 
-- Under the plane lock: the consuming export, the screen-part copy, the state
-  switch, and swapping a decoded emulator back in. All of these are bounded
-  moves, not encodes or copies of history.
+- Under the plane lock: the screen cut, each 256-row history page, the final
+  check-and-swap to a screen-only emulator, and the prepend on unpark. Each is a
+  short, bounded hold. None encodes, encrypts or does I/O.
 - Never under the plane lock: encoding, encryption, file I/O, decoding, or
   streaming history to a client.
 - The park worker never takes the plane lock while it holds a file open.
@@ -231,14 +241,15 @@ The build carries a clean Windows VM proof (see below).
 
 | PR | Content | Agent-hours |
 |---|---|---|
-| 1 | A consuming state export, pane body states, the watcher count, park and unpark in memory (screen part kept, history held by the worker), unpark on output, resize and history reads | 8 |
-| 2 | Parked files: envelope encryption, the run key, caps, cleanup, backup exclusion, failure fallback | 8 |
-| 3 | Attach and history streaming from a parked file, checkpoint-before-park, and skipping parked panes in the shutdown flush | 6 |
+| 1 | The park trigger, the watcher count, the park worker, paging history out, the check-and-swap to a screen-only emulator, and unpark on output, resize and history reads (prepend) | 8 |
+| 2 | Parked files: envelope encryption, the run key, caps, cleanup, backup exclusion, failure fallback | 6 |
+| 3 | Attach and history streaming from a parked file, checkpoint-before-park, and skipping parked panes in the shutdown flush | 5 |
 | 4 | Windows: close path, ACLs, clean VM proof; memory measurement written into `docs/design/` | 4 |
 
-That is about 26 agent-hours and about 7 working days, at roughly one merged PR
-a day once review and CI are counted, plus the Windows proof. PRs 2 and 3 need
-the snapshot format to have merged.
+That is about 23 agent-hours and about 6 working days, at roughly one merged PR
+a day once review and CI are counted, plus the Windows proof. All four PRs
+build on the snapshot format work: the parts encoder, absolute history paging
+and the prepend API. Those land first and are sized in the companion note.
 
 ## Proof for the build
 

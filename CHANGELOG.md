@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.3.78] - 2026-11-26
+
+### Added
+
+- The settings **Plug-ins** page says when an update installed newer official plug-ins that wait for a daemon restart, names each one with the version it changes from and to, and offers **Restart now**, which opens **Update and restart** at **Update and restart all components**, so Enter reviews the running sessions before the daemon restarts. `pmux plugin pending` lists the same.
+
 ### Fixed
 
 - A Kitty graphics delete that also frees image data (an uppercase `d=` value) now frees only the images it names or whose placements it removed. Before, it also dropped every other uploaded image that was not placed yet, so one program cleaning up its own image could erase images another program had uploaded to place later. The activity monitor's pixel check at startup sends such a delete, so opening the monitor no longer clears those uploads.
@@ -10,7 +16,6 @@
 
 ### Added
 
-- The settings **Plug-ins** page says when an update installed newer official plug-ins that wait for a daemon restart, names each one with the version it changes from and to, and offers **Restart now**, which opens **Update and restart** at **Update and restart all components**, so Enter reviews the running sessions before the daemon restarts. `pmux plugin pending` lists the same.
 - The activity monitor draws in Graphite mode wherever the terminal shows pixels: proportional type, state chips in the header and on flagged rows, keycaps in the footer, and the selected row as a list row with its state icon. Terminals without pixels, and `p` with pixels turned off, get the same layout in cells, with chips and keycaps drawn as cells. The pane keeps the text under the pixels, so copying, search and saved pane text still read the monitor. When a frame does not fit the plug-in frame budget, the whole frame is drawn in cells instead of a mix of the two. Graphite text uses fonts bundled with the plug-in, whose licenses ship in the package. The monitor opens in cells and switches to Graphite on its next frame, once those fonts are loaded, so it never opens blank. Graphite text uses compact copies of Inter and JetBrains Mono that cover Latin, punctuation, arrows, symbols, box drawing and shapes; other characters, such as Greek, Cyrillic or emoji, draw as a missing-glyph box in Graphite mode and as text in cells. The activity monitor package is now 1.4.0.
 - Plug-in frames can hold up to 256 tiles and 6 MiB, up from 32 tiles and 2 MiB, so a full-pane Graphite view fits at the default macOS cell size. The view interface is unchanged. A plug-in reads which limit applies from the frame budget its host grants, so a new plug-in on an older core keeps to 32 tiles and 2 MiB; the activity monitor then draws in cells.
 - The activity feed records a metadata-only mail event when a letter is stored, and it accepts a metadata-only room event on the existing publish path. The signed webhook delivers each of those events immediately. The activity connector adds `pmux_activity_wait`, which returns as soon as a matching event is already queued and otherwise waits at most one bounded timeout. The read grant still covers these events. The published activity read contract is unchanged, and the wait uses an arrivals contract in the same package. A wait scans past the first retained page, so a matching arrival later in the feed is returned. A later wait passes the cursor from the previous result and does not return that match again. Letter and room text stay out of the feed.

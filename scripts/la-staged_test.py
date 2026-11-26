@@ -78,17 +78,6 @@ class Phase3RichPinTests(unittest.TestCase):
         self.assertIn("./scripts/test-phase3-rich.sh", text)
         self.assertIn("./scripts/test-phase3-transport.sh", text)
 
-    def test_nightly_workflow_runs_harness_scripts(self) -> None:
-        text = (
-            ROOT / ".github/workflows/phase3-rich-nightly.yml"
-        ).read_text(encoding="utf-8")
-        self.assertIn("schedule:", text)
-        self.assertIn("./scripts/test-phase3-rich.sh", text)
-        self.assertIn("./scripts/test-phase3-transport.sh", text)
-        self.assertNotIn("mutants-gate", text)
-        self.assertNotIn("cargo-mutants", text)
-        self.assertNotIn("LA_HEAVY", text)
-
 
 class ReclaimPlanTests(unittest.TestCase):
     def test_scratch_dirs_never_tmp(self) -> None:

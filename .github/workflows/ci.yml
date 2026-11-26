@@ -460,7 +460,8 @@ jobs:
 
   # Frozen rich harness pin. Not a light-stage / PRD §5.6 / A-6 gate.
   # Hand / Local Actions: --event pull_request --job phase3-rich
-  # Periodic: .github/workflows/phase3-rich-nightly.yml
+  # Runs on every push, including each commit to main, so it needs no
+  # separate schedule.
   phase3-rich:
     name: Phase 3 rich harness
     runs-on: ubuntu-24.04

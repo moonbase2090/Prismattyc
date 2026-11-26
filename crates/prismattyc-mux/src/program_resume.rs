@@ -34,8 +34,10 @@ const MAX_TRACKED_PIDS: usize = 64;
 /// Keys this server implements, for `need`.
 const IMPLEMENTED_KEYS: &[&str] = &["pid", "time", "mac", "argv", "cwd", "clear", "need"];
 /// Programs resumed without asking when `[mux] resume_trusted` is unset:
-/// editors and Git interfaces, which reopen files or a repository and do not
-/// run commands taken from their arguments.
+/// editors and Git interfaces, which reopen files or a repository. Some run
+/// commands given as arguments (`nvim -c`, `emacs --eval`), so trusting
+/// them replays what their report carried; only a same-user process in the
+/// pane that is really running the program can make such a record.
 pub(crate) const DEFAULT_TRUSTED: &[&str] = &[
     "nvim", "vim", "hx", "emacs", "kak", "micro", "lazygit", "tig",
 ];
@@ -367,6 +369,8 @@ pub(crate) trait OwnerLookup {
     fn in_pane(&self, pid: u32) -> bool;
     /// The user the pmux server runs as.
     fn server_uid(&self) -> Option<u32>;
+    /// Whether the pane's processes may speak for it: see [`pane_authority`].
+    fn pane_authority(&self) -> Result<(), &'static str>;
 }
 
 /// The live system, for a pane whose first process is `root`.
@@ -391,6 +395,67 @@ impl OwnerLookup for SystemLookup {
     fn server_uid(&self) -> Option<u32> {
         server_uid()
     }
+
+    fn pane_authority(&self) -> Result<(), &'static str> {
+        let server = crate::procinfo::process_facts(std::process::id())
+            .ok()
+            .flatten()
+            .ok_or(UNCHECKED);
+        pane_authority(
+            self.root,
+            crate::procinfo::process_tree_strict,
+            crate::procinfo::process_facts,
+            server,
+        )
+    }
+}
+
+/// Reports are ignored while another user's process is in the pane.
+pub(crate) const OTHER_USER: &str = "a process of another user is in the pane";
+/// Reports are ignored while a sandboxed process is in the pane.
+pub(crate) const SANDBOXED: &str = "a sandboxed process is in the pane";
+/// Reports are ignored while a process in the pane has another root
+/// directory or namespace than the pmux server.
+pub(crate) const OTHER_ROOT: &str =
+    "a process with another root directory or namespace is in the pane";
+/// Reports are ignored when the pane's processes cannot all be checked.
+pub(crate) const UNCHECKED: &str = "the pane's processes could not be checked";
+
+/// Whether a report from this pane may be trusted at all.
+///
+/// The protocol trusts every same-user holder of the token, and a launcher
+/// should remove the token from children it restricts. When one does not,
+/// a confined child (another user, another root or namespace, a sandbox)
+/// still holds the token. So while any such process is in the pane — its
+/// first process or any descendant — reports are ignored. Anything that
+/// cannot be checked counts against the pane.
+pub(crate) fn pane_authority(
+    root: Option<u32>,
+    tree: impl Fn(u32) -> Option<Vec<u32>>,
+    facts: impl Fn(u32) -> Result<Option<crate::procinfo::ProcessFacts>, ()>,
+    server: Result<crate::procinfo::ProcessFacts, &'static str>,
+) -> Result<(), &'static str> {
+    let server = server?;
+    let root = root.ok_or(UNCHECKED)?;
+    let first = facts(root).ok().flatten().ok_or(UNCHECKED)?;
+    for pid in tree(root).ok_or(UNCHECKED)? {
+        let process = match facts(pid) {
+            Ok(Some(process)) => process,
+            // Exited since the tree was listed: no longer in the pane.
+            Ok(None) => continue,
+            Err(()) => return Err(UNCHECKED),
+        };
+        if process.uid != first.uid {
+            return Err(OTHER_USER);
+        }
+        if process.sandboxed {
+            return Err(SANDBOXED);
+        }
+        if process.root_dir != server.root_dir || process.namespaces != server.namespaces {
+            return Err(OTHER_ROOT);
+        }
+    }
+    Ok(())
 }
 
 /// The user the pmux server runs as, on Unix.
@@ -424,6 +489,12 @@ fn owner_problem(pid: u32, lookup: &dyn OwnerLookup) -> Option<&'static str> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Outcome {
     Ignored(&'static str),
+    /// The report could be checked, but the pane holds a process that may
+    /// not speak for it; `first` is set the first time this pane says so.
+    PaneNotTrusted {
+        reason: &'static str,
+        first: bool,
+    },
     Rejected(&'static str),
     Recorded,
     Cleared,
@@ -435,6 +506,8 @@ pub(crate) struct PaneResume {
     token: Option<String>,
     record: Option<ResumeRecord>,
     last_time: BTreeMap<u32, u64>,
+    /// Whether this pane has already logged that it is not trusted.
+    distrust_noted: bool,
 }
 
 impl PaneResume {
@@ -443,6 +516,7 @@ impl PaneResume {
             token,
             record,
             last_time: BTreeMap::new(),
+            distrust_noted: false,
         }
     }
 
@@ -482,6 +556,13 @@ impl PaneResume {
             return Outcome::Ignored("no token for this pane");
         };
         let verdict = check(body, token, now, |pid| self.last_time.get(&pid).copied());
+        if let Verdict::Ignored(reason) = verdict {
+            return Outcome::Ignored(reason);
+        }
+        if let Err(reason) = lookup.pane_authority() {
+            let first = !std::mem::replace(&mut self.distrust_noted, true);
+            return Outcome::PaneNotTrusted { reason, first };
+        }
         if let Verdict::Clear { pid, .. } | Verdict::Set { pid, .. } = &verdict {
             if let Some(problem) = owner_problem(*pid, lookup) {
                 self.remove_owned_by(*pid);
@@ -980,6 +1061,7 @@ mod tests {
         exes: RefCell<BTreeMap<u32, PathBuf>>,
         pane: Vec<u32>,
         uid: u32,
+        authority: std::cell::Cell<Result<(), &'static str>>,
     }
 
     impl FakeLookup {
@@ -1001,6 +1083,7 @@ mod tests {
                 exes: RefCell::new(BTreeMap::new()),
                 pane: pane.to_vec(),
                 uid: 501,
+                authority: std::cell::Cell::new(Ok(())),
             }
         }
 
@@ -1022,6 +1105,206 @@ mod tests {
         fn server_uid(&self) -> Option<u32> {
             Some(self.uid)
         }
+        fn pane_authority(&self) -> Result<(), &'static str> {
+            self.authority.get()
+        }
+    }
+
+    use crate::procinfo::ProcessFacts;
+
+    fn facts(uid: u32) -> ProcessFacts {
+        ProcessFacts {
+            uid,
+            sandboxed: false,
+            root_dir: Some(PathBuf::from("/")),
+            namespaces: vec![PathBuf::from("user:[1]"), PathBuf::from("mnt:[2]")],
+        }
+    }
+
+    /// A pane whose first process is 10 with descendants 11 and 12;
+    /// `change` alters process 12.
+    fn authority_with(change: impl Fn(&mut ProcessFacts)) -> Result<(), &'static str> {
+        pane_authority(
+            Some(10),
+            |root| (root == 10).then(|| vec![10, 11, 12]),
+            |pid| {
+                let mut process = facts(501);
+                if pid == 12 {
+                    change(&mut process);
+                }
+                Ok(Some(process))
+            },
+            Ok(facts(501)),
+        )
+    }
+
+    #[test]
+    fn a_pane_of_one_user_in_the_servers_root_and_namespaces_may_report() {
+        assert_eq!(authority_with(|_| {}), Ok(()));
+    }
+
+    #[test]
+    fn a_descendant_of_another_user_makes_the_pane_untrusted() {
+        assert_eq!(authority_with(|p| p.uid = 0), Err(OTHER_USER));
+    }
+
+    #[test]
+    fn a_sandboxed_descendant_makes_the_pane_untrusted() {
+        assert_eq!(authority_with(|p| p.sandboxed = true), Err(SANDBOXED));
+    }
+
+    #[test]
+    fn a_descendant_in_another_root_or_namespace_makes_the_pane_untrusted() {
+        assert_eq!(
+            authority_with(|p| p.root_dir = Some(PathBuf::from("/jail"))),
+            Err(OTHER_ROOT)
+        );
+        assert_eq!(
+            authority_with(|p| p.namespaces[0] = PathBuf::from("user:[9]")),
+            Err(OTHER_ROOT)
+        );
+    }
+
+    #[test]
+    fn anything_that_cannot_be_checked_makes_the_pane_untrusted() {
+        let ok = |_: u32| Ok(Some(facts(501)));
+        let tree = |_: u32| Some(vec![10, 11]);
+        // A process that cannot be read.
+        assert_eq!(
+            pane_authority(
+                Some(10),
+                tree,
+                |pid| if pid == 11 {
+                    Err(())
+                } else {
+                    Ok(Some(facts(501)))
+                },
+                Ok(facts(501))
+            ),
+            Err(UNCHECKED)
+        );
+        // A tree that cannot be listed.
+        assert_eq!(
+            pane_authority(Some(10), |_| None, ok, Ok(facts(501))),
+            Err(UNCHECKED)
+        );
+        // The server's own facts.
+        assert_eq!(
+            pane_authority(Some(10), tree, ok, Err(UNCHECKED)),
+            Err(UNCHECKED)
+        );
+        // No first process, or one that is gone.
+        assert_eq!(
+            pane_authority(None, tree, ok, Ok(facts(501))),
+            Err(UNCHECKED)
+        );
+        assert_eq!(
+            pane_authority(Some(10), tree, |_| Ok(None), Ok(facts(501))),
+            Err(UNCHECKED)
+        );
+        // A descendant that exited after the listing is no longer in the pane.
+        assert_eq!(
+            pane_authority(
+                Some(10),
+                tree,
+                |pid| Ok((pid == 10).then(|| facts(501))),
+                Ok(facts(501))
+            ),
+            Ok(())
+        );
+    }
+
+    /// Start `/bin/sh -c script` as a stand-in pane and wait until `ready`
+    /// holds for its tree. Kills the whole tree on drop.
+    #[cfg(target_os = "macos")]
+    struct FakePane(std::process::Child);
+
+    #[cfg(target_os = "macos")]
+    impl FakePane {
+        fn start(script: &str) -> Self {
+            use std::process::{Command, Stdio};
+            let child = prismattyc_process::spawn(
+                Command::new("/bin/sh")
+                    .args(["-c", script])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null()),
+            )
+            .unwrap();
+            Self(child)
+        }
+
+        fn lookup(&self) -> SystemLookup {
+            SystemLookup {
+                root: Some(self.0.id()),
+            }
+        }
+
+        fn settle(&self, want: Result<(), &'static str>) -> Result<(), &'static str> {
+            let mut last = Err(UNCHECKED);
+            for _ in 0..300 {
+                let tree = crate::procinfo::process_tree_strict(self.0.id()).unwrap_or_default();
+                last = self.lookup().pane_authority();
+                if tree.len() >= 2 && last == want {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            last
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    impl Drop for FakePane {
+        fn drop(&mut self) {
+            for pid in crate::procinfo::process_tree_strict(self.0.id()).unwrap_or_default() {
+                let _ = rustix::process::kill_process(
+                    rustix::process::Pid::from_raw(pid as i32).unwrap(),
+                    rustix::process::Signal::KILL,
+                );
+            }
+            let _ = self.0.wait();
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_real_sandboxed_child_makes_its_pane_untrusted_and_a_plain_one_does_not() {
+        let plain = FakePane::start("/bin/sleep 30 & wait");
+        assert_eq!(plain.settle(Ok(())), Ok(()));
+        let boxed =
+            FakePane::start("sandbox-exec -p '(version 1)(allow default)' /bin/sleep 30 & wait");
+        assert_eq!(boxed.settle(Err(SANDBOXED)), Err(SANDBOXED));
+    }
+
+    #[test]
+    fn reports_from_an_untrusted_pane_change_nothing_and_are_logged_once() {
+        let lookup = FakeLookup::new(&[7]);
+        lookup.runs(7, "/opt/bin/nvim");
+        let mut pane = PaneResume::new(Some(TOKEN.into()), None);
+        pane.receive(&set_report(7, NOW, "nvim"), NOW, &lookup);
+        lookup.authority.set(Err(SANDBOXED));
+        let clear = signed(&format!("pid=7:time={NOW}:clear=1"));
+        assert_eq!(
+            pane.receive(&clear, NOW, &lookup),
+            Outcome::PaneNotTrusted {
+                reason: SANDBOXED,
+                first: true
+            }
+        );
+        assert_eq!(
+            pane.receive(&set_report(7, NOW, "vim"), NOW, &lookup),
+            Outcome::PaneNotTrusted {
+                reason: SANDBOXED,
+                first: false
+            }
+        );
+        assert_eq!(pane.record().unwrap().argv, ["nvim"]);
+        // A report that fails its own checks is still just ignored.
+        assert!(matches!(
+            pane.receive(b"pid=7:time=1:clear=1:mac=00", NOW, &lookup),
+            Outcome::Ignored(_)
+        ));
     }
 
     fn set_report(pid: u32, time: u64, program: &str) -> Vec<u8> {

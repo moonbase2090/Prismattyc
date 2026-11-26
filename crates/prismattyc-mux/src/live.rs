@@ -660,10 +660,19 @@ impl LivePane {
             };
             let now = crate::program_resume::unix_now();
             for body in reports {
-                if let crate::program_resume::Outcome::Rejected(reason) =
-                    self.resume.receive(&body, now, &lookup)
-                {
-                    eprintln!("pmuxd: program resume report refused: {reason}");
+                match self.resume.receive(&body, now, &lookup) {
+                    crate::program_resume::Outcome::Rejected(reason) => {
+                        eprintln!("pmuxd: program resume report refused: {reason}");
+                    }
+                    crate::program_resume::Outcome::PaneNotTrusted {
+                        reason,
+                        first: true,
+                    } => {
+                        eprintln!(
+                            "pmuxd: program resume reports from a pane are ignored while {reason}"
+                        );
+                    }
+                    _ => {}
                 }
             }
         }

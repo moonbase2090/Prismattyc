@@ -174,6 +174,157 @@ pub(crate) fn process_executable(pid: u32) -> Option<PathBuf> {
     }
 }
 
+/// What decides whether a process may hold a pane's program resume token:
+/// who runs it, whether a sandbox confines it, and (on Linux) its root
+/// directory and user, mount and pid namespaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProcessFacts {
+    pub uid: u32,
+    pub sandboxed: bool,
+    pub root_dir: Option<PathBuf>,
+    pub namespaces: Vec<PathBuf>,
+}
+
+/// The facts for `pid`: `Ok(None)` when it has exited, `Err` when it is
+/// running but could not be fully checked.
+pub(crate) fn process_facts(pid: u32) -> Result<Option<ProcessFacts>, ()> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let gone = |error: &std::io::Error| error.kind() == std::io::ErrorKind::NotFound;
+        let uid = match std::fs::metadata(format!("/proc/{pid}")) {
+            Ok(metadata) => metadata.uid(),
+            Err(error) if gone(&error) => return Ok(None),
+            Err(_) => return Err(()),
+        };
+        let status = match std::fs::read_to_string(format!("/proc/{pid}/status")) {
+            Ok(status) => status,
+            Err(error) if gone(&error) => return Ok(None),
+            Err(_) => return Err(()),
+        };
+        // Seccomp: 0 none, 1 strict, 2 filter. Any filter confines it.
+        let seccomp = status
+            .lines()
+            .find_map(|line| line.strip_prefix("Seccomp:"))
+            .map(str::trim)
+            .ok_or(())?;
+        let link = |name: &str| std::fs::read_link(format!("/proc/{pid}/{name}")).map_err(|_| ());
+        let root_dir = Some(link("root")?);
+        let namespaces = ["ns/user", "ns/mnt", "ns/pid"]
+            .iter()
+            .map(|name| link(name))
+            .collect::<Result<Vec<_>, ()>>()?;
+        return Ok(Some(ProcessFacts {
+            uid,
+            sandboxed: seccomp != "0",
+            root_dir,
+            namespaces,
+        }));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if !pid_alive(pid) {
+            return Ok(None);
+        }
+        let uid = match macos::identity(pid) {
+            Some(identity) => identity.uid,
+            None if !pid_alive(pid) => return Ok(None),
+            None => return Err(()),
+        };
+        let sandboxed = match macos::sandboxed(pid) {
+            Some(sandboxed) => sandboxed,
+            None if !pid_alive(pid) => return Ok(None),
+            None => return Err(()),
+        };
+        return Ok(Some(ProcessFacts {
+            uid,
+            sandboxed,
+            root_dir: None,
+            namespaces: Vec::new(),
+        }));
+    }
+    #[allow(unreachable_code)]
+    {
+        let _ = pid;
+        Err(())
+    }
+}
+
+/// `root` and every descendant, or None when the tree cannot be listed in
+/// full (callers that need every process must then refuse).
+pub(crate) fn process_tree_strict(root: u32) -> Option<Vec<u32>> {
+    #[cfg(target_os = "linux")]
+    {
+        // Every process's parent, from a full /proc scan; this does not
+        // depend on the optional per-task children files.
+        let mut parents = Vec::new();
+        for entry in std::fs::read_dir("/proc").ok()? {
+            let entry = entry.ok()?;
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+                Ok(raw) => {
+                    let close = raw.rfind(')')?;
+                    let ppid = raw
+                        .get(close + 1..)?
+                        .split_whitespace()
+                        .nth(1)?
+                        .parse()
+                        .ok()?;
+                    parents.push((pid, ppid));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return None,
+            }
+        }
+        if !parents.iter().any(|(pid, _)| *pid == root) {
+            return None;
+        }
+        let mut tree = vec![root];
+        let mut index = 0;
+        while index < tree.len() {
+            let parent = tree[index];
+            tree.extend(
+                parents
+                    .iter()
+                    .filter(|(_, ppid)| *ppid == parent)
+                    .map(|(pid, _)| *pid),
+            );
+            index += 1;
+        }
+        return Some(tree);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if !pid_alive(root) {
+            return None;
+        }
+        let mut tree = vec![root];
+        let mut index = 0;
+        while index < tree.len() {
+            let children = macos::list_children_strict(tree[index])?;
+            tree.extend(
+                children
+                    .into_iter()
+                    .filter(|child| !tree.contains(child))
+                    .collect::<Vec<_>>(),
+            );
+            index += 1;
+        }
+        return Some(tree);
+    }
+    #[allow(unreachable_code)]
+    {
+        let _ = root;
+        None
+    }
+}
+
 /// Working directory of `pid`, if the platform exposes it.
 #[must_use]
 pub fn cwd_of(pid: u32) -> Option<PathBuf> {
@@ -2006,6 +2157,60 @@ mod macos {
             .take(n)
             .filter_map(|pid| (pid > 0).then_some(pid as u32))
             .collect()
+    }
+
+    /// Children of `pid`, or None when the list could not be read in full.
+    pub(super) fn list_children_strict(pid: u32) -> Option<Vec<u32>> {
+        // SAFETY: a null buffer asks only for the count.
+        let need = unsafe { libc::proc_listchildpids(pid as libc::pid_t, ptr::null_mut(), 0) };
+        if need < 0 {
+            return None;
+        }
+        if need == 0 {
+            return Some(Vec::new());
+        }
+        let mut buf = vec![0i32; (need as usize) + 16];
+        // SAFETY: `buf` is writable for the byte length passed.
+        let got = unsafe {
+            libc::proc_listchildpids(
+                pid as libc::pid_t,
+                buf.as_mut_ptr().cast(),
+                (buf.len() * std::mem::size_of::<i32>()) as i32,
+            )
+        };
+        // A full buffer may have been cut short.
+        if got < 0 || got as usize >= buf.len() {
+            return None;
+        }
+        Some(
+            buf.into_iter()
+                .take(got as usize)
+                .filter_map(|child| (child > 0).then_some(child as u32))
+                .collect(),
+        )
+    }
+
+    /// Whether a sandbox confines `pid`, or None when it cannot be told.
+    pub(super) fn sandboxed(pid: u32) -> Option<bool> {
+        // libsystem_sandbox, part of libSystem. With no operation and no
+        // filter it reports whether `pid` runs under any sandbox profile.
+        extern "C" {
+            fn sandbox_check(
+                pid: libc::pid_t,
+                operation: *const libc::c_char,
+                filter: libc::c_int,
+                ...
+            ) -> libc::c_int;
+        }
+        const SANDBOX_FILTER_NONE: libc::c_int = 0;
+        // SAFETY: a null operation with SANDBOX_FILTER_NONE takes no more
+        // arguments.
+        let result = unsafe { sandbox_check(pid as libc::pid_t, ptr::null(), SANDBOX_FILTER_NONE) };
+        match result {
+            0 => Some(false),
+            1 => Some(true),
+            _ => None,
+        }
     }
 
     pub(super) fn list_children(pid: u32) -> Vec<u32> {

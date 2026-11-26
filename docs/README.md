@@ -11,6 +11,7 @@ Start with the [README](../README.md) for installation and basic use.
 | [pmux commands](mux-cli.md) | Session management, scripting, and messaging. |
 | [pmux agent skill](../skills/pmux/SKILL.md) | Pane, mail, and agent coordination rules for Prismattyc pmux. |
 | [Update and restart](update-and-restart.md) | Install updates, restart components, and roll back. |
+| [Program resume](program-resume.md) | Let a program tell the pmux server how to start it again after a restart. |
 | [Troubleshooting](hung-session-recovery.md) | Diagnose an unresponsive pane or session. |
 | [Scrollback and selection](scrollback-triage.md) | Diagnose panes that stop scrolling or selecting text. |
 | [Accessibility](accessibility.md) | Keyboard controls and screen-reader support. |

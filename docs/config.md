@@ -312,6 +312,10 @@ allow_mixed_case_session_names = true
 experimental_activity = true
 # Activity monitor cell graph style. Kitty pixels remain independent. braille|block|ascii; default braille.
 activity_graph_style = "braille"
+# Commands a program may ask the pmux server to resume after a restart (OSC 7577), by file name; "*" trusts all. list of names; default common editors and Git interfaces.
+# resume_trusted = ["nvim", "lazygit"]
+# Take program resume reports and resume programs while the pmux server runs as root. true|false; default false.
+resume_allow_elevated = false
 
 [keys]
 # Host actions. An entry replaces that action's default chords.
@@ -895,6 +899,8 @@ instance = "default"                 # $XDG_RUNTIME_DIR/prismattyc/pmux.sock
 # allow_mixed_case_session_names = false  # default true; false limits labels to mailbox-address format
 # experimental_activity = false          # default true; false turns the activity feed off live, no restart
 # shell = "pwsh.exe"                    # unset: COMSPEC or cmd.exe on Windows
+# resume_trusted = ["nvim", "lazygit"]  # commands a program may ask to resume; "*" trusts all (program-resume.md)
+# resume_allow_elevated = false         # default false: a root pmux server takes no resume reports
 ```
 
 Cmd+Q (quit) and Cmd+N (new window) are available by default.

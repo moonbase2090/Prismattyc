@@ -174,7 +174,7 @@ impl MuxRuntime {
                                 self.mux.cols.max(1),
                                 self.mux.rows.max(1),
                                 cwd.as_deref(),
-                                self.mux.experimental_rich,
+                                self.mux.experimental,
                                 self.mux.alt_screen_scrollback,
                                 self.mux.wake.clone(),
                                 self.mux.geom.cell_w,

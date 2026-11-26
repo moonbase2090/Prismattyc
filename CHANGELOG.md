@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Experimental native terminal sessions and images have their own switch, `--experimental-native` or `PRISMATTYC_EXPERIMENTAL_NATIVE=1`, and no longer need rich overlays turned on. `--experimental-rich` still turns native sessions on too for this release; after that it turns on only rich overlays. Both stay off by default.
+
 ## [0.3.78] - 2026-11-26
 
 ### Added

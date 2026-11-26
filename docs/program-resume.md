@@ -27,7 +27,9 @@ A program reports again whenever its resume command changes, and sends
 `clear=1` when the user quits it on purpose. It does not send `clear=1` when
 it exits because the terminal went away. A program that starts other
 programs removes `OSC7577_TOKEN` from their environment. A shell passes it
-on.
+on. A launcher that runs a child with less authority (as another user, in a
+chroot or container, or in a sandbox) must remove `OSC7577_TOKEN` from that
+child's environment.
 
 This shell wrapper reports for the program it starts, then replaces itself
 with it:
@@ -57,12 +59,33 @@ and a pane whose program is `ssh`, `mosh` or `rsh` gets no token, so the
 token does not leave the machine. Do not add `OSC7577_TOKEN` to an ssh
 `SendEnv` list.
 
-A report is **ignored**, and changes nothing, when:
+As the protocol intends, any process of the same user that holds the
+pane's token is trusted to report. A report is **ignored**, and changes
+nothing, when:
 
 - its MAC is missing, not last, or wrong for the pane's token;
 - its time is more than 60 seconds from the clock, or older than the last
   report accepted from the same pid;
-- it is longer than 2048 bytes, counting the escape sequence.
+- it is longer than 2048 bytes, counting the escape sequence;
+- any process in the pane (its first process or a descendant) runs as
+  another user, runs in a sandbox, or has another root directory or
+  namespace than the pmux server, because such a process may hold the token
+  without the user's authority. The same applies when the pane's processes
+  cannot all be listed and checked. The pmux server logs this once for the
+  pane.
+
+What is detected:
+
+- **macOS:** another user, and a sandbox (as `sandbox_check` reports it, for
+  example a process started under `sandbox-exec` or an App Sandbox app). A
+  changed root directory is not detected.
+- **Linux:** another user, a seccomp filter (as in many containers and
+  sandboxes), and a root directory or user, mount or pid namespace different
+  from the pmux server's. Other confinement, such as an AppArmor or SELinux
+  profile or a Landlock ruleset, is not detected.
+- A process that confines itself after starting, without any of the above,
+  is not detected. Removing the token from restricted children is what the
+  protocol relies on.
 
 A report with a correct MAC and time is **refused**, and any record of its
 pid is removed, when:
@@ -128,9 +151,14 @@ returns to the shell. The ID works once.
 Only trusted programs are resumed without asking, and trust applies to the
 verified program, not to the name a report claims. By default these are
 `nvim`, `vim`, `hx`, `emacs`, `kak`, `micro`, `lazygit` and `tig`: editors and
-Git interfaces that reopen files or a repository and do not run commands
-from their arguments. To choose your own list, set it under `[mux]`, matched
-on the program's file name:
+Git interfaces that reopen files or a repository.
+
+Trusting a program trusts the arguments its reports carry. Several of these
+programs run commands given as arguments, such as `nvim -c` or
+`emacs --eval`, so trusting them means a report can replay such a command
+after a restart. Only a process of your own user in that pane, running that
+very program, can make the record. To choose your own list, set it under
+`[mux]`, matched on the program's file name:
 
 ```toml
 [mux]

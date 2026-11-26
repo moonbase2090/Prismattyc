@@ -1106,7 +1106,7 @@ pub(super) fn remember_idle_restart(path: &Path) -> std::io::Result<()> {
 /// Whether `path` is a restart-when-idle request. Anything else is ignored.
 pub(super) fn idle_restart_waiting(path: &Path) -> bool {
     let mut file =
-        match prismattyc_mux::private_fs::open(path, &std::fs::OpenOptions::new().read(true)) {
+        match prismattyc_mux::private_fs::open(path, std::fs::OpenOptions::new().read(true)) {
             Ok(file) => file,
             Err(_) => return false,
         };

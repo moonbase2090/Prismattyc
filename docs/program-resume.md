@@ -156,8 +156,12 @@ Git interfaces that reopen files or a repository.
 Trusting a program trusts the arguments its reports carry. Several of these
 programs run commands given as arguments, such as `nvim -c` or
 `emacs --eval`, so trusting them means a report can replay such a command
-after a restart. Only a process of your own user in that pane, running that
-very program, can make the record. To choose your own list, set it under
+after a restart. The pmux server cannot tell which process wrote a report.
+Any process of your own user in that pane that holds the token can make a
+record naming a process there that runs a trusted program, with arguments
+of its choosing. That is the protocol's trust model: such a process could
+already run anything as you. Trusting `nvim` therefore means trusting every
+same-user process in that pane to resume `nvim` with arguments it picks. To choose your own list, set it under
 `[mux]`, matched on the program's file name:
 
 ```toml

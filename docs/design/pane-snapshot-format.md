@@ -253,6 +253,8 @@ ciphertext length bytes, ChaCha20-Poly1305
 tag        16 B
 ```
 
+File ids come from a per-run counter and are never reused under a key. Parts are written once, so each (key, nonce) pair seals exactly one part.
+
 The authenticated data is the store's file header (pane id, file id) plus the part's own frame header. A part cannot be moved to another file or another position without failing to open. Because the envelope wraps whole parts, a store with a different key can re-seal parts without re-encoding them. Parking does not need to: restore after exit uses the plaintext checkpoint written just before the pane parked, and parked files are deleted at exit.
 
 **Trailer.** A parked file is complete only with a valid trailer. A file cut short by a crash still yields its whole parts. Since parking writes the trailer before it frees any history, a pane is never left depending on a file without one.

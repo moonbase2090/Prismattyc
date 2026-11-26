@@ -10,7 +10,6 @@ members = [
     "crates/prismattyc-mux",
     "crates/prismattyc-protocol",
     "crates/prismattyc-render",
-    "crates/prismattyc-rich-client",
     "crates/pmux-mcp",
     "crates/pmux-plugin-api",
     "crates/pmux-plugin-runtime",

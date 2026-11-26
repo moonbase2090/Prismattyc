@@ -698,7 +698,7 @@ try:
                             + shlex.join(launch) + '\n')
         launch = ['/bin/bash', '--noprofile', '--norc', str(launcher)]
     with (out / 'host.log').open('w') as log:
-        host = subprocess.Popen([str(bins / 'prismattyc-host'), '--no-splash', *(['--experimental-rich'] if args.native == 'on' else []), '--',
+        host = subprocess.Popen([str(bins / 'prismattyc-host'), '--no-splash', *(['--experimental-native'] if args.native == 'on' else []), '--',
                                  *launch],
                                 env=env, stdout=log, stderr=log, start_new_session=True)
     control, _ = listener.accept()

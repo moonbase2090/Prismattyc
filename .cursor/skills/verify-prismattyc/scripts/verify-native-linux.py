@@ -349,7 +349,7 @@ try:
                             + '\nIFS= read -r -u 4 request\nexec 4<&-\n' + shlex.join(launch) + '\n')
         launch = ['/bin/bash', '--noprofile', '--norc', str(launcher)]
     with (out / 'host.log').open('w') as log:
-        host = subprocess.Popen([str(bins / 'prismattyc-host'), '--no-splash', *([] if args.mode == 'off' else ['--experimental-rich']), '--', *launch], env=env, stdout=log, stderr=log)
+        host = subprocess.Popen([str(bins / 'prismattyc-host'), '--no-splash', *([] if args.mode == 'off' else ['--experimental-native']), '--', *launch], env=env, stdout=log, stderr=log)
     control, _ = listener.accept()
     if args.mode == 'off':
         fallback = event(lambda value: value['event'] == 'fallback', 'disabled native stays ANSI', True)

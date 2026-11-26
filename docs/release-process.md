@@ -18,6 +18,8 @@ and a signed universal macOS app distributed as a DMG and a zip.
    also pin the workspace crates: set the version of each workspace entry
    (one with no `source` line) to the new version, and confirm that
    `cargo metadata --locked --manifest-path <fixture>/Cargo.toml` succeeds.
+   `scripts/check-workspace-version.sh` fails when any tracked `Cargo.lock`
+   pins a workspace crate at a version other than the workspace version.
    Then update the README and fidelity-matrix sentences. Add the
    `## [X.Y.Z]` and `## [X.Y.Z-rc.N]` CHANGELOG sections,
    and run `scripts/check-workspace-version.sh`. The tag version must match

@@ -6404,6 +6404,7 @@ mod tests {
                         mail_inject: None,
                         ledger: empty_ledger(),
                         size_owner: None,
+                        resume: None,
                     }],
                     sync_input: false,
                 }],

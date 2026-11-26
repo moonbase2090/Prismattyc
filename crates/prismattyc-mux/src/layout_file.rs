@@ -1209,6 +1209,7 @@ mod tests {
             mail_inject: None,
             ledger: ledger(),
             size_owner: None,
+            resume: None,
         }
     }
 

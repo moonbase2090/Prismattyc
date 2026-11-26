@@ -405,6 +405,7 @@ mod tests {
                 last_input_at_ms: None,
             },
             size_owner: None,
+            resume: None,
         }
     }
 

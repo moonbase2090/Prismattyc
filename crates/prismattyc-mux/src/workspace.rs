@@ -28,6 +28,10 @@ pub(crate) struct SavedPane {
     pub spawn: SpawnSpec,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_command: Option<String>,
+    /// What the pane's program reported it should be resumed as (OSC 7577).
+    /// Preferred over `resume_command` when it may be resumed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_record: Option<crate::program_resume::ResumeRecord>,
     #[serde(skip)]
     observed_pid: Option<u32>,
 }
@@ -199,6 +203,7 @@ impl Workspace {
                             .as_ref()
                             .filter(|c| run && !c.trim().is_empty())
                             .cloned(),
+                        resume_record: None,
                         observed_pid: None,
                     });
                     LayoutSnapshot::Leaf { pane_id: id }
@@ -395,6 +400,7 @@ impl Workspace {
                                 .spawn
                                 .context("workspace pane has no spawn specification")?,
                             resume_command: None,
+                            resume_record: pane.resume,
                             observed_pid: pane.child_pid,
                         })
                     })
@@ -452,7 +458,7 @@ impl Workspace {
                     .flat_map(move |w| w.panes.iter().map(move |p| (s, p)))
             })
             .collect();
-        let plane = ControlPlane::new_live(
+        let mut plane = ControlPlane::new_live(
             domain,
             bounds,
             None,
@@ -463,10 +469,32 @@ impl Workspace {
         // unchanged across checkpoints, and the shell remains after the job
         // exits. Replacing argv with -c would permanently bake in old jobs.
         let mut commands = Vec::new();
+        let resume_policy = crate::program_resume::policy();
         for (session, pane) in panes {
             let resume = self.resume_commands
                 || policy == crate::SpaceOpenRunsCommands::All
                 || (policy == crate::SpaceOpenRunsCommands::Agents && session.agent_id.is_some());
+            if let Some(record) = pane.resume_record.clone() {
+                let refusal = crate::program_resume::restore_refusal(
+                    &record,
+                    resume_policy,
+                    resume_policy.enabled(),
+                    crate::program_resume::server_uid(),
+                    Path::is_dir,
+                );
+                if let (true, Some(reason)) = (resume, refusal) {
+                    eprintln!(
+                        "pmuxd: pane {}: not resuming {}: {reason}",
+                        pane.id,
+                        record.display()
+                    );
+                }
+                let wanted = resume && refusal.is_none();
+                if let Some(command) = plane.restore_resume(pane.id, record, wanted) {
+                    commands.push((pane.id, command));
+                    continue;
+                }
+            }
             if let Some(command) = pane.resume_command.as_ref().filter(|_| resume) {
                 commands.push((pane.id, command.clone()));
             }

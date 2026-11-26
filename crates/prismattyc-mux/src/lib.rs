@@ -38,6 +38,7 @@ mod pane_log;
 mod pane_log_persist;
 mod process_lock;
 pub mod procinfo;
+pub mod program_resume;
 pub mod prompt_idle;
 pub mod release_update;
 pub mod remote_catalog;

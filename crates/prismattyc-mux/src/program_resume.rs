@@ -1,0 +1,1116 @@
+// SPDX-License-Identifier: MIT
+//! OSC 7577 program resume.
+//!
+//! A program in a pane can tell the pmux server how to start it again after a
+//! restart. The server gives each local pane's first process a random token in
+//! `OSC7577_TOKEN`. The program writes `ESC ] 7577 ; body ST` where the body is
+//! `key=value` pairs joined by `:` and ends with `:mac=` and the lowercase hex
+//! SHA-256 of the body before that suffix, a `:` and the token. Output from
+//! anything without the token (a `cat` of a file, a remote host) cannot make a
+//! record.
+//!
+//! This module checks reports and keeps one record per pane. Resuming still
+//! starts a new process; nothing is handed over from the old one.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use base64::Engine as _;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+/// Environment variable that carries a pane's token.
+pub(crate) const TOKEN_ENV: &str = "OSC7577_TOKEN";
+/// A report whose time is further than this from the server clock is ignored.
+pub(crate) const TIME_WINDOW_SECS: u64 = 60;
+/// An owner that exited this recently still counts as running, so a program
+/// that quit a moment before the server stopped is still resumed.
+pub(crate) const OWNER_EXIT_GRACE_SECS: u64 = 2;
+/// A resumed program has to stay up this long before its record may be
+/// resumed again. A resume that crashes or is cut short is not retried.
+pub(crate) const RESUME_SETTLE_SECS: u64 = 10;
+/// Per-pane memory of the last accepted time for each reporting pid.
+const MAX_TRACKED_PIDS: usize = 64;
+/// Keys this server implements, for `need`.
+const IMPLEMENTED_KEYS: &[&str] = &["pid", "time", "mac", "argv", "cwd", "clear", "need"];
+/// Programs resumed without asking when `[mux] resume_trusted` is unset:
+/// editors and Git interfaces, which reopen files or a repository and do not
+/// run commands taken from their arguments.
+pub(crate) const DEFAULT_TRUSTED: &[&str] = &[
+    "nvim", "vim", "hx", "emacs", "kak", "micro", "lazygit", "tig",
+];
+
+/// A fresh random token: 32 bytes as 43 characters of `[A-Za-z0-9_-]`.
+pub(crate) fn new_token() -> anyhow::Result<String> {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes)
+        .map_err(|error| anyhow::anyhow!("program resume token: {error}"))?;
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+}
+
+/// Remove a token this process inherited from the terminal it runs in, so no
+/// child sees it. Call before starting threads.
+pub fn forget_inherited_token() {
+    std::env::remove_var(TOKEN_ENV);
+}
+
+/// Seconds since the Unix epoch.
+pub(crate) fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
+}
+
+/// The server's policy, read from the config file once per process.
+pub(crate) fn policy() -> &'static ResumePolicy {
+    static POLICY: std::sync::OnceLock<ResumePolicy> = std::sync::OnceLock::new();
+    POLICY.get_or_init(ResumePolicy::load)
+}
+
+/// Whether a pane running `program` reaches another machine, so it gets no
+/// token: ssh, mosh and rsh.
+pub(crate) fn reaches_another_machine(program: &str) -> bool {
+    let name = Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(program)
+        .to_ascii_lowercase();
+    matches!(
+        name.strip_suffix(".exe").unwrap_or(&name),
+        "ssh" | "mosh" | "rsh"
+    )
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TEST_PMUX: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The `pmux` installed next to this server.
+pub(crate) fn pmux_executable() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(path) = TEST_PMUX.with(|path| path.borrow().clone()) {
+        return Some(path);
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| crate::executable::sibling(&exe, &["pmux"]))
+}
+
+/// The fixed text typed into a restored pane's shell to start its resume:
+/// the quoted path of `pmux`, `resume-run` and the one-time id. Nothing from
+/// the record is in it. None when the path cannot be quoted for a shell.
+pub(crate) fn handoff_command(pmux: &Path, id: &str) -> Option<String> {
+    let path = pmux.to_str()?;
+    if path.contains(['\'', '\n', '\r'])
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return None;
+    }
+    Some(format!("'{path}' resume-run {id}"))
+}
+
+/// The process that made a record. A different start time on the same pid
+/// is a different process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResumeOwner {
+    pub pid: u32,
+    pub start: u64,
+}
+
+/// What the pmux server starts when it restores the pane.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResumeRecord {
+    /// The command. Element 0 is a bare command name or an absolute path.
+    pub argv: Vec<String>,
+    /// Absolute directory to start in, when the program reported one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
+    /// The report's time, in seconds since the Unix epoch.
+    pub reported_at: u64,
+    /// The process that reported. None after a restore, until the resumed
+    /// program starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<ResumeOwner>,
+    /// User that ran the owner when the report was accepted.
+    pub uid: u32,
+    /// Set when a resume starts, cleared once the program has stayed up for
+    /// [`RESUME_SETTLE_SECS`]. A set flag at the next restore means the last
+    /// resume failed or crashed, so it is not run again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub attempted: bool,
+    #[serde(skip)]
+    exited_at: Option<u64>,
+    #[serde(skip)]
+    started_at: Option<u64>,
+}
+
+impl ResumeRecord {
+    /// The command for display: each argument quoted with control and
+    /// format characters escaped, so it cannot hide what it runs.
+    pub fn display(&self) -> String {
+        self.argv
+            .iter()
+            .map(|arg| format!("{arg:?}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+/// What a report body did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Verdict {
+    /// Not provably from a token holder, or stale: change nothing.
+    Ignored(&'static str),
+    /// From a token holder but refused. The owner's record is removed.
+    Rejected {
+        pid: Option<u32>,
+        reason: &'static str,
+    },
+    Clear {
+        pid: u32,
+        time: u64,
+    },
+    Set {
+        pid: u32,
+        time: u64,
+        argv: Vec<String>,
+        cwd: Option<PathBuf>,
+    },
+}
+
+/// Check one report body against `token`. The MAC is checked before anything
+/// else is read. `last_time` gives the last accepted time for a pid.
+pub(crate) fn check(
+    body: &[u8],
+    token: &str,
+    now: u64,
+    last_time: impl Fn(u32) -> Option<u64>,
+) -> Verdict {
+    let Some(message) = message_with_valid_mac(body, token) else {
+        return Verdict::Ignored("missing or wrong mac");
+    };
+    // A pair without `=` keeps an empty key, so the strict pass rejects it.
+    let pairs: Vec<(&[u8], &[u8])> = message
+        .split(|byte| *byte == b':')
+        .map(|pair| match pair.iter().position(|byte| *byte == b'=') {
+            Some(at) => (&pair[..at], &pair[at + 1..]),
+            None => (&[][..], pair),
+        })
+        .collect();
+    let first = |key: &[u8]| pairs.iter().find(|(k, _)| *k == key).map(|(_, v)| *v);
+    let Some(time) = first(b"time").and_then(decimal::<u64>) else {
+        return Verdict::Ignored("no usable time");
+    };
+    if now.abs_diff(time) > TIME_WINDOW_SECS {
+        return Verdict::Ignored("time outside the window");
+    }
+    let pid = first(b"pid").and_then(decimal::<u32>);
+    if let Some(pid) = pid {
+        if last_time(pid).is_some_and(|last| time < last) {
+            return Verdict::Ignored("older than the last accepted report");
+        }
+    }
+    let reject = |reason| Verdict::Rejected { pid, reason };
+    let mut seen = BTreeMap::new();
+    for (key, value) in &pairs {
+        if key.is_empty() || !key.iter().all(u8::is_ascii_lowercase) {
+            return reject("malformed key");
+        }
+        if !value.iter().all(|byte| value_byte(*byte)) {
+            return reject("malformed value");
+        }
+        if seen.insert(*key, *value).is_some() {
+            return reject("repeated key");
+        }
+    }
+    let Some(pid) = pid else {
+        return reject("no usable pid");
+    };
+    if let Some(need) = seen.get(&b"need"[..]) {
+        for key in need.split(|byte| *byte == b',') {
+            if !IMPLEMENTED_KEYS.iter().any(|known| known.as_bytes() == key) {
+                return reject("needs a key this server does not implement");
+            }
+        }
+    }
+    let clear = seen.get(&b"clear"[..]);
+    let argv = seen.get(&b"argv"[..]);
+    match (argv, clear) {
+        (Some(_), Some(_)) => reject("both argv and clear"),
+        (None, None) => reject("neither argv nor clear"),
+        (None, Some(value)) if *value == b"1" => Verdict::Clear { pid, time },
+        (None, Some(_)) => reject("clear must be 1"),
+        (Some(argv), None) => {
+            let Some(argv) = decode_argv(argv) else {
+                return reject("argv is not a valid command");
+            };
+            let cwd = match seen.get(&b"cwd"[..]) {
+                None => None,
+                Some(value) => match decode_text(value).map(PathBuf::from) {
+                    Some(path) if path.is_absolute() => Some(path),
+                    _ => return reject("cwd is not an absolute path"),
+                },
+            };
+            Verdict::Set {
+                pid,
+                time,
+                argv,
+                cwd,
+            }
+        }
+    }
+}
+
+/// The body before `:mac=` when the MAC is last, well formed and correct.
+fn message_with_valid_mac<'a>(body: &'a [u8], token: &str) -> Option<&'a [u8]> {
+    const SUFFIX: &[u8] = b":mac=";
+    let split = body.len().checked_sub(SUFFIX.len() + 64)?;
+    let (message, tail) = body.split_at(split);
+    let mac = tail.strip_prefix(SUFFIX)?;
+    if !mac
+        .iter()
+        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return None;
+    }
+    let expected = mac_hex(message, token);
+    constant_time_eq(expected.as_bytes(), mac).then_some(message)
+}
+
+/// Lowercase hex SHA-256 of `message`, `:` and `token`.
+pub(crate) fn mac_hex(message: &[u8], token: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(message);
+    hasher.update(b":");
+    hasher.update(token.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .fold(0u8, |diff, (a, b)| diff | (a ^ b))
+            == 0
+}
+
+/// `[1-9][0-9]*` that fits the type.
+fn decimal<T: std::str::FromStr>(value: &[u8]) -> Option<T> {
+    if value.first().is_none_or(|first| *first == b'0') || !value.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    std::str::from_utf8(value).ok()?.parse().ok()
+}
+
+fn value_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b',' | b'+' | b'/' | b'=' | b'-')
+}
+
+fn decode_argv(value: &[u8]) -> Option<Vec<String>> {
+    if value.is_empty() {
+        return None;
+    }
+    let argv = value
+        .split(|byte| *byte == b',')
+        .map(decode_text)
+        .collect::<Option<Vec<_>>>()?;
+    let program = argv.first()?;
+    let bare = !program.is_empty() && !program.starts_with('-') && !program.contains('/');
+    (bare || Path::new(program).is_absolute()).then_some(argv)
+}
+
+/// Standard base64 (padding absent, or present and correct) of UTF-8 with no
+/// control characters.
+fn decode_text(value: &[u8]) -> Option<String> {
+    use base64::engine::{general_purpose, DecodePaddingMode, GeneralPurpose};
+    let padded = value.last() == Some(&b'=');
+    let engine = GeneralPurpose::new(
+        &base64::alphabet::STANDARD,
+        general_purpose::GeneralPurposeConfig::new().with_decode_padding_mode(if padded {
+            DecodePaddingMode::RequireCanonical
+        } else {
+            DecodePaddingMode::RequireNone
+        }),
+    );
+    let text = String::from_utf8(engine.decode(value).ok()?).ok()?;
+    (!text
+        .chars()
+        .any(|ch| matches!(ch, '\u{0}'..='\u{1f}' | '\u{7f}'..='\u{9f}')))
+    .then_some(text)
+}
+
+/// How the server looks up processes; a trait so tests can supply their own.
+pub(crate) trait OwnerLookup {
+    fn identity(&self, pid: u32) -> Option<crate::procinfo::ProcessIdentity>;
+    /// Whether `pid` is the pane's first process or one of its descendants.
+    fn in_pane(&self, pid: u32) -> bool;
+    /// The user the pmux server runs as.
+    fn server_uid(&self) -> Option<u32>;
+}
+
+/// The live system, for a pane whose first process is `root`.
+pub(crate) struct SystemLookup {
+    pub root: Option<u32>,
+}
+
+impl OwnerLookup for SystemLookup {
+    fn identity(&self, pid: u32) -> Option<crate::procinfo::ProcessIdentity> {
+        crate::procinfo::process_identity(pid)
+    }
+
+    fn in_pane(&self, pid: u32) -> bool {
+        self.root
+            .is_some_and(|root| crate::procinfo::is_process_descendant(root, pid))
+    }
+
+    fn server_uid(&self) -> Option<u32> {
+        server_uid()
+    }
+}
+
+/// The user the pmux server runs as, on Unix.
+pub(crate) fn server_uid() -> Option<u32> {
+    #[cfg(unix)]
+    {
+        Some(rustix::process::geteuid().as_raw())
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+/// Why `pid` may not own a record in this pane: it must be running, as the
+/// server's user, inside the pane.
+fn owner_problem(pid: u32, lookup: &dyn OwnerLookup) -> Option<&'static str> {
+    let Some(identity) = lookup.identity(pid) else {
+        return Some("owner is not running");
+    };
+    if lookup.server_uid() != Some(identity.uid) {
+        return Some("owner runs as another user");
+    }
+    if !lookup.in_pane(pid) {
+        return Some("owner is not in this pane");
+    }
+    None
+}
+
+/// What a received report did to the pane, for logs and tests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Outcome {
+    Ignored(&'static str),
+    Rejected(&'static str),
+    Recorded,
+    Cleared,
+}
+
+/// A pane's token and record.
+#[derive(Debug, Default)]
+pub(crate) struct PaneResume {
+    token: Option<String>,
+    record: Option<ResumeRecord>,
+    last_time: BTreeMap<u32, u64>,
+}
+
+impl PaneResume {
+    pub(crate) fn new(token: Option<String>, record: Option<ResumeRecord>) -> Self {
+        Self {
+            token,
+            record,
+            last_time: BTreeMap::new(),
+        }
+    }
+
+    pub(crate) fn record(&self) -> Option<&ResumeRecord> {
+        self.record.as_ref()
+    }
+
+    /// Install a record saved before a restart. It has no running owner
+    /// until the resumed program starts or reports.
+    pub(crate) fn restore(&mut self, mut record: ResumeRecord) {
+        record.owner = None;
+        record.exited_at = None;
+        record.started_at = None;
+        self.record = Some(record);
+    }
+
+    /// Check a report body and apply it.
+    pub(crate) fn receive(&mut self, body: &[u8], now: u64, lookup: &dyn OwnerLookup) -> Outcome {
+        let Some(token) = self.token.as_deref() else {
+            return Outcome::Ignored("no token for this pane");
+        };
+        let verdict = check(body, token, now, |pid| self.last_time.get(&pid).copied());
+        if let Verdict::Clear { pid, .. } | Verdict::Set { pid, .. } = &verdict {
+            if let Some(problem) = owner_problem(*pid, lookup) {
+                self.remove_owned_by(*pid);
+                return Outcome::Rejected(problem);
+            }
+        }
+        match verdict {
+            Verdict::Ignored(reason) => Outcome::Ignored(reason),
+            Verdict::Rejected { pid, reason } => {
+                if let Some(pid) = pid {
+                    self.remove_owned_by(pid);
+                }
+                Outcome::Rejected(reason)
+            }
+            Verdict::Clear { pid, time } => {
+                self.remember(pid, time);
+                if self.remove_owned_by(pid) {
+                    Outcome::Cleared
+                } else {
+                    Outcome::Ignored("no record of this owner")
+                }
+            }
+            Verdict::Set {
+                pid,
+                time,
+                argv,
+                cwd,
+            } => {
+                let Some(identity) = lookup.identity(pid) else {
+                    return Outcome::Rejected("owner is not running");
+                };
+                self.remember(pid, time);
+                self.record = Some(ResumeRecord {
+                    argv,
+                    cwd,
+                    reported_at: time,
+                    owner: Some(ResumeOwner {
+                        pid,
+                        start: identity.start,
+                    }),
+                    uid: identity.uid,
+                    attempted: false,
+                    exited_at: None,
+                    started_at: None,
+                });
+                Outcome::Recorded
+            }
+        }
+    }
+
+    fn remember(&mut self, pid: u32, time: u64) {
+        self.last_time.insert(pid, time);
+        while self.last_time.len() > MAX_TRACKED_PIDS {
+            let oldest = self
+                .last_time
+                .iter()
+                .min_by_key(|(_, time)| **time)
+                .map(|(pid, _)| *pid);
+            if let Some(pid) = oldest {
+                self.last_time.remove(&pid);
+            }
+        }
+    }
+
+    fn remove_owned_by(&mut self, pid: u32) -> bool {
+        let owned = self
+            .record
+            .as_ref()
+            .is_some_and(|record| record.owner.is_some_and(|owner| owner.pid == pid));
+        if owned {
+            self.record = None;
+        }
+        owned
+    }
+
+    /// Track the owner while the server runs: clear the record once its owner
+    /// has been gone longer than the grace period, and mark a resumed program
+    /// settled once it has stayed up.
+    pub(crate) fn refresh(&mut self, now: u64, lookup: &dyn OwnerLookup) {
+        let Some(record) = self.record.as_mut() else {
+            return;
+        };
+        let Some(owner) = record.owner else {
+            return;
+        };
+        let alive = lookup
+            .identity(owner.pid)
+            .is_some_and(|identity| identity.start == owner.start);
+        if alive {
+            record.exited_at = None;
+            if record.attempted
+                && record
+                    .started_at
+                    .is_some_and(|started| now.saturating_sub(started) >= RESUME_SETTLE_SECS)
+            {
+                record.attempted = false;
+            }
+            return;
+        }
+        let exited = *record.exited_at.get_or_insert(now);
+        if now.saturating_sub(exited) > OWNER_EXIT_GRACE_SECS {
+            self.record = None;
+        }
+    }
+
+    /// The resumed program started as `pid`: the record is now its own.
+    pub(crate) fn resumed(&mut self, pid: u32, now: u64, lookup: &dyn OwnerLookup) -> bool {
+        let (Some(record), Some(identity)) = (self.record.as_mut(), lookup.identity(pid)) else {
+            return false;
+        };
+        record.owner = Some(ResumeOwner {
+            pid,
+            start: identity.start,
+        });
+        record.attempted = true;
+        record.started_at = Some(now);
+        record.exited_at = None;
+        true
+    }
+
+    /// The resume could not start: drop the record so it is not run again.
+    pub(crate) fn resume_failed(&mut self) {
+        self.record = None;
+    }
+
+    /// Mark a resume as started before the program is running, so a crash in
+    /// between is not retried.
+    pub(crate) fn mark_attempted(&mut self) {
+        if let Some(record) = self.record.as_mut() {
+            record.attempted = true;
+        }
+    }
+}
+
+/// `[mux]` program resume settings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResumePolicy {
+    /// Command names (argv[0] basenames) resumed without asking. `*` trusts
+    /// every command.
+    pub trusted: Vec<String>,
+    /// Accept reports and resume while the pmux server runs as root.
+    pub allow_elevated: bool,
+}
+
+impl Default for ResumePolicy {
+    fn default() -> Self {
+        Self {
+            trusted: DEFAULT_TRUSTED
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect(),
+            allow_elevated: false,
+        }
+    }
+}
+
+impl ResumePolicy {
+    pub(crate) fn from_mux(section: &crate::MuxSection) -> Self {
+        let default = Self::default();
+        Self {
+            trusted: section.resume_trusted.clone().unwrap_or(default.trusted),
+            allow_elevated: section.resume_allow_elevated.unwrap_or(false),
+        }
+    }
+
+    /// The config file's policy, or the defaults if it cannot be read.
+    pub(crate) fn load() -> Self {
+        crate::load_mux_section(&crate::prism_config_path())
+            .map(|section| Self::from_mux(&section))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn trusts(&self, argv0: &str) -> bool {
+        let name = Path::new(argv0)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(argv0);
+        self.trusted
+            .iter()
+            .any(|trusted| trusted == "*" || trusted == name)
+    }
+
+    /// Whether this server sets tokens, takes reports and resumes.
+    pub(crate) fn enabled(&self) -> bool {
+        protocol_enabled(PLATFORM_SUPPORTED, running_elevated(), self.allow_elevated)
+    }
+}
+
+/// Linux and macOS can check a report's owner (user, start time, process
+/// tree) and start a resume without building shell text. Windows cannot yet,
+/// so the pmux server there sets no token and keeps restoring by its own
+/// process inspection.
+pub(crate) const PLATFORM_SUPPORTED: bool = cfg!(any(target_os = "linux", target_os = "macos"));
+
+pub(crate) fn protocol_enabled(platform: bool, elevated: bool, allow_elevated: bool) -> bool {
+    platform && (!elevated || allow_elevated)
+}
+
+fn running_elevated() -> bool {
+    server_uid() == Some(0)
+}
+
+/// Why a saved record is not resumed, or None to resume it.
+pub(crate) fn restore_refusal(
+    record: &ResumeRecord,
+    policy: &ResumePolicy,
+    enabled: bool,
+    uid: Option<u32>,
+    dir_exists: impl Fn(&Path) -> bool,
+) -> Option<&'static str> {
+    if !enabled {
+        return Some("program resume is off for this pmux server");
+    }
+    if record.attempted {
+        return Some("its last resume did not start or did not last");
+    }
+    if uid != Some(record.uid) {
+        return Some("it was reported as another user");
+    }
+    let program = record.argv.first()?;
+    if !policy.trusts(program) {
+        return Some("its command is not in [mux] resume_trusted");
+    }
+    if record.cwd.as_deref().is_some_and(|cwd| !dir_exists(cwd)) {
+        return Some("its directory no longer exists");
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::procinfo::ProcessIdentity;
+    use std::cell::RefCell;
+
+    const TOKEN: &str = "dummy-token-replace-me";
+    const NOW: u64 = 1_795_543_200;
+
+    fn b64(text: &str) -> String {
+        base64::engine::general_purpose::STANDARD.encode(text)
+    }
+
+    fn signed(message: &str) -> Vec<u8> {
+        format!("{message}:mac={}", mac_hex(message.as_bytes(), TOKEN)).into_bytes()
+    }
+
+    fn verdict(message: &str) -> Verdict {
+        check(&signed(message), TOKEN, NOW, |_| None)
+    }
+
+    #[test]
+    fn the_mac_matches_the_published_test_vector() {
+        assert_eq!(
+            mac_hex(b"pid=74877:time=1795543200:clear=1", TOKEN),
+            "c30603369f98fef581a4098be889175b0c74f0641e49f8b25f4326cb38f97c93"
+        );
+        assert_eq!(
+            check(
+                b"pid=74877:time=1795543200:clear=1:mac=c30603369f98fef581a4098be889175b0c74f0641e49f8b25f4326cb38f97c93",
+                TOKEN,
+                NOW,
+                |_| None
+            ),
+            Verdict::Clear {
+                pid: 74877,
+                time: NOW
+            }
+        );
+    }
+
+    #[test]
+    fn a_wrong_missing_misplaced_or_uppercase_mac_is_ignored() {
+        let good = signed("pid=7:time=1795543200:clear=1");
+        let mut tampered = good.clone();
+        tampered[4] = b'8';
+        let mut upper = good.clone();
+        let len = upper.len();
+        upper[len - 64..].make_ascii_uppercase();
+        let mac = String::from_utf8(good[good.len() - 69..].to_vec()).unwrap();
+        for body in [
+            tampered,
+            upper,
+            b"pid=7:time=1795543200:clear=1".to_vec(),
+            format!("pid=7{mac}:time=1795543200:clear=1").into_bytes(),
+            signed("pid=7:time=1795543200:clear=1")[..good.len() - 1].to_vec(),
+        ] {
+            assert!(
+                matches!(check(&body, TOKEN, NOW, |_| None), Verdict::Ignored(_)),
+                "{}",
+                String::from_utf8_lossy(&body)
+            );
+        }
+        assert!(matches!(
+            check(&good, "another-token-entirely", NOW, |_| None),
+            Verdict::Ignored(_)
+        ));
+    }
+
+    #[test]
+    fn time_outside_the_window_or_older_than_the_last_report_is_ignored() {
+        let at = |time: u64| format!("pid=7:time={time}:clear=1");
+        assert!(matches!(verdict(&at(NOW + 61)), Verdict::Ignored(_)));
+        assert!(matches!(verdict(&at(NOW - 61)), Verdict::Ignored(_)));
+        assert!(matches!(verdict(&at(NOW - 60)), Verdict::Clear { .. }));
+        assert!(matches!(
+            verdict("pid=7:time=99999999999999999999999:clear=1"),
+            Verdict::Ignored(_)
+        ));
+        assert!(matches!(verdict("pid=7:clear=1"), Verdict::Ignored(_)));
+        assert!(matches!(
+            verdict("pid=7:time=01795543200:clear=1"),
+            Verdict::Ignored(_)
+        ));
+        let older = check(&signed(&at(NOW - 5)), TOKEN, NOW, |pid| {
+            (pid == 7).then_some(NOW - 4)
+        });
+        assert!(matches!(older, Verdict::Ignored(_)));
+        let same = check(&signed(&at(NOW - 4)), TOKEN, NOW, |_| Some(NOW - 4));
+        assert!(matches!(same, Verdict::Clear { .. }));
+    }
+
+    #[test]
+    fn a_valid_command_report_decodes_every_argument() {
+        let message = format!(
+            "time={NOW}:argv={},{},{},{}:pid=74877:cwd={}:need=cwd,argv:later=x",
+            b64("nvim"),
+            b64("-S"),
+            b64("$(rm -rf ~); echo"),
+            "",
+            b64("/home/user/src/project"),
+        );
+        assert_eq!(
+            verdict(&message),
+            Verdict::Set {
+                pid: 74877,
+                time: NOW,
+                argv: vec![
+                    "nvim".into(),
+                    "-S".into(),
+                    "$(rm -rf ~); echo".into(),
+                    String::new()
+                ],
+                cwd: Some("/home/user/src/project".into()),
+            }
+        );
+        // Unpadded base64 is accepted too.
+        let unpadded = format!("pid=7:time={NOW}:argv={}", b64("vi").trim_end_matches('='));
+        assert!(matches!(verdict(&unpadded), Verdict::Set { .. }));
+    }
+
+    #[test]
+    fn every_strict_parse_failure_is_rejected_for_its_owner() {
+        let time = format!("time={NOW}");
+        let cases = [
+            format!("pid=7:{time}:argv={}:argv={}", b64("vi"), b64("vi")),
+            format!("pid=7:{time}:Argv={}", b64("vi")),
+            format!("pid=7:{time}:argv={}:x=a;b", b64("vi")),
+            format!("pid=7:{time}:argv={}:clear=1", b64("vi")),
+            format!("pid=7:{time}"),
+            format!("pid=7:{time}:clear=2"),
+            format!("pid=7:{time}:argv="),
+            format!("pid=7:{time}:argv={}", b64("./run.sh")),
+            format!("pid=7:{time}:argv={}", b64("bin/run")),
+            format!("pid=7:{time}:argv={}", b64("-x")),
+            format!("pid=7:{time}:argv=,{}", b64("x")),
+            format!("pid=7:{time}:argv={}", b64("vi\nrm")),
+            format!("pid=7:{time}:argv={}", b64("vi\u{85}")),
+            format!("pid=7:{time}:argv={}", b64("vi\u{7f}")),
+            format!("pid=7:{time}:argv=QQ="),
+            format!("pid=7:{time}:argv=/w=="),
+            format!("pid=7:{time}:argv=gA=="),
+            format!("pid=7:{time}:argv={}:cwd={}", b64("vi"), b64("project")),
+            format!("pid=7:{time}:argv={}:need=later", b64("vi")),
+            format!("pid=7:{time}:argv={}:novalue", b64("vi")),
+        ];
+        for message in cases {
+            assert!(
+                matches!(verdict(&message), Verdict::Rejected { pid: Some(7), .. }),
+                "{message}: {:?}",
+                verdict(&message)
+            );
+        }
+        assert!(matches!(
+            verdict(&format!("{time}:argv={}", b64("vi"))),
+            Verdict::Rejected { pid: None, .. }
+        ));
+    }
+
+    #[test]
+    fn a_report_with_the_most_arguments_that_fit_is_accepted() {
+        let argv = std::iter::repeat_n(b64("a"), 300)
+            .collect::<Vec<_>>()
+            .join(",");
+        let message = format!("pid=7:time={NOW}:argv={argv}");
+        assert!(message.len() + 5 + 64 + 8 <= 2048);
+        match verdict(&message) {
+            Verdict::Set { argv, .. } => assert_eq!(argv.len(), 300),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn tokens_are_random_and_in_the_allowed_alphabet() {
+        let first = new_token().unwrap();
+        let second = new_token().unwrap();
+        assert_ne!(first, second);
+        for token in [&first, &second] {
+            assert!((22..=64).contains(&token.len()), "{token}");
+            assert!(token
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')));
+        }
+    }
+
+    struct FakeLookup {
+        processes: RefCell<BTreeMap<u32, ProcessIdentity>>,
+        pane: Vec<u32>,
+        uid: u32,
+    }
+
+    impl FakeLookup {
+        fn new(pane: &[u32]) -> Self {
+            let processes = pane
+                .iter()
+                .map(|pid| {
+                    (
+                        *pid,
+                        ProcessIdentity {
+                            uid: 501,
+                            start: u64::from(*pid) * 10,
+                        },
+                    )
+                })
+                .collect();
+            Self {
+                processes: RefCell::new(processes),
+                pane: pane.to_vec(),
+                uid: 501,
+            }
+        }
+    }
+
+    impl OwnerLookup for FakeLookup {
+        fn identity(&self, pid: u32) -> Option<ProcessIdentity> {
+            self.processes.borrow().get(&pid).copied()
+        }
+        fn in_pane(&self, pid: u32) -> bool {
+            self.pane.contains(&pid)
+        }
+        fn server_uid(&self) -> Option<u32> {
+            Some(self.uid)
+        }
+    }
+
+    fn set_report(pid: u32, time: u64, program: &str) -> Vec<u8> {
+        signed(&format!("pid={pid}:time={time}:argv={}", b64(program)))
+    }
+
+    #[test]
+    fn ignored_reports_leave_the_record_and_rejected_ones_remove_their_owners() {
+        let lookup = FakeLookup::new(&[7, 8]);
+        let mut pane = PaneResume::new(Some(TOKEN.into()), None);
+        assert_eq!(
+            pane.receive(&set_report(7, NOW, "nvim"), NOW, &lookup),
+            Outcome::Recorded
+        );
+        let mut forged = set_report(7, NOW, "evil");
+        let at = forged.len() - 1;
+        forged[at] ^= 1;
+        assert!(matches!(
+            pane.receive(&forged, NOW, &lookup),
+            Outcome::Ignored(_)
+        ));
+        assert_eq!(pane.record().unwrap().argv, ["nvim"]);
+        // Another pid's rejected report does not touch this owner's record.
+        let other = signed(&format!("pid=8:time={NOW}:argv={}", b64("./x")));
+        assert!(matches!(
+            pane.receive(&other, NOW, &lookup),
+            Outcome::Rejected(_)
+        ));
+        assert_eq!(pane.record().unwrap().argv, ["nvim"]);
+        let bad = signed(&format!("pid=7:time={NOW}:argv={}", b64("./x")));
+        assert!(matches!(
+            pane.receive(&bad, NOW, &lookup),
+            Outcome::Rejected(_)
+        ));
+        assert!(pane.record().is_none());
+    }
+
+    #[test]
+    fn a_pane_without_a_token_takes_no_reports() {
+        let lookup = FakeLookup::new(&[7]);
+        let mut pane = PaneResume::new(None, None);
+        assert!(matches!(
+            pane.receive(&set_report(7, NOW, "nvim"), NOW, &lookup),
+            Outcome::Ignored(_)
+        ));
+        assert!(pane.record().is_none());
+    }
+
+    #[test]
+    fn owners_outside_the_pane_from_another_user_or_gone_are_rejected() {
+        let mut lookup = FakeLookup::new(&[7]);
+        lookup.processes.borrow_mut().insert(
+            9,
+            ProcessIdentity {
+                uid: 501,
+                start: 90,
+            },
+        );
+        let mut pane = PaneResume::new(Some(TOKEN.into()), None);
+        assert!(matches!(
+            pane.receive(&set_report(9, NOW, "nvim"), NOW, &lookup),
+            Outcome::Rejected("owner is not in this pane")
+        ));
+        assert!(matches!(
+            pane.receive(&set_report(10, NOW, "nvim"), NOW, &lookup),
+            Outcome::Rejected("owner is not running")
+        ));
+        lookup.uid = 0;
+        assert!(matches!(
+            pane.receive(&set_report(7, NOW, "nvim"), NOW, &lookup),
+            Outcome::Rejected("owner runs as another user")
+        ));
+        assert!(pane.record().is_none());
+    }
+
+    #[test]
+    fn a_clear_removes_only_its_owners_record_and_older_reports_are_ignored() {
+        let lookup = FakeLookup::new(&[7, 8]);
+        let mut pane = PaneResume::new(Some(TOKEN.into()), None);
+        pane.receive(&set_report(7, NOW, "nvim"), NOW, &lookup);
+        let clear8 = signed(&format!("pid=8:time={NOW}:clear=1"));
+        assert!(matches!(
+            pane.receive(&clear8, NOW, &lookup),
+            Outcome::Ignored(_)
+        ));
+        assert!(pane.record().is_some());
+        // A replay of an earlier report from the same pid cannot win.
+        assert!(matches!(
+            pane.receive(&set_report(7, NOW - 1, "vim"), NOW, &lookup),
+            Outcome::Ignored(_)
+        ));
+        assert_eq!(pane.record().unwrap().argv, ["nvim"]);
+        let clear7 = signed(&format!("pid=7:time={NOW}:clear=1"));
+        assert_eq!(pane.receive(&clear7, NOW, &lookup), Outcome::Cleared);
+        assert!(pane.record().is_none());
+    }
+
+    #[test]
+    fn the_record_outlives_its_owner_only_for_the_grace_period_and_pid_reuse_counts_as_gone() {
+        let lookup = FakeLookup::new(&[7]);
+        let mut pane = PaneResume::new(Some(TOKEN.into()), None);
+        pane.receive(&set_report(7, NOW, "nvim"), NOW, &lookup);
+        pane.refresh(NOW + 30, &lookup);
+        assert!(pane.record().is_some(), "a live owner keeps its record");
+        // Same pid, new process.
+        lookup
+            .processes
+            .borrow_mut()
+            .insert(7, ProcessIdentity { uid: 501, start: 1 });
+        pane.refresh(NOW + 31, &lookup);
+        assert!(pane.record().is_some(), "just gone: still within the grace");
+        pane.refresh(NOW + 31 + OWNER_EXIT_GRACE_SECS, &lookup);
+        assert!(pane.record().is_some());
+        pane.refresh(NOW + 32 + OWNER_EXIT_GRACE_SECS, &lookup);
+        assert!(pane.record().is_none());
+    }
+
+    #[test]
+    fn a_resume_is_retried_only_after_the_program_stayed_up() {
+        let lookup = FakeLookup::new(&[7, 20]);
+        let mut pane = PaneResume::new(Some(TOKEN.into()), None);
+        pane.receive(&set_report(7, NOW, "nvim"), NOW, &lookup);
+        let mut saved = pane.record().unwrap().clone();
+        saved.owner = None;
+        let mut restored = PaneResume::new(Some(TOKEN.into()), Some(saved));
+        restored.mark_attempted();
+        assert!(restored.resumed(20, NOW, &lookup));
+        assert!(restored.record().unwrap().attempted);
+        restored.refresh(NOW + RESUME_SETTLE_SECS - 1, &lookup);
+        assert!(restored.record().unwrap().attempted);
+        restored.refresh(NOW + RESUME_SETTLE_SECS, &lookup);
+        assert!(!restored.record().unwrap().attempted);
+        restored.resume_failed();
+        assert!(restored.record().is_none());
+    }
+
+    fn record(argv: &[&str], cwd: Option<&str>) -> ResumeRecord {
+        ResumeRecord {
+            argv: argv.iter().map(|arg| (*arg).to_string()).collect(),
+            cwd: cwd.map(PathBuf::from),
+            reported_at: NOW,
+            owner: None,
+            uid: 501,
+            attempted: false,
+            exited_at: None,
+            started_at: None,
+        }
+    }
+
+    #[test]
+    fn only_trusted_settled_same_user_records_with_a_directory_are_resumed() {
+        let policy = ResumePolicy::default();
+        let exists = |path: &Path| path == Path::new("/src");
+        let refuse = |record: &ResumeRecord, enabled, uid| {
+            restore_refusal(record, &policy, enabled, uid, exists)
+        };
+        assert_eq!(
+            refuse(&record(&["nvim"], Some("/src")), true, Some(501)),
+            None
+        );
+        assert_eq!(
+            refuse(
+                &record(&["/opt/bin/nvim", "-S", "x"], None),
+                true,
+                Some(501)
+            ),
+            None
+        );
+        assert!(refuse(&record(&["ssh", "host"], None), true, Some(501)).is_some());
+        assert!(refuse(&record(&["nvim"], Some("/gone")), true, Some(501)).is_some());
+        assert!(refuse(&record(&["nvim"], None), true, Some(502)).is_some());
+        assert!(refuse(&record(&["nvim"], None), false, Some(501)).is_some());
+        let mut attempted = record(&["nvim"], None);
+        attempted.attempted = true;
+        assert!(refuse(&attempted, true, Some(501)).is_some());
+        let all = ResumePolicy {
+            trusted: vec!["*".into()],
+            allow_elevated: false,
+        };
+        assert_eq!(
+            restore_refusal(
+                &record(&["ssh", "host"], None),
+                &all,
+                true,
+                Some(501),
+                exists
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn an_elevated_server_resumes_only_when_opted_in_and_unsupported_platforms_never() {
+        assert!(protocol_enabled(true, false, false));
+        assert!(!protocol_enabled(true, true, false));
+        assert!(protocol_enabled(true, true, true));
+        assert!(!protocol_enabled(false, false, true));
+        assert_eq!(
+            PLATFORM_SUPPORTED,
+            cfg!(any(target_os = "linux", target_os = "macos"))
+        );
+    }
+
+    #[test]
+    fn the_display_form_escapes_control_and_direction_characters() {
+        let shown = record(&["nvim", "a\u{202e}b", "x\ty"], None).display();
+        assert!(
+            !shown.contains('\u{202e}') && !shown.contains('\t'),
+            "{shown}"
+        );
+    }
+}

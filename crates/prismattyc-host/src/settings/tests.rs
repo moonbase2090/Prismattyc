@@ -141,7 +141,7 @@ impl Drop for Fixture {
 
 #[test]
 fn schema_matches_controls_reached_through_real_rows_and_editors() {
-    let mut fixture=Fixture::new("font_fallback = [\"bundled:ibm-plex-mono\"]\nfont_features=[\"calt\"]\n[[remote]]\nid=\"devbox\"\nssh=\"devbox\"");
+    let mut fixture=Fixture::new("font_fallback = [\"bundled:ibm-plex-mono\"]\nfont_features=[\"calt\"]\n[mux]\nresume_trusted=[\"nvim\"]\n[[remote]]\nid=\"devbox\"\nssh=\"devbox\"");
     let expected: BTreeSet<_> = crate::config_schema::leaves()
         .into_iter()
         .map(|(path, _)| path)

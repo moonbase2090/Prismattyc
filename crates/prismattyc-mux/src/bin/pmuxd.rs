@@ -167,6 +167,9 @@ fn main() -> Result<()> {
     if prismattyc_mux::plugins::print_bundled_identity()? {
         return Ok(());
     }
+    // This process is a terminal: it gives each pane its own program resume
+    // token and never passes on one it was given (OSC 7577).
+    prismattyc_mux::program_resume::forget_inherited_token();
     // Clean-env one-shot for supervisor.cell_exited (see prismattyc_mux::supervisor).
     let mut argv = std::env::args();
     let _argv0 = argv.next();

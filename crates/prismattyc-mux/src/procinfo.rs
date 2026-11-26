@@ -117,6 +117,44 @@ fn process_parent(pid: u32) -> Option<u32> {
     None
 }
 
+/// Who runs a process and when it started. Two lookups that return the same
+/// value name the same process; a reused pid has a different start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProcessIdentity {
+    pub uid: u32,
+    /// Start time in platform units (clock ticks since boot on Linux,
+    /// microseconds since the epoch on macOS). Only compared for equality.
+    pub start: u64,
+}
+
+/// The owner and start time of a live `pid`, on Linux and macOS.
+pub(crate) fn process_identity(pid: u32) -> Option<ProcessIdentity> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let uid = std::fs::metadata(format!("/proc/{pid}")).ok()?.uid();
+        let raw = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let close = raw.rfind(')')?;
+        // Field 22 (starttime); the state field after the comm is field 3.
+        let start = raw
+            .get(close + 1..)?
+            .split_whitespace()
+            .nth(19)?
+            .parse()
+            .ok()?;
+        return Some(ProcessIdentity { uid, start });
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return macos::identity(pid);
+    }
+    #[allow(unreachable_code)]
+    {
+        let _ = pid;
+        None
+    }
+}
+
 /// Working directory of `pid`, if the platform exposes it.
 #[must_use]
 pub fn cwd_of(pid: u32) -> Option<PathBuf> {
@@ -1989,6 +2027,25 @@ mod macos {
             return None;
         }
         Some((info.pbi_pgid, info.e_tpgid))
+    }
+
+    pub(super) fn identity(pid: u32) -> Option<super::ProcessIdentity> {
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        // SAFETY: `info` is a zeroed proc_bsdinfo of exactly `size` bytes.
+        let n = unsafe {
+            libc::proc_pidinfo(
+                pid as libc::pid_t,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                (&mut info as *mut libc::proc_bsdinfo).cast(),
+                size,
+            )
+        };
+        (n >= size).then(|| super::ProcessIdentity {
+            uid: info.pbi_uid,
+            start: info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec,
+        })
     }
 
     pub(super) fn parent_pid(pid: u32) -> Option<u32> {

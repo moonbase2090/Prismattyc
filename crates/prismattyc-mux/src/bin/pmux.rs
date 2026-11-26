@@ -344,6 +344,7 @@ enum Verb {
     Ls,
     Whoami,
     StatusSet,
+    ResumeRun,
     ActivityEmit,
     Activity,
     Plugin,
@@ -407,6 +408,7 @@ const VERBS: &[(&str, Verb)] = &[
     ("list", Verb::Ls),
     ("whoami", Verb::Whoami),
     ("status-set", Verb::StatusSet),
+    ("resume-run", Verb::ResumeRun),
     ("activity-emit", Verb::ActivityEmit),
     ("activity", Verb::Activity),
     ("plugin", Verb::Plugin),
@@ -629,6 +631,10 @@ fn main() -> Result<()> {
         Verb::StatusSet => {
             reject_session_flag(cli_session.as_deref(), "status-set")?;
             cmd_status_set(&paths, rest)
+        }
+        Verb::ResumeRun => {
+            reject_session_flag(cli_session.as_deref(), "resume-run")?;
+            cmd_resume_run(&paths, rest)
         }
         Verb::ActivityEmit => {
             reject_session_flag(cli_session.as_deref(), "activity-emit")?;
@@ -2850,6 +2856,67 @@ fn cmd_status_set(paths: &Paths, rest: Vec<String>) -> Result<()> {
         println!("set status on pane {pane_id}");
     }
     Ok(())
+}
+
+/// Start the program a restored pane resumes (OSC 7577). The pmux server
+/// types `pmux resume-run ID` into the pane's shell; this fetches the
+/// command over the server socket as data and replaces itself with it, so
+/// each argument reaches the program unchanged and the shell never parses
+/// it. The program runs as the shell's foreground job, after its startup
+/// files, with the shell's PATH.
+fn cmd_resume_run(paths: &Paths, rest: Vec<String>) -> Result<()> {
+    let [handoff] = rest.as_slice() else {
+        bail!("usage: pmux resume-run ID");
+    };
+    let mut client = Client::connect(&paths.socket)?;
+    let response = client.request(|request_id| ControlRequest::ResumeStart {
+        version: PROTOCOL_VERSION,
+        request_id,
+        handoff: handoff.clone(),
+        pid: std::process::id(),
+    })?;
+    let ControlResponseData::ResumeCommand { argv, cwd } = response else {
+        bail!("the pmux server did not return a command to resume");
+    };
+    let shown = argv
+        .iter()
+        .map(|arg| format!("{arg:?}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut fail = |message: String| -> anyhow::Error {
+        let _ = client.request(|request_id| ControlRequest::ResumeFailed {
+            version: PROTOCOL_VERSION,
+            request_id,
+            handoff: handoff.clone(),
+        });
+        anyhow::anyhow!(message)
+    };
+    let Some(program) = argv.first() else {
+        return Err(fail("the resume command is empty".into()));
+    };
+    if let Some(cwd) = &cwd {
+        if let Err(error) = std::env::set_current_dir(cwd) {
+            return Err(fail(format!(
+                "not resuming {shown}: cannot enter {}: {error}",
+                cwd.display()
+            )));
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        let mut command = std::process::Command::new(program);
+        command.arg0(program).args(&argv[1..]);
+        let error = prismattyc_process::exec(&mut command);
+        Err(fail(format!("could not resume {shown}: {error}")))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = program;
+        Err(fail(format!(
+            "not resuming {shown}: program resume is not supported on this system"
+        )))
+    }
 }
 
 const SEND_USAGE: &str = "usage: pmux send PANE TEXT [--enter] [--literal] [--force] [-- TEXT]";
@@ -9247,6 +9314,7 @@ mod tests {
                             last_input_at_ms: None,
                         },
                         size_owner: None,
+                        resume: None,
                     }],
                     sync_input: false,
                 }],
@@ -10969,6 +11037,7 @@ mod tests {
                 mail_inject: None,
                 ledger: empty_ledger(),
                 size_owner: None,
+                resume: None,
             }],
             sync_input: false,
         }

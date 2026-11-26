@@ -129,21 +129,11 @@ rich_render_tests=(
   "narrow_badge_keeps_authoritative_label_before_decoration"
   "status_layer_is_static_themed_and_narrow_text_first"
 )
-rich_mux_tests=(
-  "workspace_snapshot_reserves_rows_and_malformed_tree_drops_surface"
-  "styled_workspace_paints_above_guest_and_offsets_cursor"
-  "flag_off_json_omits_overlays"
-  "semantic_copy_rejects_stale_generation"
-  "status_snapshot_survives_mux_layout_without_animation_state"
-  "observer_styled_read_does_not_steal_controller_clipboard"
-)
-
 require_tests prismattyc-protocol "${rich_protocol_tests[@]}"
 require_tests prismattyc-host "${rich_host_tests[@]}"
 require_tests prismattyc "${rich_tty_tests[@]}"
 require_tests prismattyc-rich-client "${rich_client_tests[@]}"
 require_tests prismattyc-render "${rich_render_tests[@]}"
-require_tests prismattyc-mux "${rich_mux_tests[@]}"
 
 echo "phase3-rich: named protocol / host / TTY rich proofs"
 run_named prismattyc-protocol "${rich_protocol_tests[@]}"
@@ -151,7 +141,6 @@ run_named prismattyc-host "${rich_host_tests[@]}"
 run_named prismattyc "${rich_tty_tests[@]}"
 run_named prismattyc-rich-client "${rich_client_tests[@]}"
 run_named prismattyc-render "${rich_render_tests[@]}"
-run_named prismattyc-mux "${rich_mux_tests[@]}"
 
 run_classic() {
   local label="$1"

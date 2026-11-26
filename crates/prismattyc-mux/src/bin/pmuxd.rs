@@ -32,7 +32,9 @@ struct Cli {
     socket: PathBuf,
     cols: u32,
     rows: u32,
-    experimental_rich: bool,
+    /// `--experimental-rich` or `PRISMATTYC_EXPERIMENTAL_RICH` was given.
+    /// Rich mode is gone; both are still accepted for one release.
+    removed_rich_flag: bool,
     experimental_activity: bool,
     restore_workspace: bool,
     program: String,
@@ -44,7 +46,7 @@ impl Cli {
         let mut socket = None;
         let mut cols = 80;
         let mut rows = 24;
-        let mut experimental_rich = matches!(
+        let mut removed_rich_flag = matches!(
             std::env::var("PRISMATTYC_EXPERIMENTAL_RICH")
                 .unwrap_or_default()
                 .trim()
@@ -94,7 +96,7 @@ impl Cli {
                     rows = parse_dimension(args.next(), "--rows")?;
                 }
                 "--experimental-rich" if program.is_none() => {
-                    experimental_rich = true;
+                    removed_rich_flag = true;
                 }
                 "--experimental-activity" if program.is_none() => experimental_activity = true,
                 "--restore-workspace" if program.is_none() => restore_workspace = true,
@@ -110,7 +112,7 @@ impl Cli {
             socket,
             cols,
             rows,
-            experimental_rich,
+            removed_rich_flag,
             experimental_activity,
             restore_workspace,
             program: program.unwrap_or_else(prismattyc_mux::platform::default_shell),
@@ -135,7 +137,7 @@ pmuxd — long-lived local Prismattyc mux server
 
 USAGE:
     pmuxd --bundled-plugins
-    pmuxd [--socket PATH] [--cols N] [--rows N] [--experimental-rich] [--experimental-activity] [--restore-workspace] [PROGRAM [ARGS...]]
+    pmuxd [--socket PATH] [--cols N] [--rows N] [--experimental-activity] [--restore-workspace] [PROGRAM [ARGS...]]
     pmuxd --socket /absolute/path.sock -- /bin/bash -l
 
 The activity feed is on by default: bounded, process-local activity history
@@ -198,8 +200,8 @@ fn main() -> Result<()> {
             eprintln!("pmuxd: staying in the start folder: {error}");
         }
     }
-    if cli.experimental_rich {
-        std::env::set_var("PRISMATTYC_EXPERIMENTAL_RICH", "1");
+    if cli.removed_rich_flag {
+        eprintln!("pmuxd: rich mode was removed; --experimental-rich is ignored");
     }
     let instance = prismattyc_mux::daemon_lock::DaemonLock::acquire(&cli.socket)
         .context("acquire pmuxd instance lock")?;
@@ -379,4 +381,39 @@ fn bootstrap_plane(cli: &Cli, first_pane_dir: PathBuf) -> Result<ControlPlane> {
     )
     .map_err(anyhow::Error::new)?;
     Ok(plane)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+
+    fn parse(args: &[&str]) -> Cli {
+        Cli::parse(args.iter().map(|arg| (*arg).to_owned())).expect("parse pmuxd arguments")
+    }
+
+    #[test]
+    fn the_removed_rich_flag_is_still_accepted_and_not_taken_as_the_program() {
+        let cli = parse(&[
+            "--socket",
+            "/tmp/pmuxd-cli-test.sock",
+            "--experimental-rich",
+            "/bin/sh",
+            "-l",
+        ]);
+        assert!(cli.removed_rich_flag);
+        assert_eq!(cli.program, "/bin/sh");
+        assert_eq!(cli.argv, ["-l"]);
+    }
+
+    #[test]
+    fn the_rich_flag_after_the_program_belongs_to_the_program() {
+        let cli = parse(&[
+            "--socket",
+            "/tmp/pmuxd-cli-test.sock",
+            "/bin/sh",
+            "--experimental-rich",
+        ]);
+        assert_eq!(cli.program, "/bin/sh");
+        assert_eq!(cli.argv, ["--experimental-rich"]);
+    }
 }

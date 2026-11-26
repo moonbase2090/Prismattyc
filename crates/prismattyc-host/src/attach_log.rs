@@ -4186,19 +4186,10 @@ mod tests {
                 cursor_shape: None,
             },
             runs: Vec::new(),
-            workspace: Vec::new(),
-            workspace_styles: Vec::new(),
-            workspace_inverse: Vec::new(),
             view_offset: None,
             max_view_scroll: None,
             child_mouse_tracking: None,
             child_mouse_sgr: None,
-            overlays: Vec::new(),
-            experimental_rich: false,
-            rich_focus_id: None,
-            structured_focus: false,
-            semantic_clipboard: None,
-            semantic_clipboard_seq: None,
         }
     }
 

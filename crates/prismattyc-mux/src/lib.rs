@@ -42,7 +42,6 @@ pub mod prompt_idle;
 pub mod release_update;
 pub mod remote_catalog;
 mod remote_size;
-mod rich;
 pub mod session_name;
 pub mod space_autosave;
 pub mod space_team;
@@ -67,12 +66,11 @@ pub use control::{
     ControlServer, CursorShapeWire, Event, EventBatch, EventEnvelope, LayoutSnapshot,
     MailAttentionState, MailInjectDiagnostic, MailInjectOutcome, MailWake, MutationAck,
     OverlayKind, OverlayRun, PaneContent, PaneEvent, PaneGeometry, PaneInputLedger, PaneLogFrame,
-    PaneOverlay, PaneSnapshot, PaneStyled, PaneWriteSubmit, RichInputKind, RichPointerPhase,
-    RuntimeDirMiss, SessionSnapshot, Snapshot, SocketLiveness, SpawnSpec, StyleRun, WindowBounds,
-    WindowSnapshot, WorkspaceInverseRun, WorkspaceStyleRun, CONTROL_STALE_SKIP_MAX,
-    MAIL_ATTENTION_CELL, MAIL_INJECT_DIRTY_IDLE_MS, MAIL_INJECT_INPUT_IDLE_MS,
-    MAIL_INJECT_NUDGE_DELAY_MS, MAIL_INJECT_PAYLOAD, MAX_PANE_STATE_BYTES, PMUX_MAIL_NOTIFICATION,
-    PROTOCOL_VERSION,
+    PaneOverlay, PaneSnapshot, PaneStyled, PaneWriteSubmit, RuntimeDirMiss, SessionSnapshot,
+    Snapshot, SocketLiveness, SpawnSpec, StyleRun, WindowBounds, WindowSnapshot,
+    CONTROL_STALE_SKIP_MAX, MAIL_ATTENTION_CELL, MAIL_INJECT_DIRTY_IDLE_MS,
+    MAIL_INJECT_INPUT_IDLE_MS, MAIL_INJECT_NUDGE_DELAY_MS, MAIL_INJECT_PAYLOAD,
+    MAX_PANE_STATE_BYTES, PMUX_MAIL_NOTIFICATION, PROTOCOL_VERSION,
 };
 pub use image_paste::{
     clipboard_image_file_with, clipboard_image_to_png, clipboard_image_to_png_with,

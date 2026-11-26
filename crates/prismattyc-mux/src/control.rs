@@ -20,7 +20,6 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use prismattyc_emulator::EmulatorStateV1;
-use prismattyc_protocol::{InputModifiers, PointerPhase, ViewerId};
 use serde::{Deserialize, Serialize};
 
 use crate::live::{LiveRuntime, LiveWriteError};
@@ -780,36 +779,25 @@ pub enum ControlRequest {
         summary: String,
         body: String,
     },
-    /// Attach C-S-G toggle or Esc revoke for `input.rich_focus`.
-    /// Requires the pane controller lease. Flag-off is a no-op Ok.
+    /// Removed with rich mode. Still parsed for one release, ignoring the
+    /// old pane and focus fields, so an older attach gets a clear error
+    /// instead of an unknown-request failure.
     RichFocusToggle {
         version: u16,
         request_id: u64,
         client_id: u64,
-        pane_id: u64,
-        /// When true, revoke only (Esc). When false, toggle grant (C-S-G).
-        #[serde(default)]
-        revoke: bool,
     },
-    /// Connection-bound structured input intent. The server mints the viewer
-    /// identity and validates controller, pane, focus, scene, and action state
-    /// before it creates an application APC.
+    /// Removed with rich mode; see [`ControlRequest::RichFocusToggle`].
     RichInput {
         version: u16,
         request_id: u64,
         client_id: u64,
-        pane_id: u64,
-        input: RichInputKind,
     },
-    /// Copy the current semantic projection for this pane.
+    /// Removed with rich mode; see [`ControlRequest::RichFocusToggle`].
     CopySemantic {
         version: u16,
         request_id: u64,
         client_id: u64,
-        pane_id: u64,
-        /// Targeted ack for a peeked `semantic_clipboard_seq`.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        seq: Option<u64>,
     },
     /// Mint a durable client identity for lease and write authorization.
     RegisterClient {
@@ -1428,36 +1416,6 @@ impl ControlRequest {
     }
 }
 
-/// A local viewer's input intent. Viewer identity and application bindings are
-/// deliberately absent from this same-user wire shape; the mux owns both.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum RichInputKind {
-    Key {
-        key: String,
-        #[serde(default)]
-        modifiers: u8,
-    },
-    Pointer {
-        phase: RichPointerPhase,
-        row: u16,
-        col: u16,
-    },
-    Scroll {
-        row: u16,
-        col: u16,
-        delta: i16,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RichPointerPhase {
-    Press,
-    Move,
-    Release,
-}
-
 /// Response envelope; protocol errors remain machine-readable.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ControlResponse {
@@ -1520,6 +1478,10 @@ pub struct MailPeer {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+// Plug-in replies are the largest variant. Each response is built once per
+// request and sent, so boxing it would only add an allocation. The styled pane
+// variant was larger still until it lost its rich fields.
+#[allow(clippy::large_enum_variant)]
 pub enum ControlResponseData {
     Plugin {
         reply: crate::plugins::Reply,
@@ -1684,30 +1646,6 @@ pub enum ControlResponseData {
     /// unknown identity, bad alias, or an invalid recipient charset.
     MailRefused {
         reason: String,
-    },
-    /// Attach C-S-G / Esc rich-focus result. `granted` is false when
-    /// the flag is off or no region was eligible.
-    RichFocus {
-        pane_id: u64,
-        granted: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        region_id: Option<u32>,
-        /// True for workspace input, false for the legacy
-        /// attachment focus path.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        structured: bool,
-    },
-    /// A structured intent was accepted. `delivered` is false for a motion or
-    /// canceled release that intentionally creates no application event.
-    RichInput {
-        pane_id: u64,
-        delivered: bool,
-    },
-    SemanticCopy {
-        pane_id: u64,
-        text: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        seq: Option<u64>,
     },
 }
 
@@ -2054,7 +1992,7 @@ impl StyleRun {
     }
 }
 
-/// Rich overlay kind on the attach snapshot.
+/// How an attach overlay is anchored: to grid cells, or to the viewport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OverlayKind {
@@ -2062,7 +2000,7 @@ pub enum OverlayKind {
     Viewport,
 }
 
-/// One styled run inside a rich overlay. Palette indexes match the wire.
+/// One styled run inside an attach overlay. Palette indexes match the wire.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OverlayRun {
     pub text: String,
@@ -2080,7 +2018,7 @@ pub struct OverlayRun {
     pub inverse: bool,
 }
 
-/// One granted rich overlay projected for attach paint.
+/// One overlay attach paints over the pane, such as its toasts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneOverlay {
     pub id: u32,
@@ -2101,10 +2039,6 @@ pub struct PaneStyled {
     #[serde(flatten)]
     pub content: PaneContent,
     pub runs: Vec<Vec<StyleRun>>,
-    /// Reserved workspace lines above the guest PTY. Empty/omitted preserves
-    /// the pre-0.3 JSON contract and gives the guest the full pane.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub workspace: Vec<String>,
     /// Effective rows back from the live tail after clamp.
     /// Absent on pre-servers — clients must hide scroll mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2118,49 +2052,6 @@ pub struct PaneStyled {
     /// Child prefers SGR mouse encoding (DECSET 1006).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child_mouse_sgr: Option<bool>,
-    /// Experimental-rich overlays. Empty and omitted when the flag is off
-    /// or nothing is granted — flag-off JSON stays byte-identical.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub overlays: Vec<PaneOverlay>,
-    /// True when the pane PTY was spawned with `--experimental-rich`.
-    /// Omitted when false so flag-off JSON stays byte-identical.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub experimental_rich: bool,
-    /// Host-granted `input.rich_focus` region, if any.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rich_focus_id: Option<u32>,
-    /// The viewer-local focus is a workspace action rather than the
-    /// legacy attachment focus path.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub structured_focus: bool,
-    /// Peek of the next unacked copy for this client. Ack with CopySemantic.seq.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub semantic_clipboard: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub semantic_clipboard_seq: Option<u64>,
-    /// Inverse runs in dock cell coordinates (selected diagnostic only).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub workspace_inverse: Vec<WorkspaceInverseRun>,
-    /// Semantic status runs in dock coordinates. ANSI entries are theme
-    /// tokens resolved by the outer terminal; RGB never comes from the app.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub workspace_styles: Vec<WorkspaceStyleRun>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkspaceInverseRun {
-    pub row: u32,
-    pub col: u32,
-    pub cols: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkspaceStyleRun {
-    pub row: u32,
-    pub col: u32,
-    pub cols: u32,
-    #[serde(default, skip_serializing_if = "ColorWire::is_default")]
-    pub fg: ColorWire,
 }
 
 /// Collapse adjacent same-style cells into runs. Wide continuations add no text.
@@ -2405,8 +2296,6 @@ pub struct ControlPlane {
     domain: Domain,
     active_clients: HashSet<ClientId>,
     client_spaces: HashMap<ClientId, String>,
-    /// Host-minted identities, never accepted from the control client.
-    viewer_ids: HashMap<ClientId, ViewerId>,
     /// Client-local selected session (PRD §2.8.3). Topology is not mutated.
     client_views: HashMap<ClientId, SessionId>,
     /// Client-local selected window (tab). Topology is not mutated.
@@ -2555,7 +2444,6 @@ impl ControlPlane {
             domain,
             active_clients: HashSet::new(),
             client_spaces: HashMap::new(),
-            viewer_ids: HashMap::new(),
             client_views: HashMap::new(),
             client_window_views: HashMap::new(),
             bounds,
@@ -4527,17 +4415,8 @@ impl ControlPlane {
                 "ReadPaneState is served on the client thread, never under the plane lock",
             )),
             ControlRequest::RegisterClient { .. } => {
-                let mut viewer_bytes = [0u8; 16];
-                getrandom::fill(&mut viewer_bytes).map_err(|error| {
-                    ControlError::new(
-                        ControlErrorCode::Internal,
-                        format!("mint rich viewer identity: {error}"),
-                    )
-                })?;
                 let client = self.domain.mint_client().map_err(control_domain_error)?;
                 self.active_clients.insert(client);
-                self.viewer_ids
-                    .insert(client, ViewerId::from_bytes(viewer_bytes));
                 if let Some(session) = self.domain.sessions().next() {
                     self.client_views.insert(client, session.id);
                 }
@@ -4582,11 +4461,6 @@ impl ControlPlane {
                 let client = self.require_active_client(client_raw)?;
                 let pane = pane_id(pane_raw)?;
                 let previous = self.domain.controller(pane).map_err(control_domain_error)?;
-                if let Some(viewer_id) = self.viewer_ids.get(&client).copied() {
-                    if let Some(live) = self.live.as_mut() {
-                        let _ = live.revoke_viewer_on(pane_raw, viewer_id);
-                    }
-                }
                 self.domain
                     .release_controller(pane, client)
                     .map_err(control_domain_error)?;
@@ -4620,13 +4494,6 @@ impl ControlPlane {
                 if let Some(live) = self.live.as_mut() {
                     live.note_controller(pane_raw, Some(client_raw));
                 }
-                if let Some(previous_client) = previous {
-                    if let Some(viewer_id) = self.viewer_ids.get(&previous_client).copied() {
-                        if let Some(live) = self.live.as_mut() {
-                            let _ = live.revoke_viewer_on(pane_raw, viewer_id);
-                        }
-                    }
-                }
                 let _ = self.emit(Event::LeaseChanged {
                     pane_id: pane_raw,
                     controller_id: Some(client_raw),
@@ -4644,12 +4511,8 @@ impl ControlPlane {
             } => {
                 self.ensure_sequence_capacity()?;
                 let client = self.require_active_client(client_raw)?;
-                let viewer_id = self.viewer_ids.get(&client).copied();
                 let released = self.domain.release_all_controller_leases(client);
                 for pane in &released {
-                    if let (Some(viewer_id), Some(live)) = (viewer_id, self.live.as_mut()) {
-                        let _ = live.revoke_viewer_on(pane.get(), viewer_id);
-                    }
                     let _ = self.emit(Event::LeaseChanged {
                         pane_id: pane.get(),
                         controller_id: None,
@@ -4663,7 +4526,6 @@ impl ControlPlane {
                     .unwrap_or_default();
                 self.active_clients.remove(&client);
                 self.client_spaces.remove(&client);
-                self.viewer_ids.remove(&client);
                 self.client_views.remove(&client);
                 self.client_window_views.remove(&client);
                 self.client_pane_focus.remove(&client);
@@ -4740,10 +4602,6 @@ impl ControlPlane {
                         "controller authority verified, but this plane has no live PTY runtime",
                     )
                 })?;
-                let copy_requests = data
-                    .bytes()
-                    .filter(|&byte| byte == b'y' || byte == b'Y')
-                    .count();
                 let bytes = data.into_bytes();
                 match live.write(pane_raw, bytes.clone()) {
                     Ok(()) => {
@@ -4752,9 +4610,6 @@ impl ControlPlane {
                             // Backpressure/Disconnected/UnknownPane; the
                             // focused pane already accepted the write.
                             let _ = live.write(sibling, bytes.clone());
-                        }
-                        for _ in 0..copy_requests {
-                            live.queue_copy_request(pane_raw, client_raw);
                         }
                         let now = now_unix_ms();
                         self.write_ledger.insert(pane_raw, (now, ended_cr));
@@ -4809,27 +4664,15 @@ impl ControlPlane {
                 view_offset,
                 ..
             } => {
-                let client = self.require_active_client(client_raw)?;
+                let _ = self.require_active_client(client_raw)?;
                 let pane = pane_id(pane_raw)?;
                 if self.domain.pane(pane).is_none() {
                     return Err(stale_id("pane", pane_raw));
                 }
-                let viewer_id = self.viewer_ids.get(&client).copied();
                 let content = self
                     .live
-                    .as_mut()
-                    .and_then(|live| {
-                        viewer_id.and_then(|viewer_id| {
-                            let mut content = live.styled(pane_raw, view_offset, viewer_id)?;
-                            if let Some((seq, text)) =
-                                live.peek_pending_semantic_copy(pane_raw, client_raw)
-                            {
-                                content.semantic_clipboard = Some(text);
-                                content.semantic_clipboard_seq = Some(seq);
-                            }
-                            Some(content)
-                        })
-                    })
+                    .as_ref()
+                    .and_then(|live| live.styled(pane_raw, view_offset))
                     .ok_or_else(|| {
                         ControlError::new(
                             ControlErrorCode::InputRouteUnavailable,
@@ -5145,13 +4988,6 @@ impl ControlPlane {
                     return Err(stale_id("pane", pane_raw));
                 }
                 let previous = self.client_pane_focus.insert(client, pane_raw);
-                if let Some(previous_pane) = previous.filter(|prior| *prior != pane_raw) {
-                    if let Some(viewer_id) = self.viewer_ids.get(&client).copied() {
-                        if let Some(live) = self.live.as_mut() {
-                            let _ = live.revoke_viewer_on(previous_pane, viewer_id);
-                        }
-                    }
-                }
                 if previous != Some(pane_raw) {
                     self.ensure_sequence_capacity()?;
                     let _ = self.emit(Event::FocusReported {
@@ -5221,24 +5057,9 @@ impl ControlPlane {
                 remaining_attempts,
                 ..
             } => self.apply_mail_inject(client_id, pane_id, queue_rev, remaining_attempts),
-            ControlRequest::RichFocusToggle {
-                client_id: client_raw,
-                pane_id: pane_raw,
-                revoke,
-                ..
-            } => self.rich_focus_toggle(client_raw, pane_raw, revoke),
-            ControlRequest::RichInput {
-                client_id: client_raw,
-                pane_id: pane_raw,
-                input,
-                ..
-            } => self.rich_input(client_raw, pane_raw, input),
-            ControlRequest::CopySemantic {
-                client_id: client_raw,
-                pane_id: pane_raw,
-                seq,
-                ..
-            } => self.copy_semantic(client_raw, pane_raw, seq),
+            ControlRequest::RichFocusToggle { .. }
+            | ControlRequest::RichInput { .. }
+            | ControlRequest::CopySemantic { .. } => Err(rich_mode_removed()),
             ControlRequest::SessionNames { .. } => {
                 let mut names = self
                     .mail_store
@@ -5472,166 +5293,6 @@ impl ControlPlane {
                 body,
                 ..
             } => self.mail_broadcast(client_raw, summary, body),
-        }
-    }
-
-    fn rich_focus_toggle(
-        &mut self,
-        client_raw: u64,
-        pane_raw: u64,
-        revoke: bool,
-    ) -> Result<ControlResponseData, ControlError> {
-        let client = self.require_active_client(client_raw)?;
-        let pane = pane_id(pane_raw)?;
-        self.domain
-            .require_controller(pane, client)
-            .map_err(control_domain_error)?;
-        let viewer_id = self.viewer_ids.get(&client).copied().ok_or_else(|| {
-            ControlError::new(
-                ControlErrorCode::StaleId,
-                "registered client has no viewer identity",
-            )
-        })?;
-        let live = self.live.as_mut().ok_or_else(|| {
-            ControlError::new(
-                ControlErrorCode::InputRouteUnavailable,
-                "controller authority verified, but this plane has no live PTY runtime",
-            )
-        })?;
-        match live.rich_focus(pane_raw, viewer_id, revoke) {
-            Ok((granted, region_id, structured)) => Ok(ControlResponseData::RichFocus {
-                pane_id: pane_raw,
-                granted,
-                region_id,
-                structured,
-            }),
-            Err(LiveWriteError::Backpressure) => Err(ControlError::new(
-                ControlErrorCode::Backpressure,
-                "pane input queue is full; retry later",
-            )),
-            Err(LiveWriteError::UnknownPane | LiveWriteError::Disconnected) => {
-                Err(ControlError::new(
-                    ControlErrorCode::InputRouteUnavailable,
-                    "live PTY input route is unavailable",
-                ))
-            }
-        }
-    }
-
-    fn copy_semantic(
-        &mut self,
-        client_raw: u64,
-        pane_raw: u64,
-        seq: Option<u64>,
-    ) -> Result<ControlResponseData, ControlError> {
-        let client = self.require_active_client(client_raw)?;
-        let pane = pane_id(pane_raw)?;
-        self.domain
-            .require_controller(pane, client)
-            .map_err(control_domain_error)?;
-        let live = self.live.as_mut().ok_or_else(|| {
-            ControlError::new(
-                ControlErrorCode::InputRouteUnavailable,
-                "this plane has no live PTY runtime",
-            )
-        })?;
-        let (text, acked) = live.copy_semantic_for(pane_raw, client_raw, seq);
-        Ok(ControlResponseData::SemanticCopy {
-            pane_id: pane_raw,
-            text,
-            seq: acked,
-        })
-    }
-
-    fn rich_input(
-        &mut self,
-        client_raw: u64,
-        pane_raw: u64,
-        input: RichInputKind,
-    ) -> Result<ControlResponseData, ControlError> {
-        let client = self.require_active_client(client_raw)?;
-        let pane = pane_id(pane_raw)?;
-        self.domain
-            .require_controller(pane, client)
-            .map_err(control_domain_error)?;
-        let viewer_id = self.viewer_ids.get(&client).copied().ok_or_else(|| {
-            ControlError::new(
-                ControlErrorCode::StaleId,
-                "registered client has no viewer identity",
-            )
-        })?;
-        let live = self.live.as_mut().ok_or_else(|| {
-            ControlError::new(
-                ControlErrorCode::InputRouteUnavailable,
-                "controller authority verified, but this plane has no live PTY runtime",
-            )
-        })?;
-        let copy_key = matches!(
-            &input,
-            RichInputKind::Key { key, modifiers }
-                if *modifiers == 0 && (key == "y" || key == "Y")
-        );
-        let routed = match input {
-            RichInputKind::Key { key, modifiers } => {
-                if key.is_empty() || key.len() > prismattyc_protocol::MAX_FOCUS_KEY_BYTES {
-                    return Err(ControlError::new(
-                        ControlErrorCode::InvalidRequest,
-                        "structured key token must be 1..=32 bytes",
-                    ));
-                }
-                let modifiers = InputModifiers::new(modifiers).ok_or_else(|| {
-                    ControlError::new(
-                        ControlErrorCode::InvalidRequest,
-                        "structured key modifiers contain unknown bits",
-                    )
-                })?;
-                live.rich_key(pane_raw, viewer_id, key, modifiers)
-            }
-            RichInputKind::Pointer { phase, row, col } => live.rich_pointer(
-                pane_raw,
-                viewer_id,
-                match phase {
-                    RichPointerPhase::Press => PointerPhase::Press,
-                    RichPointerPhase::Move => PointerPhase::Move,
-                    RichPointerPhase::Release => PointerPhase::Release,
-                },
-                row,
-                col,
-            ),
-            RichInputKind::Scroll { row, col, delta } => {
-                if delta == 0 {
-                    return Err(ControlError::new(
-                        ControlErrorCode::InvalidRequest,
-                        "structured scroll delta must be non-zero",
-                    ));
-                }
-                live.rich_scroll(pane_raw, viewer_id, row, col, delta)
-            }
-        };
-        match routed {
-            Ok(Some(delivered)) => {
-                if delivered && copy_key {
-                    live.queue_copy_request(pane_raw, client_raw);
-                }
-                Ok(ControlResponseData::RichInput {
-                    pane_id: pane_raw,
-                    delivered,
-                })
-            }
-            Ok(None) => Err(ControlError::new(
-                ControlErrorCode::InputRouteUnavailable,
-                "viewer has no structured focus route for this pane",
-            )),
-            Err(LiveWriteError::Backpressure) => Err(ControlError::new(
-                ControlErrorCode::Backpressure,
-                "pane input queue is full; retry later",
-            )),
-            Err(LiveWriteError::UnknownPane | LiveWriteError::Disconnected) => {
-                Err(ControlError::new(
-                    ControlErrorCode::InputRouteUnavailable,
-                    "live PTY input route is unavailable",
-                ))
-            }
         }
     }
 
@@ -5929,13 +5590,7 @@ impl ControlPlane {
                 .ok_or_else(|| stale_id("session pane", session_raw))?;
             (sess.name.clone(), window, pane)
         };
-        if let Some(previous_pane) = self.client_pane_focus.remove(&client) {
-            if let Some(viewer_id) = self.viewer_ids.get(&client).copied() {
-                if let Some(live) = self.live.as_mut() {
-                    let _ = live.revoke_viewer_on(previous_pane, viewer_id);
-                }
-            }
-        }
+        self.client_pane_focus.remove(&client);
         self.client_views.insert(client, session);
         self.emit(Event::SessionSwitched {
             client_id: client_raw,
@@ -6189,9 +5844,6 @@ impl ControlPlane {
             let _ = self.domain.release_controller(pane, client);
             if let Some(live) = self.live.as_mut() {
                 live.note_controller(pane.get(), None);
-                if let Some(viewer) = self.viewer_ids.get(&client) {
-                    let _ = live.revoke_viewer_on(pane.get(), *viewer);
-                }
             }
         }
     }
@@ -6443,13 +6095,7 @@ impl ControlPlane {
                 .ok_or_else(|| stale_id("window session", window_raw))?;
             (session_raw, title, pane)
         };
-        if let Some(previous_pane) = self.client_pane_focus.remove(&client) {
-            if let Some(viewer_id) = self.viewer_ids.get(&client).copied() {
-                if let Some(live) = self.live.as_mut() {
-                    let _ = live.revoke_viewer_on(previous_pane, viewer_id);
-                }
-            }
-        }
+        self.client_pane_focus.remove(&client);
         self.client_window_views.insert(client, window);
         self.emit(Event::WindowSwitched {
             client_id: client_raw,
@@ -6897,7 +6543,7 @@ impl ControlPlane {
         done: bool,
         gone_is_terminal: bool,
     ) -> Result<(std::sync::Arc<PaneLogWatch>, u64, ControlResponseData), ControlError> {
-        let client = self.require_active_client(client_raw)?;
+        let _ = self.require_active_client(client_raw)?;
         let pane = pane_id(pane_raw)?;
         let live = self.live.as_ref().ok_or_else(|| {
             ControlError::new(
@@ -6937,9 +6583,7 @@ impl ControlPlane {
                 ));
             }
             CatchUp::Gap { oldest: _, current } => {
-                let viewer_id = self.viewer_ids.get(&client).copied();
-                let snapshot =
-                    viewer_id.and_then(|viewer_id| live.styled(pane_raw, None, viewer_id));
+                let snapshot = live.styled(pane_raw, None);
                 (true, snapshot, Vec::new(), current)
             }
             CatchUp::Events(frames) => {
@@ -7218,6 +6862,15 @@ fn client_id(raw: u64) -> Result<ClientId, ControlError> {
     } else {
         Ok(ClientId::from_raw(raw))
     }
+}
+
+/// Answer to a request that only rich mode served. Old attach clients may
+/// still send one for a release.
+fn rich_mode_removed() -> ControlError {
+    ControlError::new(
+        ControlErrorCode::InvalidRequest,
+        "rich mode was removed from pmuxd; this request is no longer supported",
+    )
 }
 
 fn stale_id(kind: &str, raw: u64) -> ControlError {
@@ -15115,706 +14768,6 @@ function Read-Exact([int]$Count) {
         assert_eq!(styled.content.lines.len(), text.lines.len());
     }
 
-    #[test]
-    fn rich_focus_toggle_flag_off_is_noop_ok() {
-        let (mut plane, _, pane) = live_fixture("READY");
-        let client = registered_client(plane.handle(ControlRequest::RegisterClient {
-            version: PROTOCOL_VERSION,
-            request_id: 1,
-        }));
-        assert!(matches!(
-            plane
-                .handle(ControlRequest::AcquireLease {
-                    version: PROTOCOL_VERSION,
-                    request_id: 2,
-                    client_id: client,
-                    pane_id: pane,
-                })
-                .body,
-            ControlResponseBody::Ok { .. }
-        ));
-        match plane
-            .handle(ControlRequest::RichFocusToggle {
-                version: PROTOCOL_VERSION,
-                request_id: 3,
-                client_id: client,
-                pane_id: pane,
-                revoke: false,
-            })
-            .body
-        {
-            ControlResponseBody::Ok {
-                response:
-                    ControlResponseData::RichFocus {
-                        granted: false,
-                        region_id: None,
-                        ..
-                    },
-            } => {}
-            other => panic!("flag-off toggle must be no-op Ok, got {other:?}"),
-        }
-        let styled = styled_content(plane.handle(ControlRequest::ReadPaneStyled {
-            version: PROTOCOL_VERSION,
-            request_id: 4,
-            client_id: client,
-            pane_id: pane,
-            view_offset: None,
-        }));
-        assert!(!styled.experimental_rich);
-        assert!(styled.rich_focus_id.is_none());
-        let json = serde_json::to_string(&styled).unwrap();
-        assert!(
-            !json.contains("experimental_rich"),
-            "flag-off JSON must omit experimental_rich: {json}"
-        );
-    }
-
-    #[test]
-    fn rich_input_wire_is_intent_only_and_round_trips() {
-        let request = ControlRequest::RichInput {
-            version: PROTOCOL_VERSION,
-            request_id: 9,
-            client_id: 3,
-            pane_id: 7,
-            input: RichInputKind::Pointer {
-                phase: RichPointerPhase::Release,
-                row: 2,
-                col: 4,
-            },
-        };
-        let json = serde_json::to_string(&request).unwrap();
-        assert!(json.contains("\"type\":\"rich_input\""));
-        assert!(json.contains("\"kind\":\"pointer\""));
-        assert!(json.contains("\"phase\":\"release\""));
-        assert!(!json.contains("viewer"));
-        assert!(!json.contains("action"));
-        assert_eq!(
-            serde_json::from_str::<ControlRequest>(&json).unwrap(),
-            request
-        );
-    }
-
-    #[test]
-    fn rich_input_rejects_observer_stale_client_and_wrong_pane_before_delivery() {
-        let (mut plane, _, pane) = fixture(8);
-        let holder = registered_client(plane.handle(ControlRequest::RegisterClient {
-            version: PROTOCOL_VERSION,
-            request_id: 1,
-        }));
-        let observer = registered_client(plane.handle(ControlRequest::RegisterClient {
-            version: PROTOCOL_VERSION,
-            request_id: 2,
-        }));
-        let _ = plane.handle(ControlRequest::AcquireLease {
-            version: PROTOCOL_VERSION,
-            request_id: 3,
-            client_id: holder,
-            pane_id: pane,
-        });
-
-        let key = |request_id, client_id, pane_id| ControlRequest::RichInput {
-            version: PROTOCOL_VERSION,
-            request_id,
-            client_id,
-            pane_id,
-            input: RichInputKind::Key {
-                key: "Enter".into(),
-                modifiers: 0,
-            },
-        };
-        assert_eq!(
-            error_code(&plane.handle(key(4, observer, pane))),
-            ControlErrorCode::NotController
-        );
-        assert_eq!(
-            error_code(&plane.handle(key(5, u64::MAX, pane))),
-            ControlErrorCode::StaleId
-        );
-        assert_eq!(
-            error_code(&plane.handle(key(6, holder, u64::MAX))),
-            ControlErrorCode::StaleId
-        );
-        assert_eq!(
-            error_code(&plane.handle(key(7, holder, pane))),
-            ControlErrorCode::InputRouteUnavailable
-        );
-    }
-
-    #[test]
-    fn rich_input_focus_is_viewer_local_and_controller_loss_revokes() {
-        use prismattyc_protocol::{
-            encode_capability_query, encode_workspace_snapshot, CapabilityQuery, ProtocolVersion,
-            RequestId, TreeNode, TreeNodeKind, WorkspaceRows, WorkspaceSnapshot,
-        };
-
-        let (mut plane, _, pane) = live_fixture("READY");
-        let query = encode_capability_query(CapabilityQuery {
-            request_id: RequestId::new(1).unwrap(),
-            max_version: ProtocolVersion::new(0, 3),
-        })
-        .unwrap();
-        let workspace = encode_workspace_snapshot(&WorkspaceSnapshot {
-            surface_generation: 1,
-            scene_rev: 1,
-            rows: WorkspaceRows {
-                min: 5,
-                preferred: 8,
-                max: 12,
-            },
-            nodes: vec![TreeNode {
-                id: 1,
-                parent: 0,
-                kind: TreeNodeKind::Text,
-                min: 5,
-                preferred: 8,
-                fill: 1,
-                show_min_cols: 0,
-                show_max_cols: 0,
-                action_id: 7,
-                text: "Runbook".into(),
-            }],
-        })
-        .unwrap();
-        let live = plane.live.as_mut().unwrap();
-        live.feed_rich_for_test(pane, &query).unwrap();
-        live.feed_rich_for_test(pane, &workspace).unwrap();
-
-        let holder = registered_client(plane.handle(ControlRequest::RegisterClient {
-            version: PROTOCOL_VERSION,
-            request_id: 1,
-        }));
-        let observer = registered_client(plane.handle(ControlRequest::RegisterClient {
-            version: PROTOCOL_VERSION,
-            request_id: 2,
-        }));
-        let _ = plane.handle(ControlRequest::AcquireLease {
-            version: PROTOCOL_VERSION,
-            request_id: 3,
-            client_id: holder,
-            pane_id: pane,
-        });
-        match plane
-            .handle(ControlRequest::RichFocusToggle {
-                version: PROTOCOL_VERSION,
-                request_id: 4,
-                client_id: holder,
-                pane_id: pane,
-                revoke: false,
-            })
-            .body
-        {
-            ControlResponseBody::Ok {
-                response:
-                    ControlResponseData::RichFocus {
-                        granted: true,
-                        region_id: Some(1),
-                        structured: true,
-                        ..
-                    },
-            } => {}
-            other => panic!("expected structured focus grant, got {other:?}"),
-        }
-
-        let holder_view = styled_content(plane.handle(ControlRequest::ReadPaneStyled {
-            version: PROTOCOL_VERSION,
-            request_id: 5,
-            client_id: holder,
-            pane_id: pane,
-            view_offset: None,
-        }));
-        let observer_view = styled_content(plane.handle(ControlRequest::ReadPaneStyled {
-            version: PROTOCOL_VERSION,
-            request_id: 6,
-            client_id: observer,
-            pane_id: pane,
-            view_offset: None,
-        }));
-        assert!(holder_view.structured_focus);
-        assert_eq!(holder_view.rich_focus_id, Some(1));
-        assert!(!observer_view.structured_focus);
-        assert!(observer_view.rich_focus_id.is_none());
-
-        assert!(matches!(
-            plane
-                .handle(ControlRequest::RichInput {
-                    version: PROTOCOL_VERSION,
-                    request_id: 7,
-                    client_id: holder,
-                    pane_id: pane,
-                    input: RichInputKind::Key {
-                        key: "Enter".into(),
-                        modifiers: 0,
-                    },
-                })
-                .body,
-            ControlResponseBody::Ok {
-                response: ControlResponseData::RichInput {
-                    delivered: true,
-                    ..
-                }
-            }
-        ));
-        let _ = plane.handle(ControlRequest::ReleaseLease {
-            version: PROTOCOL_VERSION,
-            request_id: 8,
-            client_id: holder,
-            pane_id: pane,
-        });
-        let revoked = styled_content(plane.handle(ControlRequest::ReadPaneStyled {
-            version: PROTOCOL_VERSION,
-            request_id: 9,
-            client_id: holder,
-            pane_id: pane,
-            view_offset: None,
-        }));
-        assert!(!revoked.structured_focus);
-        assert!(revoked.rich_focus_id.is_none());
-    }
-
-    fn diag_copy_bytes() -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
-        use prismattyc_protocol::{
-            encode_capability_query, encode_semantic_copy, encode_semantic_snapshot,
-            encode_workspace_snapshot, CapabilityQuery, ProtocolVersion, RequestId, SemanticCopy,
-            SemanticDocument, SemanticRange, SemanticRole, SemanticSpan, TreeNode, TreeNodeKind,
-            WorkspaceRows, WorkspaceSnapshot,
-        };
-
-        let query = encode_capability_query(CapabilityQuery {
-            request_id: RequestId::new(1).unwrap(),
-            max_version: ProtocolVersion::new(0, 3),
-        })
-        .unwrap();
-        let workspace = encode_workspace_snapshot(&WorkspaceSnapshot {
-            surface_generation: 1,
-            scene_rev: 1,
-            rows: WorkspaceRows {
-                min: 5,
-                preferred: 8,
-                max: 12,
-            },
-            nodes: vec![TreeNode {
-                id: 1,
-                parent: 0,
-                kind: TreeNodeKind::Text,
-                min: 5,
-                preferred: 8,
-                fill: 1,
-                show_min_cols: 0,
-                show_max_cols: 0,
-                action_id: 7,
-                text: "Runbook".into(),
-            }],
-        })
-        .unwrap();
-        let snapshot = encode_semantic_snapshot(&SemanticDocument {
-            surface_generation: 1,
-            document_id: "diag".into(),
-            rev: 2,
-            text: "error crates/foo.rs:10:1".into(),
-            spans: vec![SemanticSpan {
-                start: 6,
-                end: 24,
-                role: SemanticRole::Location,
-            }],
-            selection: Some(SemanticRange {
-                rev: 2,
-                start: 6,
-                end: 24,
-            }),
-        })
-        .unwrap();
-        let copy = encode_semantic_copy(&SemanticCopy {
-            surface_generation: 1,
-            document_id: "diag".into(),
-            rev: 2,
-            start: 6,
-            end: 24,
-        })
-        .unwrap();
-        (query, workspace, snapshot, copy)
-    }
-
-    fn feed_diag_surface(plane: &mut ControlPlane, pane: u64) -> Vec<u8> {
-        let (query, workspace, snapshot, copy) = diag_copy_bytes();
-        let live = plane.live.as_mut().unwrap();
-        live.feed_rich_for_test(pane, &query).unwrap();
-        live.feed_rich_for_test(pane, &workspace).unwrap();
-        live.feed_rich_for_test(pane, &snapshot).unwrap();
-        copy
-    }
-
-    fn write_pane(plane: &mut ControlPlane, request_id: u64, client: u64, pane: u64, data: &str) {
-        let _ = plane.handle(ControlRequest::WritePane {
-            version: PROTOCOL_VERSION,
-            request_id,
-            client_id: client,
-            pane_id: pane,
-            data: data.into(),
-        });
-    }
-
-    fn styled_for(plane: &mut ControlPlane, request_id: u64, client: u64, pane: u64) -> PaneStyled {
-        styled_content(plane.handle(ControlRequest::ReadPaneStyled {
-            version: PROTOCOL_VERSION,
-            request_id,
-            client_id: client,
-            pane_id: pane,
-            view_offset: None,
-        }))
-    }
-
-    fn ack_copy(
-        plane: &mut ControlPlane,
-        request_id: u64,
-        client: u64,
-        pane: u64,
-        seq: Option<u64>,
-    ) -> (Option<String>, Option<u64>) {
-        match plane.handle(ControlRequest::CopySemantic {
-            version: PROTOCOL_VERSION,
-            request_id,
-            client_id: client,
-            pane_id: pane,
-            seq,
-        }) {
-            ControlResponse {
-                body:
-                    ControlResponseBody::Ok {
-                        response: ControlResponseData::SemanticCopy { text, seq, .. },
-                    },
-                ..
-            } => (text, seq),
-            other => panic!("expected SemanticCopy, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn observer_styled_read_does_not_steal_controller_clipboard() {
-        let (mut plane, _, pane) = live_fixture("READY");
-        let copy = feed_diag_surface(&mut plane, pane);
-        let holder = registered_client(plane.handle(ControlRequest::RegisterClient {
-            version: PROTOCOL_VERSION,
-            request_id: 1,
-        }));
-        let observer = registered_client(plane.handle(ControlRequest::RegisterClient {
-            version: PROTOCOL_VERSION,
-            request_id: 2,
-        }));
-        let successor = registered_client(plane.handle(ControlRequest::RegisterClient {
-            version: PROTOCOL_VERSION,
-            request_id: 3,
-        }));
-        let _ = plane.handle(ControlRequest::AcquireLease {
-            version: PROTOCOL_VERSION,
-            request_id: 4,
-            client_id: holder,
-            pane_id: pane,
-        });
-        write_pane(&mut plane, 5, holder, pane, "y");
-        let _ = plane.handle(ControlRequest::ReleaseLease {
-            version: PROTOCOL_VERSION,
-            request_id: 6,
-            client_id: holder,
-            pane_id: pane,
-        });
-        let _ = plane.handle(ControlRequest::AcquireLease {
-            version: PROTOCOL_VERSION,
-            request_id: 7,
-            client_id: successor,
-            pane_id: pane,
-        });
-        write_pane(&mut plane, 8, successor, pane, "x");
-        plane
-            .live
-            .as_mut()
-            .unwrap()
-            .feed_rich_for_test(pane, &copy)
-            .unwrap();
-        let successor_view = styled_for(&mut plane, 9, successor, pane);
-        assert!(
-            successor_view.semantic_clipboard.is_none(),
-            "successor WritePane must not steal the initiating y request"
-        );
-        let _ = plane.handle(ControlRequest::ReleaseLease {
-            version: PROTOCOL_VERSION,
-            request_id: 10,
-            client_id: successor,
-            pane_id: pane,
-        });
-        let _ = plane.handle(ControlRequest::AcquireLease {
-            version: PROTOCOL_VERSION,
-            request_id: 11,
-            client_id: holder,
-            pane_id: pane,
-        });
-        let first = styled_for(&mut plane, 12, holder, pane);
-        write_pane(&mut plane, 13, holder, pane, "x");
-        let retry = styled_for(&mut plane, 14, holder, pane);
-        assert_eq!(
-            first.semantic_clipboard.as_deref(),
-            Some("crates/foo.rs:10:1")
-        );
-        assert_eq!(first.semantic_clipboard_seq, Some(1));
-        assert_eq!(
-            retry.semantic_clipboard.as_deref(),
-            Some("crates/foo.rs:10:1")
-        );
-        assert_eq!(retry.semantic_clipboard_seq, first.semantic_clipboard_seq);
-        write_pane(&mut plane, 15, holder, pane, "y");
-        plane
-            .live
-            .as_mut()
-            .unwrap()
-            .feed_rich_for_test(pane, &copy)
-            .unwrap();
-        let (text, acked) = ack_copy(&mut plane, 16, holder, pane, first.semantic_clipboard_seq);
-        assert_eq!(text.as_deref(), Some("crates/foo.rs:10:1"));
-        assert_eq!(acked, first.semantic_clipboard_seq);
-        let second = styled_for(&mut plane, 17, holder, pane);
-        assert_eq!(
-            second.semantic_clipboard.as_deref(),
-            Some("crates/foo.rs:10:1")
-        );
-        assert_eq!(second.semantic_clipboard_seq, Some(2));
-        let observer_view = styled_for(&mut plane, 18, observer, pane);
-        assert!(observer_view.semantic_clipboard.is_none());
-    }
-
-    #[test]
-    fn semantic_copy_reconnect_cannot_replay_old_client() {
-        let (mut plane, _, pane) = live_fixture("READY");
-        let copy = feed_diag_surface(&mut plane, pane);
-        let holder = registered_client(plane.handle(ControlRequest::RegisterClient {
-            version: PROTOCOL_VERSION,
-            request_id: 1,
-        }));
-        let _ = plane.handle(ControlRequest::AcquireLease {
-            version: PROTOCOL_VERSION,
-            request_id: 2,
-            client_id: holder,
-            pane_id: pane,
-        });
-        write_pane(&mut plane, 3, holder, pane, "y");
-        plane
-            .live
-            .as_mut()
-            .unwrap()
-            .feed_rich_for_test(pane, &copy)
-            .unwrap();
-        let _ = plane.handle(ControlRequest::ReleaseLease {
-            version: PROTOCOL_VERSION,
-            request_id: 4,
-            client_id: holder,
-            pane_id: pane,
-        });
-        let reconnect = registered_client(plane.handle(ControlRequest::RegisterClient {
-            version: PROTOCOL_VERSION,
-            request_id: 5,
-        }));
-        let _ = plane.handle(ControlRequest::AcquireLease {
-            version: PROTOCOL_VERSION,
-            request_id: 6,
-            client_id: reconnect,
-            pane_id: pane,
-        });
-        let reconnect_view = styled_for(&mut plane, 7, reconnect, pane);
-        assert!(
-            reconnect_view.semantic_clipboard.is_none(),
-            "a new client_id cannot replay another client's pending copy"
-        );
-        let holder_view = styled_for(&mut plane, 8, holder, pane);
-        assert_eq!(
-            holder_view.semantic_clipboard.as_deref(),
-            Some("crates/foo.rs:10:1")
-        );
-    }
-
-    #[test]
-    fn semantic_copy_queue_drops_oldest_on_overflow() {
-        let (mut plane, _, pane) = live_fixture("READY");
-        let copy = feed_diag_surface(&mut plane, pane);
-        let holder = registered_client(plane.handle(ControlRequest::RegisterClient {
-            version: PROTOCOL_VERSION,
-            request_id: 1,
-        }));
-        let _ = plane.handle(ControlRequest::AcquireLease {
-            version: PROTOCOL_VERSION,
-            request_id: 2,
-            client_id: holder,
-            pane_id: pane,
-        });
-        for i in 0..=crate::rich::MAX_PENDING_COPIES {
-            write_pane(&mut plane, 10 + i as u64, holder, pane, "y");
-            plane
-                .live
-                .as_mut()
-                .unwrap()
-                .feed_rich_for_test(pane, &copy)
-                .unwrap();
-        }
-        let view = styled_for(&mut plane, 99, holder, pane);
-        assert_eq!(
-            view.semantic_clipboard.as_deref(),
-            Some("crates/foo.rs:10:1")
-        );
-        assert_eq!(view.semantic_clipboard_seq, Some(2));
-    }
-
-    #[test]
-    fn batched_y_writes_keep_each_copy_request() {
-        let (mut plane, _, pane) = live_fixture("READY");
-        let copy = feed_diag_surface(&mut plane, pane);
-        let holder = registered_client(plane.handle(ControlRequest::RegisterClient {
-            version: PROTOCOL_VERSION,
-            request_id: 1,
-        }));
-        let _ = plane.handle(ControlRequest::AcquireLease {
-            version: PROTOCOL_VERSION,
-            request_id: 2,
-            client_id: holder,
-            pane_id: pane,
-        });
-        write_pane(&mut plane, 3, holder, pane, "yy");
-        plane
-            .live
-            .as_mut()
-            .unwrap()
-            .feed_rich_for_test(pane, &copy)
-            .unwrap();
-        plane
-            .live
-            .as_mut()
-            .unwrap()
-            .feed_rich_for_test(pane, &copy)
-            .unwrap();
-        let first = styled_for(&mut plane, 4, holder, pane);
-        assert_eq!(first.semantic_clipboard_seq, Some(1));
-        assert_eq!(
-            first.semantic_clipboard.as_deref(),
-            Some("crates/foo.rs:10:1")
-        );
-        let (text, acked) = ack_copy(&mut plane, 5, holder, pane, first.semantic_clipboard_seq);
-        assert_eq!(text.as_deref(), Some("crates/foo.rs:10:1"));
-        assert_eq!(acked, Some(1));
-        let second = styled_for(&mut plane, 6, holder, pane);
-        assert_eq!(second.semantic_clipboard_seq, Some(2));
-        write_pane(&mut plane, 7, holder, pane, "xy");
-        plane
-            .live
-            .as_mut()
-            .unwrap()
-            .feed_rich_for_test(pane, &copy)
-            .unwrap();
-        plane
-            .live
-            .as_mut()
-            .unwrap()
-            .feed_rich_for_test(pane, &copy)
-            .unwrap();
-        let mixed = styled_for(&mut plane, 8, holder, pane);
-        assert_eq!(mixed.semantic_clipboard_seq, Some(2));
-        let _ = ack_copy(&mut plane, 9, holder, pane, mixed.semantic_clipboard_seq);
-        let leftover = styled_for(&mut plane, 10, holder, pane);
-        assert_eq!(leftover.semantic_clipboard_seq, Some(3));
-        let _ = ack_copy(
-            &mut plane,
-            11,
-            holder,
-            pane,
-            leftover.semantic_clipboard_seq,
-        );
-        let empty = styled_for(&mut plane, 12, holder, pane);
-        assert!(empty.semantic_clipboard_seq.is_none());
-    }
-
-    #[test]
-    fn failed_write_does_not_queue_copy_request() {
-        let (mut plane, _, pane) = live_fixture("READY");
-        let copy = feed_diag_surface(&mut plane, pane);
-        let holder = registered_client(plane.handle(ControlRequest::RegisterClient {
-            version: PROTOCOL_VERSION,
-            request_id: 1,
-        }));
-        let _ = plane.handle(ControlRequest::AcquireLease {
-            version: PROTOCOL_VERSION,
-            request_id: 2,
-            client_id: holder,
-            pane_id: pane,
-        });
-        plane
-            .live
-            .as_mut()
-            .unwrap()
-            .force_write_backpressure_for_test(pane);
-        match plane.handle(ControlRequest::WritePane {
-            version: PROTOCOL_VERSION,
-            request_id: 3,
-            client_id: holder,
-            pane_id: pane,
-            data: "y".into(),
-        }) {
-            ControlResponse {
-                body: ControlResponseBody::Error { error },
-                ..
-            } => assert_eq!(error.code, ControlErrorCode::Backpressure),
-            other => panic!("expected backpressure, got {other:?}"),
-        }
-        plane
-            .live
-            .as_mut()
-            .unwrap()
-            .feed_rich_for_test(pane, &copy)
-            .unwrap();
-        let view = styled_for(&mut plane, 4, holder, pane);
-        assert!(
-            view.semantic_clipboard.is_none(),
-            "a rejected write must not leave a ghost copy owner"
-        );
-    }
-
-    #[test]
-    fn rejected_rich_input_does_not_queue_copy_request() {
-        let (mut plane, _, pane) = live_fixture("READY");
-        let copy = feed_diag_surface(&mut plane, pane);
-        let holder = registered_client(plane.handle(ControlRequest::RegisterClient {
-            version: PROTOCOL_VERSION,
-            request_id: 1,
-        }));
-        let _ = plane.handle(ControlRequest::AcquireLease {
-            version: PROTOCOL_VERSION,
-            request_id: 2,
-            client_id: holder,
-            pane_id: pane,
-        });
-        match plane.handle(ControlRequest::RichInput {
-            version: PROTOCOL_VERSION,
-            request_id: 3,
-            client_id: holder,
-            pane_id: pane,
-            input: RichInputKind::Key {
-                key: "y".into(),
-                modifiers: 0,
-            },
-        }) {
-            ControlResponse {
-                body: ControlResponseBody::Error { error },
-                ..
-            } => assert_eq!(error.code, ControlErrorCode::InputRouteUnavailable),
-            other => panic!("expected rejected rich input, got {other:?}"),
-        }
-        plane
-            .live
-            .as_mut()
-            .unwrap()
-            .feed_rich_for_test(pane, &copy)
-            .unwrap();
-        let view = styled_for(&mut plane, 4, holder, pane);
-        assert!(
-            view.semantic_clipboard.is_none(),
-            "rejected RichInput must not leave a ghost copy owner"
-        );
-    }
-
     fn numbered_scroll_spawn() -> SpawnSpec {
         #[cfg(unix)]
         {
@@ -15835,6 +14788,74 @@ function Read-Exact([int]$Count) {
             } => content,
             other => panic!("expected pane styled, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn requests_from_an_older_rich_attach_get_a_clear_removed_error() {
+        let (mut plane, _, pane) = fixture(16);
+        let client = registered_client(plane.handle(ControlRequest::RegisterClient {
+            version: PROTOCOL_VERSION,
+            request_id: 1,
+        }));
+        // The exact shapes an older attach sends, with the pane and focus
+        // fields this daemon no longer reads.
+        let old = [
+            format!(
+                r#"{{"type":"rich_focus_toggle","version":{PROTOCOL_VERSION},"request_id":2,"client_id":{client},"pane_id":{pane},"revoke":true}}"#
+            ),
+            format!(
+                r#"{{"type":"rich_input","version":{PROTOCOL_VERSION},"request_id":3,"client_id":{client},"pane_id":{pane},"input":{{"kind":"key","key":"Enter","modifiers":0}}}}"#
+            ),
+            format!(
+                r#"{{"type":"copy_semantic","version":{PROTOCOL_VERSION},"request_id":4,"client_id":{client},"pane_id":{pane},"seq":7}}"#
+            ),
+        ];
+        for json in old {
+            let request: ControlRequest = serde_json::from_str(&json)
+                .unwrap_or_else(|error| panic!("old request must still parse: {error}: {json}"));
+            match plane.handle(request).body {
+                ControlResponseBody::Error { error } => {
+                    assert_eq!(error.code, ControlErrorCode::InvalidRequest, "{json}");
+                    assert!(
+                        error.message.contains("rich mode was removed"),
+                        "{json}: {}",
+                        error.message
+                    );
+                }
+                other => panic!("{json}: expected the removed error, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn styled_pane_json_stays_readable_across_the_rich_removal() {
+        // An older daemon still sends the rich fields. This attach ignores
+        // them, so it can read that daemon's panes.
+        let old_daemon = r#"{"pane_id":3,"revision":9,"cols":4,"rows":1,"cursor_row":0,"cursor_col":2,"cursor_visible":true,"alt_active":false,"child_alive":true,"lines":["ok"],"runs":[[{"text":"ok"}]],"workspace":["dock"],"view_offset":0,"max_view_scroll":5,"overlays":[{"id":1,"kind":"cell_rect","row":0,"col":0,"rows":1,"cols":4,"text":"STAT"}],"experimental_rich":true,"rich_focus_id":1,"structured_focus":true,"semantic_clipboard":"copied","semantic_clipboard_seq":2,"workspace_inverse":[{"row":0,"col":0,"cols":4}],"workspace_styles":[{"row":0,"col":0,"cols":4}]}"#;
+        let styled: PaneStyled = serde_json::from_str(old_daemon).expect("old daemon JSON");
+        assert_eq!(styled.content.pane_id, 3);
+        assert_eq!(styled.content.lines, ["ok"]);
+        assert_eq!(styled.runs, [vec![StyleRun::plain("ok")]]);
+        assert_eq!(styled.max_view_scroll, Some(5));
+
+        // An older attach reads this daemon's JSON. Every removed field was
+        // `#[serde(default)]` there, so leaving them out is safe; none may
+        // reappear under a name that old attach would misread.
+        let encoded = serde_json::to_string(&styled).unwrap();
+        for removed in [
+            "workspace",
+            "overlays",
+            "experimental_rich",
+            "rich_focus_id",
+            "structured_focus",
+            "semantic_clipboard",
+        ] {
+            assert!(!encoded.contains(removed), "{removed} in {encoded}");
+        }
+        assert_eq!(
+            serde_json::from_str::<PaneStyled>(&encoded).unwrap(),
+            styled
+        );
     }
 
     #[test]

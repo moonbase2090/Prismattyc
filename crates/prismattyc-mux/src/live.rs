@@ -15,11 +15,9 @@ use prismattyc_emulator::{
     pty_size_with_cell_pixels, Emulator, EmulatorStateV1, PtySession, StateError,
     NOMINAL_CELL_H_PX, NOMINAL_CELL_W_PX,
 };
-use prismattyc_protocol::{InputModifiers, PointerPhase, ViewerId};
 
 use crate::control::{
-    rle_style_runs, ColorWire, CursorShapeWire, PaneContent, PaneGeometry, PaneStyled, SpawnSpec,
-    WorkspaceStyleRun,
+    rle_style_runs, CursorShapeWire, PaneContent, PaneGeometry, PaneStyled, SpawnSpec,
 };
 use crate::pane_log::{
     ByteBudget, ByteReservation, CatchUp, PaneEvent, PaneLog, PaneLogWatch, DEFAULT_PANE_LOG_BYTES,
@@ -29,7 +27,6 @@ use crate::pane_log_persist::{
     replay_event, reset_output_event, restore_emulator, CaptureMarks, PendingPane, PersistPane,
     ScreenCodec,
 };
-use crate::rich::{self, RichSession};
 
 const FROM_PTY_CAP: usize = 64;
 const TO_CHILD_CAP: usize = 32;
@@ -169,7 +166,6 @@ struct LivePane {
     #[cfg(all(test, windows))]
     reader_publish_delay_ms: Arc<AtomicU64>,
     to_child_tx: mpsc::SyncSender<Vec<u8>>,
-    rich: Option<RichSession>,
     cols: usize,
     outer_rows: usize,
     rows: usize,
@@ -366,12 +362,7 @@ impl LivePane {
 
         // server panes retain alt-screen history so attach scroll
         // mode can page through TUI output. Classic hosts never opt in.
-        let experimental_rich = rich::env_flag_enabled("PRISMATTYC_EXPERIMENTAL_RICH");
-        let mut emulator = if experimental_rich {
-            Emulator::new_experimental(cols, rows, MAX_SCROLLBACK)
-        } else {
-            Emulator::new(cols, rows, MAX_SCROLLBACK)
-        };
+        let mut emulator = Emulator::new(cols, rows, MAX_SCROLLBACK);
         emulator.set_retain_alt_history(true);
         emulator.set_cell_pixels(cell_w, cell_h);
         Ok(Self {
@@ -383,7 +374,6 @@ impl LivePane {
             #[cfg(all(test, windows))]
             reader_publish_delay_ms,
             to_child_tx,
-            rich: experimental_rich.then(RichSession::default),
             cols,
             outer_rows: rows,
             rows,
@@ -472,8 +462,7 @@ impl LivePane {
         self.outer_rows = rows;
         self.cell_w = cell_w;
         self.cell_h = cell_h;
-        self.reconcile_workspace_geometry()?;
-        Ok(())
+        self.resize_guest(self.cols, self.outer_rows.max(1))
     }
 
     fn resize_guest(&mut self, cols: usize, rows: usize) -> Result<()> {
@@ -500,74 +489,6 @@ impl LivePane {
         Ok(())
     }
 
-    fn reconcile_workspace_geometry(&mut self) -> Result<()> {
-        let workspace_rows = match self.rich.as_ref().map(|rich| {
-            rich.workspace_layout(
-                u16::try_from(self.outer_rows).unwrap_or(u16::MAX),
-                u16::try_from(self.cols).unwrap_or(u16::MAX),
-            )
-        }) {
-            Some(Ok(layout)) => layout.map_or(0, |layout| usize::from(layout.rows)),
-            Some(Err(_)) => {
-                if let Some(rich) = self.rich.as_mut() {
-                    rich.drop_workspace();
-                }
-                0
-            }
-            None => 0,
-        };
-        self.resize_guest(
-            self.cols,
-            self.outer_rows.saturating_sub(workspace_rows).max(1),
-        )
-    }
-
-    fn workspace_projection(
-        &self,
-    ) -> (
-        Vec<String>,
-        Vec<crate::control::WorkspaceInverseRun>,
-        Vec<WorkspaceStyleRun>,
-    ) {
-        let Some(layout) = self.workspace_layout_snapshot() else {
-            return (Vec::new(), Vec::new(), Vec::new());
-        };
-        let inverse = layout
-            .selected_runs
-            .iter()
-            .map(|run| crate::control::WorkspaceInverseRun {
-                row: u32::from(run.row),
-                col: u32::from(run.col),
-                cols: u32::from(run.cols),
-            })
-            .collect();
-        let styles = layout
-            .status_runs
-            .iter()
-            .map(|run| WorkspaceStyleRun {
-                row: u32::from(run.row),
-                col: u32::from(run.col),
-                cols: u32::from(run.cols),
-                fg: run
-                    .tone
-                    .ansi_index()
-                    .map_or(ColorWire::Default, |n| ColorWire::Ansi { n }),
-            })
-            .collect();
-        (layout.lines, inverse, styles)
-    }
-
-    fn workspace_layout_snapshot(&self) -> Option<prismattyc_render::WorkspaceLayout> {
-        self.rich.as_ref().and_then(|rich| {
-            rich.workspace_layout(
-                u16::try_from(self.outer_rows).unwrap_or(u16::MAX),
-                u16::try_from(self.cols).unwrap_or(u16::MAX),
-            )
-            .ok()
-            .flatten()
-        })
-    }
-
     #[cfg(test)]
     fn apply_pty_bytes(&mut self, bytes: &[u8]) -> Option<String> {
         self.apply_pty_chunk(PtyChunk {
@@ -582,19 +503,9 @@ impl LivePane {
             bytes,
             _reservation: reservation,
         } = chunk;
-        if let Some(rich) = self.rich.as_mut() {
-            rich::process_rich_chunk(&mut self.emulator, rich, &self.to_child_tx, &bytes);
-            if self.reconcile_workspace_geometry().is_err() {
-                if let Some(rich) = self.rich.as_mut() {
-                    rich.drop_workspace();
-                }
-                let _ = self.resize_guest(self.cols, self.outer_rows.max(1));
-            }
-        } else {
-            let _ = self.emulator.feed(&bytes);
-            for reply in self.emulator.take_pending_replies() {
-                let _ = self.to_child_tx.try_send(reply);
-            }
+        let _ = self.emulator.feed(&bytes);
+        for reply in self.emulator.take_pending_replies() {
+            let _ = self.to_child_tx.try_send(reply);
         }
         self.revision = self.revision.saturating_add(1);
         let title = self.emulator.take_pending_title();
@@ -745,12 +656,7 @@ impl LivePane {
         }
     }
 
-    fn styled(
-        &self,
-        pane_id: u64,
-        view_offset: Option<u32>,
-        viewer_id: Option<ViewerId>,
-    ) -> PaneStyled {
+    fn styled(&self, pane_id: u64, view_offset: Option<u32>) -> PaneStyled {
         let screen = self.emulator.screen();
         // history depth is mode-agnostic so alt-screen TUI output
         // stays scrollable through attach; classic max_view_scroll would
@@ -759,45 +665,16 @@ impl LivePane {
         let offset = view_offset.unwrap_or(0).min(max);
         let child_mouse_tracking = Some(self.emulator.mouse_tracking().is_on());
         let child_mouse_sgr = Some(self.emulator.mouse_sgr());
-        let structured_focus_id = viewer_id.and_then(|viewer_id| {
-            self.rich
-                .as_ref()
-                .and_then(|rich| rich.structured_focus_node(viewer_id))
-        });
-        let structured_focus = structured_focus_id.is_some();
-        let rich_focus_id = structured_focus_id.or_else(|| {
-            viewer_id.and_then(|viewer_id| {
-                self.rich
-                    .as_ref()
-                    .and_then(|rich| rich.focus_id_for(viewer_id))
-            })
-        });
-        // Styled reads are polled by attach while idle. Project the workspace
-        // once, then derive text, selection, and status runs from that result.
-        let (workspace, workspace_inverse, workspace_styles) = self.workspace_projection();
         if offset == 0 {
             return PaneStyled {
                 content: self.content(pane_id),
                 runs: (0..screen.rows())
                     .map(|row| screen.view_row(row).map(rle_style_runs).unwrap_or_default())
                     .collect(),
-                workspace,
                 view_offset: Some(0),
                 max_view_scroll: Some(max),
                 child_mouse_tracking,
                 child_mouse_sgr,
-                overlays: self
-                    .rich
-                    .as_ref()
-                    .map(|rich| rich::snapshot_overlays(&self.emulator, rich, 0))
-                    .unwrap_or_default(),
-                experimental_rich: self.rich.is_some(),
-                rich_focus_id,
-                structured_focus,
-                semantic_clipboard: None,
-                semantic_clipboard_seq: None,
-                workspace_inverse,
-                workspace_styles,
             };
         }
 
@@ -832,23 +709,10 @@ impl LivePane {
                 cursor_shape: Some(CursorShapeWire::from_emulator(self.emulator.cursor_shape())),
             },
             runs,
-            workspace,
             view_offset: Some(offset),
             max_view_scroll: Some(max),
             child_mouse_tracking,
             child_mouse_sgr,
-            overlays: self
-                .rich
-                .as_ref()
-                .map(|rich| rich::snapshot_overlays(&self.emulator, rich, offset))
-                .unwrap_or_default(),
-            experimental_rich: self.rich.is_some(),
-            rich_focus_id,
-            structured_focus,
-            semantic_clipboard: None,
-            semantic_clipboard_seq: None,
-            workspace_inverse,
-            workspace_styles,
         }
     }
 }
@@ -1054,213 +918,10 @@ impl LiveRuntime {
         }
     }
 
-    pub(crate) fn queue_copy_request(&mut self, pane_id: u64, initiator: u64) {
-        if let Some(rich) = self
-            .panes
-            .get_mut(&pane_id)
-            .and_then(|pane| pane.rich.as_mut())
-        {
-            rich.queue_copy_request(initiator);
-        }
-    }
-
-    /// Grant or revoke `input.rich_focus`. Flag-off is `(false, None)`.
-    pub(crate) fn rich_focus(
-        &mut self,
-        pane_id: u64,
-        viewer_id: ViewerId,
-        revoke: bool,
-    ) -> Result<(bool, Option<u32>, bool), LiveWriteError> {
-        let runtime = self
-            .panes
-            .get_mut(&pane_id)
-            .ok_or(LiveWriteError::UnknownPane)?;
-        let Some(rich) = runtime.rich.as_mut() else {
-            return Ok((false, None, false));
-        };
-        let (bytes, structured) = if revoke {
-            if rich.structured_focus_node(viewer_id).is_some() {
-                (rich.revoke_structured_focus(viewer_id), true)
-            } else {
-                (rich.revoke_focus(viewer_id), false)
-            }
-        } else {
-            let structured_bytes = rich.toggle_structured_focus(viewer_id);
-            if structured_bytes.is_some() {
-                (structured_bytes, true)
-            } else if rich.has_any_structured_focus() {
-                (None, true)
-            } else {
-                (rich.toggle_focus(viewer_id), false)
-            }
-        };
-        if let Some(bytes) = bytes {
-            match runtime.to_child_tx.try_send(bytes) {
-                Ok(()) => {}
-                Err(mpsc::TrySendError::Full(_)) => return Err(LiveWriteError::Backpressure),
-                Err(mpsc::TrySendError::Disconnected(_)) => {
-                    return Err(LiveWriteError::Disconnected)
-                }
-            }
-        }
-        let region_id = if structured {
-            rich.structured_focus_node(viewer_id)
-        } else {
-            rich.focus_id_for(viewer_id)
-        };
-        Ok((region_id.is_some(), region_id, structured))
-    }
-
-    pub(crate) fn rich_key(
-        &mut self,
-        pane_id: u64,
-        viewer_id: ViewerId,
-        key: String,
-        modifiers: InputModifiers,
-    ) -> Result<Option<bool>, LiveWriteError> {
-        let runtime = self
-            .panes
-            .get_mut(&pane_id)
-            .ok_or(LiveWriteError::UnknownPane)?;
-        let Some(rich) = runtime.rich.as_mut() else {
-            return Ok(None);
-        };
-        if rich.structured_focus_node(viewer_id).is_none() {
-            return Ok(None);
-        }
-        let Some(bytes) = rich.encode_structured_key(viewer_id, key, modifiers) else {
-            return Ok(None);
-        };
-        queue_rich_bytes(runtime, bytes)?;
-        Ok(Some(true))
-    }
-
-    pub(crate) fn rich_pointer(
-        &mut self,
-        pane_id: u64,
-        viewer_id: ViewerId,
-        phase: PointerPhase,
-        row: u16,
-        col: u16,
-    ) -> Result<Option<bool>, LiveWriteError> {
-        let runtime = self
-            .panes
-            .get_mut(&pane_id)
-            .ok_or(LiveWriteError::UnknownPane)?;
-        let Some(rich) = runtime.rich.as_mut() else {
-            return Ok(None);
-        };
-        if rich.structured_focus_node(viewer_id).is_none() {
-            return Ok(None);
-        }
-        let bytes = rich.handle_structured_pointer(
-            viewer_id,
-            u16::try_from(runtime.outer_rows).unwrap_or(u16::MAX),
-            u16::try_from(runtime.cols).unwrap_or(u16::MAX),
-            phase,
-            row,
-            col,
-        );
-        let delivered = bytes.is_some();
-        if let Some(bytes) = bytes {
-            queue_rich_bytes(runtime, bytes)?;
-        }
-        Ok(Some(delivered))
-    }
-
-    pub(crate) fn rich_scroll(
-        &mut self,
-        pane_id: u64,
-        viewer_id: ViewerId,
-        row: u16,
-        col: u16,
-        delta: i16,
-    ) -> Result<Option<bool>, LiveWriteError> {
-        let runtime = self
-            .panes
-            .get_mut(&pane_id)
-            .ok_or(LiveWriteError::UnknownPane)?;
-        let Some(rich) = runtime.rich.as_mut() else {
-            return Ok(None);
-        };
-        if rich.structured_focus_node(viewer_id).is_none() {
-            return Ok(None);
-        }
-        let bytes = rich.encode_structured_scroll(
-            viewer_id,
-            u16::try_from(runtime.outer_rows).unwrap_or(u16::MAX),
-            u16::try_from(runtime.cols).unwrap_or(u16::MAX),
-            row,
-            col,
-            delta,
-        );
-        let delivered = bytes.is_some();
-        if let Some(bytes) = bytes {
-            queue_rich_bytes(runtime, bytes)?;
-        }
-        Ok(Some(delivered))
-    }
-
-    pub(crate) fn peek_pending_semantic_copy(
-        &self,
-        pane_id: u64,
-        client_id: u64,
-    ) -> Option<(u64, String)> {
-        self.panes
-            .get(&pane_id)?
-            .rich
-            .as_ref()?
-            .peek_copy_for(client_id)
-    }
-
     pub(crate) fn note_controller(&mut self, pane_id: u64, controller: Option<u64>) {
         if let Some(pane) = self.panes.get_mut(&pane_id) {
             pane.controller_id = controller;
         }
-    }
-
-    pub(crate) fn copy_semantic_for(
-        &mut self,
-        pane_id: u64,
-        client_id: u64,
-        seq: Option<u64>,
-    ) -> (Option<String>, Option<u64>) {
-        let Some(rich) = self
-            .panes
-            .get_mut(&pane_id)
-            .and_then(|pane| pane.rich.as_mut())
-        else {
-            return (None, None);
-        };
-        match seq {
-            Some(seq) => match rich.ack_copy_for(client_id, seq) {
-                Some(text) => (Some(text), Some(seq)),
-                None => (None, None),
-            },
-            None => (rich.semantic_copy_text("diag"), None),
-        }
-    }
-
-    pub(crate) fn revoke_viewer_on(
-        &mut self,
-        pane_id: u64,
-        viewer_id: ViewerId,
-    ) -> Result<bool, LiveWriteError> {
-        let runtime = self
-            .panes
-            .get_mut(&pane_id)
-            .ok_or(LiveWriteError::UnknownPane)?;
-        let Some(rich) = runtime.rich.as_mut() else {
-            return Ok(false);
-        };
-        let bytes = rich
-            .revoke_structured_focus(viewer_id)
-            .or_else(|| rich.revoke_focus(viewer_id));
-        let revoked = bytes.is_some();
-        if let Some(bytes) = bytes {
-            queue_rich_bytes(runtime, bytes)?;
-        }
-        Ok(revoked)
     }
 
     pub(crate) fn content(&self, pane_id: u64) -> Option<PaneContent> {
@@ -1278,36 +939,10 @@ impl LiveRuntime {
             .map(|runtime| (runtime.log.current_seq(), runtime.emulator.export_state()))
     }
 
-    pub(crate) fn styled(
-        &self,
-        pane_id: u64,
-        view_offset: Option<u32>,
-        viewer_id: ViewerId,
-    ) -> Option<PaneStyled> {
+    pub(crate) fn styled(&self, pane_id: u64, view_offset: Option<u32>) -> Option<PaneStyled> {
         self.panes
             .get(&pane_id)
-            .map(|runtime| runtime.styled(pane_id, view_offset, Some(viewer_id)))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn feed_rich_for_test(
-        &mut self,
-        pane_id: u64,
-        bytes: &[u8],
-    ) -> Result<(), LiveWriteError> {
-        let runtime = self
-            .panes
-            .get_mut(&pane_id)
-            .ok_or(LiveWriteError::UnknownPane)?;
-        if runtime.rich.is_none() {
-            runtime.emulator =
-                Emulator::new_experimental(runtime.cols, runtime.rows, MAX_SCROLLBACK);
-        }
-        let rich = runtime.rich.get_or_insert_with(RichSession::default);
-        rich::process_rich_chunk(&mut runtime.emulator, rich, &runtime.to_child_tx, bytes);
-        runtime
-            .reconcile_workspace_geometry()
-            .map_err(|_| LiveWriteError::Disconnected)
+            .map(|runtime| runtime.styled(pane_id, view_offset))
     }
 
     /// Drain all panes. Returns Hive death notices plus per-pane output ticks
@@ -1549,14 +1184,6 @@ impl LiveRuntime {
     #[cfg(test)]
     pub(crate) fn pane_log(&self, pane_id: u64) -> Option<&PaneLog> {
         self.panes.get(&pane_id).map(|pane| &pane.log)
-    }
-}
-
-fn queue_rich_bytes(runtime: &LivePane, bytes: Vec<u8>) -> Result<(), LiveWriteError> {
-    match runtime.to_child_tx.try_send(bytes) {
-        Ok(()) => Ok(()),
-        Err(mpsc::TrySendError::Full(_)) => Err(LiveWriteError::Backpressure),
-        Err(mpsc::TrySendError::Disconnected(_)) => Err(LiveWriteError::Disconnected),
     }
 }
 
@@ -2222,14 +1849,14 @@ mod tests {
             let pane = runtime.panes.get_mut(&1).unwrap();
             assert!(pane.content(1).lines[0].starts_with("saved output"));
             assert_no_input_reporting(&pane.emulator);
-            assert_eq!(pane.styled(1, None, None).child_mouse_tracking, Some(false));
+            assert_eq!(pane.styled(1, None).child_mouse_tracking, Some(false));
             assert_no_input_reporting(&replay_log(pane));
             // A replacement app may opt in again; ordinary reads must keep it enabled.
             pane.apply_pty_chunk(PtyChunk {
                 bytes: REPORTING_APP.to_vec(),
                 _reservation: None,
             });
-            assert_eq!(pane.styled(1, None, None).child_mouse_tracking, Some(true));
+            assert_eq!(pane.styled(1, None).child_mouse_tracking, Some(true));
             assert!(pane.emulator.focus_report());
             assert!(pane.emulator.bracketed_paste());
         }
@@ -2293,11 +1920,11 @@ mod tests {
     #[test]
     fn styled_reports_child_mouse_modes() {
         let mut pane = spawn_test_pane(1, &sleep_spawn(BTreeMap::new()), None);
-        let off = pane.styled(1, None, None);
+        let off = pane.styled(1, None);
         assert_eq!(off.child_mouse_tracking, Some(false));
         assert_eq!(off.child_mouse_sgr, Some(false));
         pane.emulator.feed(b"\x1b[?1000h\x1b[?1006h");
-        let on = pane.styled(1, None, None);
+        let on = pane.styled(1, None);
         assert_eq!(on.child_mouse_tracking, Some(true));
         assert_eq!(on.child_mouse_sgr, Some(true));
     }
@@ -2312,7 +1939,7 @@ mod tests {
         pane.emulator.feed(seq.as_bytes());
         assert_eq!(pane.emulator.images().len(), 1);
         // Simulate a new viewer attaching: styled() is the per-viewer read path.
-        let _ = pane.styled(1, None, None);
+        let _ = pane.styled(1, None);
         // Image state persists on the server pane across a fresh viewer projection.
         assert_eq!(pane.emulator.images().len(), 1, "image survives reattach");
         assert_eq!(pane.emulator.images()[0].id, 42);

@@ -93,6 +93,19 @@ def commit_all(repo: Path, message: str) -> None:
     git(repo, "commit", "-qm", message)
 
 
+def write_nested_lock(repo: Path, path: str, entries: dict[str, str]) -> None:
+    """A standalone lockfile, like a tool or fixture, with path entries."""
+    lock = repo / path
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["version = 4\n"]
+    for name, ver in entries.items():
+        lines.append(f'\n[[package]]\nname = "{name}"\nversion = "{ver}"\n')
+    lock.write_text("".join(lines))
+
+
+RELEASE_BRANCH = f"release/v{NEW_VERSION}-rc.1-changelog"
+
+
 class VersionCheckTests(unittest.TestCase):
     def tearDown(self) -> None:
         # Temp dirs are unique per test; best-effort cleanup only.
@@ -409,6 +422,51 @@ class VersionCheckTests(unittest.TestCase):
                 code, 0, f"detached HEAD with a bump must fail\n{output}"
             )
             self.assertIn("etached", output, f"names detached HEAD\n{output}")
+        finally:
+            shutil.rmtree(repo, ignore_errors=True)
+
+    def test_release_with_a_stale_nested_lockfile_fails_naming_it(self) -> None:
+        repo = fresh_repo()
+        try:
+            write_nested_lock(repo, "tools/probe/Cargo.lock", {"alpha": VERSION})
+            commit_all(repo, "nested lock")
+            git(repo, "checkout", "-qb", RELEASE_BRANCH)
+            write_repo(repo, version=NEW_VERSION)
+            commit_all(repo, "bump, nested lock missed")
+            code, output = run_check(repo, branch=RELEASE_BRANCH)
+            self.assertNotEqual(code, 0, f"stale nested lock must fail\n{output}")
+            self.assertIn("tools/probe/Cargo.lock alpha", output, output)
+            self.assertIn(f"says {VERSION}", output, output)
+        finally:
+            shutil.rmtree(repo, ignore_errors=True)
+
+    def test_nested_lockfile_checks_only_workspace_members(self) -> None:
+        repo = fresh_repo()
+        try:
+            git(repo, "checkout", "-qb", RELEASE_BRANCH)
+            write_repo(repo, version=NEW_VERSION)
+            write_nested_lock(
+                repo,
+                "tools/probe/Cargo.lock",
+                {"probe": "0.0.0", "pmux-mcp": NEW_VERSION},
+            )
+            commit_all(repo, "bump with nested lock")
+            code, output = run_check(repo, branch=RELEASE_BRANCH)
+            self.assertEqual(code, 0, f"members agree, probe is its own\n{output}")
+            self.assertIn(
+                f"tools/probe/Cargo.lock pmux-mcp {NEW_VERSION}", output, output
+            )
+            self.assertNotIn("probe 0.0.0", output, output)
+        finally:
+            shutil.rmtree(repo, ignore_errors=True)
+
+    def test_untracked_lockfiles_are_not_checked(self) -> None:
+        repo = fresh_repo()
+        try:
+            git(repo, "checkout", "-qb", "feature/work")
+            write_nested_lock(repo, "target/scratch/Cargo.lock", {"alpha": "0.0.1"})
+            code, output = run_check(repo, branch="feature/work")
+            self.assertEqual(code, 0, f"an untracked lock is not checked\n{output}")
         finally:
             shutil.rmtree(repo, ignore_errors=True)
 

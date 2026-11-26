@@ -14,6 +14,7 @@ mod attach_log;
 mod attach_tabs;
 mod border_underlay;
 mod bundled_fonts;
+mod capability;
 mod config;
 mod config_document;
 mod config_schema;
@@ -519,6 +520,9 @@ struct Cli {
     reduced_motion: bool,
     /// Opt-in rich attachments (APC collect + z1 cell-rect paint).
     experimental_rich: bool,
+    /// Opt-in native terminal sessions and images for direct local PTY
+    /// children (`--experimental-native` or `PRISMATTYC_EXPERIMENTAL_NATIVE=1`).
+    experimental_native: bool,
     /// Opt-in alternate-screen scrollback retention (`--alt-screen-scrollback`
     /// or `PRISMATTYC_ALT_SCREEN_SCROLLBACK=1`; config
     /// `alt_screen_scrollback = true`; default off).
@@ -550,6 +554,16 @@ pub(crate) struct AttachTarget {
 }
 
 impl Cli {
+    /// The experimental features new panes start with.
+    /// `--experimental-rich` still turns on native sessions too, for one
+    /// release, so launches that relied on it keep them.
+    fn experimental(&self) -> mux::Experimental {
+        mux::Experimental {
+            rich: self.experimental_rich,
+            native: self.experimental_native || self.experimental_rich,
+        }
+    }
+
     fn parse(mut args: impl Iterator<Item = String>) -> Result<Self> {
         let mut program = None;
         let mut child_args = Vec::new();
@@ -559,6 +573,7 @@ impl Cli {
         let mut focus_border = env_focus_border.unwrap_or(DEFAULT_FOCUS_BORDER_INDEX);
         let mut focus_border_pinned = env_focus_border.is_some();
         let mut experimental_rich = env_flag_enabled("PRISMATTYC_EXPERIMENTAL_RICH");
+        let mut experimental_native = env_flag_enabled("PRISMATTYC_EXPERIMENTAL_NATIVE");
         let mut alt_screen_scrollback = env_flag_enabled("PRISMATTYC_ALT_SCREEN_SCROLLBACK");
         let mut gpu = env_flag_enabled("PRISMATTYC_GPU");
         let mut no_splash = false;
@@ -607,6 +622,10 @@ impl Cli {
             }
             if a == "--experimental-rich" && program.is_none() {
                 experimental_rich = true;
+                continue;
+            }
+            if a == "--experimental-native" && program.is_none() {
+                experimental_native = true;
                 continue;
             }
             if a == "--alt-screen-scrollback" && program.is_none() {
@@ -698,6 +717,7 @@ impl Cli {
             light_cycle_head: true,
             reduced_motion: false,
             experimental_rich,
+            experimental_native,
             alt_screen_scrollback,
             gpu,
             attach_sessions,
@@ -920,7 +940,7 @@ fn print_help() {
 prismattyc-host — windowed Prismattyc host
 
 USAGE:
-    prismattyc-host [-V|--version] [--list-bindings] [--panes N] [--focus-border NAME] [--experimental-rich] [--alt-screen-scrollback] [--gpu] [PROGRAM [ARGS...]]
+    prismattyc-host [-V|--version] [--list-bindings] [--panes N] [--focus-border NAME] [--experimental-rich] [--experimental-native] [--alt-screen-scrollback] [--gpu] [PROGRAM [ARGS...]]
     prismattyc-host --attach-session ID [--attach-title NAME] ...
     prismattyc-host --write-config [PATH] [--merge]
     prismattyc-host -- /bin/bash -l
@@ -971,6 +991,8 @@ Bindings:        --list-bindings prints the effective actions and chords.
                  CLI flags and PRISMATTYC_* env vars always win over the file.
 Config keys:
 Rich attach:     --experimental-rich or PRISMATTYC_EXPERIMENTAL_RICH=1
+                 (for now it also turns on native sessions)
+Native sessions: --experimental-native or PRISMATTYC_EXPERIMENTAL_NATIVE=1
 Alt scrollback:  --alt-screen-scrollback or PRISMATTYC_ALT_SCREEN_SCROLLBACK=1
                  (or config alt_screen_scrollback = true). Default off:
                  full-screen TUIs keep the classic live-only view.
@@ -4626,7 +4648,7 @@ impl App {
             cols,
             rows,
             geom,
-            self.cli.experimental_rich,
+            self.cli.experimental(),
             self.cli.alt_screen_scrollback || self.file_config.alt_screen_scrollback(),
             Some(self.wake.clone()),
         )
@@ -18914,7 +18936,7 @@ fn paste_origin(host: &HostState) -> paste_job::PasteOrigin {
 /// channel for up to `PASTE_SEND_BUDGET` and closes a partial bracketed
 /// paste. Returns whether the whole paste was handed off.
 fn deliver_paste_bytes(
-    to_child: &mpsc::SyncSender<rich::ChildWrite>,
+    to_child: &mpsc::SyncSender<capability::ChildWrite>,
     bytes: Vec<u8>,
     bracketed: bool,
 ) -> bool {
@@ -27168,6 +27190,57 @@ open(sys.argv[1], 'w').write(str(n))
         match previous {
             Some(value) => std::env::set_var("PRISMATTYC_EXPERIMENTAL_RICH", value),
             None => std::env::remove_var("PRISMATTYC_EXPERIMENTAL_RICH"),
+        }
+    }
+
+    #[test]
+    fn experimental_native_has_its_own_flag_and_the_rich_flag_still_turns_it_on() {
+        let saved = [
+            "PRISMATTYC_EXPERIMENTAL_RICH",
+            "PRISMATTYC_EXPERIMENTAL_NATIVE",
+        ]
+        .map(|name| (name, std::env::var_os(name)));
+        for (name, _) in &saved {
+            std::env::remove_var(name);
+        }
+        let parse = |args: &[&str]| {
+            Cli::parse(args.iter().copied().map(str::to_owned))
+                .expect("parse")
+                .experimental()
+        };
+        assert_eq!(parse(&["--", "/bin/sh"]), mux::Experimental::default());
+        assert_eq!(
+            parse(&["--experimental-native", "--", "/bin/sh"]),
+            mux::Experimental {
+                rich: false,
+                native: true
+            }
+        );
+        assert_eq!(
+            parse(&["--experimental-rich", "--", "/bin/sh"]),
+            mux::Experimental {
+                rich: true,
+                native: true
+            }
+        );
+        assert_eq!(
+            parse(&["--", "/bin/sh", "--experimental-native"]),
+            mux::Experimental::default(),
+            "a flag after the program belongs to the program"
+        );
+        std::env::set_var("PRISMATTYC_EXPERIMENTAL_NATIVE", "1");
+        assert_eq!(
+            parse(&["--", "/bin/sh"]),
+            mux::Experimental {
+                rich: false,
+                native: true
+            }
+        );
+        for (name, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
         }
     }
 

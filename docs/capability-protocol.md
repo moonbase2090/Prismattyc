@@ -79,8 +79,7 @@ choice; repeated probing must be rate-limited.
 **PTY-attached clients** must disable canonical mode and echo (`ICANON` /
 `ECHO`) **before** sending the capability query. Host APC replies have no
 trailing newline, so a line-disciplined stdin never delivers them and `ECHO`
-reprints the reply as visible junk. `prismattyc-rich-client::enter_raw_stdin`
-does this when stdin is a TTY. Piped CI
+reprints the reply as visible junk. Piped CI
 harnesses have no line discipline and do not need it.
 
 ## Initial feature registry

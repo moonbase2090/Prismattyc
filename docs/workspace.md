@@ -14,7 +14,6 @@ Prismattyc is a Rust 2021 workspace. The minimum supported Rust version is
 | `prismattyc-mux` | Sessions, windows, panes, layouts, messaging, and the `pmux` tools. |
 | `prismattyc-render` | Shared rendering of terminal and rich content. |
 | `prismattyc-protocol` | Application capability and rich-content protocol types. |
-| `prismattyc-rich-client` | Client library for applications that use rich content. |
 | `prismattyc-labs` | WebAssembly components for the separate website's interactive examples. |
 | `pmux-mcp` | MCP access to session and messaging tools. |
 

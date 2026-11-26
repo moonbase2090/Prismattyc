@@ -6,6 +6,10 @@
 
 - Programs can tell the pmux server how to resume them after a restart, with the OSC 7577 program resume protocol. On Linux and macOS each local pane's first process gets a random `OSC7577_TOKEN`; a program writes a report signed with it, and the pmux server keeps the reported command and directory with the saved workspace. When it restores the pane after **Update and restart**, `pmux restart` or a login restore, it runs that command in the pane's shell instead of guessing from the process list, falling back to the old way when there is no usable report. Reports with a wrong signature, a stale time, or an owner outside the pane are ignored or refused, and every report is ignored while the pane holds a process of another user, a sandboxed process (macOS sandbox, Linux seccomp) or, on Linux, one with another root directory or namespace. A record is resumed only when its command is the program its owner was really running (checked against the process, and for a bare name against the restored shell's `PATH`), and that program is trusted: by default common editors and Git interfaces, set with `[mux] resume_trusted`. Each argument reaches the program unchanged; it is never turned into shell text. A pmux server running as root takes no reports unless `[mux] resume_allow_elevated = true`. Windows keeps the old restore. See `docs/program-resume.md`.
 
+### Changed
+
+- Experimental native terminal sessions and images have their own switch, `--experimental-native` or `PRISMATTYC_EXPERIMENTAL_NATIVE=1`, and no longer need rich overlays turned on. `--experimental-rich` still turns native sessions on too for this release; after that it turns on only rich overlays. Both stay off by default.
+
 ## [0.3.78] - 2026-11-26
 
 ### Added

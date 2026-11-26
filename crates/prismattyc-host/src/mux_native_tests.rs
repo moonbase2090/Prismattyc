@@ -2,7 +2,7 @@
 //! A real PTY writer and inherited control socket meet at the collector boundary.
 
 use super::*;
-use crate::{native::wire12::literals, rich::RichHost};
+use crate::{capability::CapabilityHost, native::wire12::literals};
 use std::{
     io::{Read, Write},
     os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd},
@@ -289,7 +289,7 @@ struct WrittenFlow<'a> {
     written: &'a mpsc::Receiver<()>,
 }
 
-impl RichHost for WrittenFlow<'_> {
+impl CapabilityHost for WrittenFlow<'_> {
     fn before_bytes(&mut self, emulator: &Emulator) -> bool {
         self.flow.before_bytes(emulator)
     }
@@ -298,14 +298,13 @@ impl RichHost for WrittenFlow<'_> {
         &mut self,
         query: prismattyc_protocol::CapabilityQuery,
         emulator: &mut Emulator,
-        rich: &mut RichSession,
         to_child: &mpsc::SyncSender<ChildWrite>,
-    ) -> bool {
-        let handled = self.flow.capability_reply(query, emulator, rich, to_child);
-        if handled {
+    ) -> QueryReply {
+        let reply = self.flow.capability_reply(query, emulator, to_child);
+        if reply == QueryReply::Answered {
             self.written.recv_timeout(Duration::from_secs(2)).unwrap();
         }
-        handled
+        reply
     }
 }
 
@@ -317,7 +316,8 @@ fn a_completed_native_reply_cannot_authorize_an_offer_revoked_by_trailing_pty_by
     }
     let module = module_path!().split_once("::").unwrap().1;
     let name = format!("{module}::a_completed_native_reply_cannot_authorize_an_offer_revoked_by_trailing_pty_bytes");
-    for trailing in [false, true] {
+    // Native sessions behave the same with rich on (the old flag) and off.
+    for (rich_on, trailing) in [(true, false), (true, true), (false, false), (false, true)] {
         let _clock = crate::native::service::PausedClockScope::enter();
         let mode = if trailing { "trailing" } else { "clean" };
         let args = vec![
@@ -345,18 +345,23 @@ fn a_completed_native_reply_cannot_authorize_an_offer_revoked_by_trailing_pty_by
             8,
             2,
             HostGeom::tight(8, 16),
-            true,
+            Experimental {
+                rich: rich_on,
+                native: true,
+            },
             false,
             Some(wake),
         )
         .unwrap();
         let pane = runtime.focused_mut();
         assert!(pane.native.is_some());
+        assert_eq!(pane.experimental_rich(), rich_on);
+        assert!(pane.emulator.collects_apc());
         let receiver = pane.from_pty_rx.take().unwrap();
         let mut signals = Vec::new();
         signal(&receiver, &mut signals, b"NATIVE_FLOW_READY\n");
-        if !trailing {
-            pane.rich.apply_grant(rich::RichGrant {
+        if rich_on && !trailing {
+            pane.rich.apply_grant(capability::RichGrant {
                 features: prismattyc_protocol::Feature::V1.into_iter().collect(),
                 region_limit: 8,
             });
@@ -419,25 +424,35 @@ fn a_completed_native_reply_cannot_authorize_an_offer_revoked_by_trailing_pty_by
         assert_eq!(bytes, expected);
         let now = Instant::now();
         let offered_epoch = pane.native.as_ref().unwrap().authority.epoch();
-        rich::process_rich_chunk(
-            &mut pane.emulator,
-            &mut pane.rich,
-            &pane.to_child_tx,
-            &bytes,
-            &mut WrittenFlow {
-                flow: NativeFlow {
-                    owner: pane.native.as_mut().unwrap(),
-                    session: pane.session.as_ref().unwrap(),
-                    columns: pane.cols,
-                    rows: &mut pane.rows,
-                    outer_rows: pane.outer_rows,
-                    cell_width: pane.cell_w,
-                    cell_height: pane.cell_h,
-                    now,
-                },
-                written: &written_rx,
+        let mut flow = WrittenFlow {
+            flow: NativeFlow {
+                owner: pane.native.as_mut().unwrap(),
+                session: pane.session.as_ref().unwrap(),
+                columns: pane.cols,
+                rows: &mut pane.rows,
+                outer_rows: pane.outer_rows,
+                cell_width: pane.cell_w,
+                cell_height: pane.cell_h,
+                now,
             },
-        );
+            written: &written_rx,
+        };
+        if rich_on {
+            rich::process_rich_chunk(
+                &mut pane.emulator,
+                &mut pane.rich,
+                &pane.to_child_tx,
+                &bytes,
+                &mut flow,
+            );
+        } else {
+            capability::process_native_chunk(
+                &mut pane.emulator,
+                &pane.to_child_tx,
+                &bytes,
+                &mut flow,
+            );
+        }
         signal(&receiver, &mut signals, b"NATIVE_HELLO_SENT\n");
         pane.drain_grants();
         let _ = pane.emulator.take_damage();
@@ -557,15 +572,17 @@ fn a_closed_reply_queue_revokes_the_unused_offer_immediately() {
         cell_height: pane.cell_h,
         now: Instant::now(),
     };
-    assert!(flow.capability_reply(
-        prismattyc_protocol::CapabilityQuery {
-            request_id: prismattyc_protocol::RequestId::new(77).unwrap(),
-            max_version: prismattyc_protocol::ProtocolVersion::new(0, 4),
-        },
-        &mut pane.emulator,
-        &mut pane.rich,
-        &closed,
-    ));
+    assert_eq!(
+        flow.capability_reply(
+            prismattyc_protocol::CapabilityQuery {
+                request_id: prismattyc_protocol::RequestId::new(77).unwrap(),
+                max_version: prismattyc_protocol::ProtocolVersion::new(0, 4),
+            },
+            &mut pane.emulator,
+            &closed,
+        ),
+        QueryReply::Answered
+    );
     assert!(flow.owner.authority.available());
     assert_eq!(flow.owner.authority.epoch().get(), before + 1);
     assert_eq!(flow.owner.authority.next_wakeup(), None);

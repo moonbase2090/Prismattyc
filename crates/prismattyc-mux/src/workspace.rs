@@ -720,6 +720,20 @@ mod tests {
         .unwrap();
         crate::program_resume::TEST_PMUX
             .with(|path| *path.borrow_mut() = Some(PathBuf::from("/opt/pmux")));
+        // A real `nvim` on the resume PATH, so only the binding can refuse it.
+        let bin = std::env::temp_dir().join(format!("resume-ws-bin-{}", std::process::id()));
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("nvim"), "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(
+            bin.join("nvim"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        let mut saved = saved;
+        saved.sessions[0].windows[0].panes[0]
+            .spawn
+            .env
+            .insert("PATH".into(), format!("{}:/usr/bin:/bin", bin.display()));
         let socket = std::env::temp_dir().join(format!("rs-{}.sock", std::process::id()));
         let (plane, commands) = saved.restore_plane(&socket).unwrap();
         assert_eq!(commands, [(1, "echo fallback".to_string())]);

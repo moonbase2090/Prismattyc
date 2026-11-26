@@ -1963,7 +1963,16 @@ mod tests {
             .refresh(crate::program_resume::unix_now(), &lookup);
         let record = pane.resume.record().expect("the signed report is recorded");
         assert_eq!(record.argv[0], "nvim");
-        let path = std::env::var_os("PATH");
+        // A real `nvim` on the resume PATH, so only the binding can refuse it.
+        let bin = std::env::temp_dir().join(format!("resume-bin-{}", std::process::id()));
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("nvim"), "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(
+            bin.join("nvim"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        let path = Some(bin.clone().into_os_string());
         let decision = crate::program_resume::restore_decision(
             record,
             &crate::program_resume::ResumePolicy::default(),

@@ -20,8 +20,10 @@ portable-pty.workspace = true
 prismattyc-core = { path = "../prismattyc-core" }
 prismattyc-emulator = { path = "../prismattyc-emulator" }
 prismattyc-mux = { path = "../prismattyc-mux" }
-prismattyc-protocol = { path = "../prismattyc-protocol" }
 prismattyc-render = { path = "../prismattyc-render" }
+
+[dev-dependencies]
+prismattyc-protocol = { path = "../prismattyc-protocol" }
 
 [build-dependencies]
 prismattyc-winres = { path = "../prismattyc-winres" }

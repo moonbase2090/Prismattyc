@@ -45,7 +45,7 @@ fn help_flag_prints_synopsis_and_exits_zero() {
         let text = stdout(&out);
         assert!(text.contains("prism"), "{flag}: {text:?}");
         assert!(
-            text.contains("--experimental-rich"),
+            text.contains("--no-splash"),
             "{flag}: help must list the real flag: {text:?}"
         );
         assert!(

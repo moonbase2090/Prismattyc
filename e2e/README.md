@@ -35,7 +35,6 @@ Requires `termwright` 0.2+ (`cargo install termwright --locked --version 0.2.0`)
 | `classic-reflow.py` | Narrow and widen the interactive emulator; preserve a logical output line |
 | `classic-keys.yaml` | Enter, arrows leave usable shell (no stuck raw) |
 | `a6-nested-marker.yaml` | Nested-only §5.6.1 step-3 analog (unique marker). Not a mux-pane proof |
-| `rich-attach.yaml` | Nested 0.1 capability grant and cell-rect attachment |
 | `pt-176-key-burst.yaml` | A 60+ byte typed command reaches a nested shell without key loss |
 | `pt-85-mail-inject-typing.yaml` | Mux attach: partial line must not receive `PMUX_MAIL` (not in the default runner list) |
 | `pt-99-space-attach.yaml` | Mux `space attach` then `C-\\ n` chrome switch (not in the default runner list; gated by `interactive_attach`) |

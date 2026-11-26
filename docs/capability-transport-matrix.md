@@ -6,20 +6,24 @@ gate, and **not** the owner's "proceed with production rich work"
 checkpoint.
 
 **Recorded at:** `e6c496d` parent / this PR head. Prism experimental flag
-`--experimental-rich`. Protocol 0.2 on TTY + `prismattyc-host`. T2/T3/T6 scripted
+`--experimental-rich`. Protocol 0.2 on `prismattyc-host`. T2/T6 scripted
 in `crates/prismattyc/tests/transport_matrix.rs`.
+
+The classic TTY host (`prismattyc`) no longer has rich mode. It accepts
+`--experimental-rich` for one release and ignores it. T2 and T6 now check
+that it keeps capability messages out of the grid; T3 was removed with it.
 
 Schema follows PRD.md:549–564. Rows whose environment cannot be reproduced
 here are **inconclusive**; expected results are not rewritten after the fact.
 
 | Row | Path | Prism role | Pass-through | Expected | Result | Safety assertions / evidence |
 |-----|------|------------|--------------|----------|--------|------------------------------|
-| T1 | Local app → Prism | Direct terminal host | N/A | Negotiate | **pass** | Correlated bounded reply; no leak/hang/crash/grid damage. Evidence: `rich::tests::v1_negotiate_grants_viewport_and_limits`, `rich::tests::v01_query_reply_is_byte_identical_to_spike`, `rich::tests::grant_required_before_attach`, `prismattyc-emulator::experimental_apc_bodies_are_collected_without_leaking_into_the_grid`. Termwright fixture `e2e/rich-attach.yaml` (optional; not required for CI). |
+| T1 | Local app → Prism | Direct terminal host | N/A | Negotiate | **pass** | Correlated bounded reply; no leak/hang/crash/grid damage. Evidence: `rich::tests::v1_negotiate_grants_viewport_and_limits`, `rich::tests::v01_query_reply_is_byte_identical_to_spike`, `rich::tests::grant_required_before_attach`, `prismattyc-emulator::experimental_apc_bodies_are_collected_without_leaking_into_the_grid`. |
 | T2 | Local app → tmux → Prism | Host outside tmux | Default/off | Timeout → classic-only | **pass** | No payload leak, no STAT overlay. Evidence: `transport_matrix::t2_tmux_passthrough_off_is_classic_only_no_leak`. |
-| T3 | Local app → tmux → Prism | Host outside tmux | Documented wrapper + tmux `allow-passthrough all` | Negotiate | **pass** locally (tmux 3.5); **inconclusive on CI** (`ubuntu-24.04` tmux 3.4 passthrough semantics — test prints `tmux -V` and skips with that marker) | Wrapped query/attach via `encode_tmux_passthrough`; STAT paints after grant flush locally. Evidence: `transport_matrix::t3_tmux_passthrough_on_negotiates`, `tests::tmux_passthrough_doubles_esc_and_round_trips`. |
+| T3 | Local app → tmux → Prism | Host outside tmux | Documented wrapper + tmux `allow-passthrough all` | Negotiate | **removed** | The classic host no longer negotiates. The wrapper encoding is still covered by `tests::tmux_passthrough_doubles_esc_and_round_trips`. |
 | T4 | Remote app → SSH → Prism | Local terminal host | No intermediate mux | Negotiate | **inconclusive** | No SSH fixture in CI. Semantic contract is identical to T1 (latency only). |
 | T5 | Remote app → tmux (off) → SSH → Prism | Local host outside remote tmux | Remote tmux default/off | Timeout → classic-only | **inconclusive** | Named nested remote path not reproduced. |
-| T6 | Nested Prism-in-Prism | Inner `prism --experimental-rich` under outer `prism` | N/A | Negotiate on inner only; outer classic unless flagged | **pass** | Inner paints STAT; outer classic does not leak `Prismattyc;cap;q`. Evidence: `transport_matrix::t6_nested_prism_inner_negotiates_outer_classic`. |
+| T6 | Nested Prism-in-Prism | Inner `prism` under outer `prism` | N/A | Classic-only on both | **pass** | Neither host paints STAT or leaks a capability message. Evidence: `transport_matrix::t6_nested_prism_keeps_capability_messages_out_of_both_grids`. |
 | T7 | Under a foreign emulator (xterm) | Prism as child of xterm | N/A | Negotiate or classic-only; no leak | **inconclusive** | No xterm in CI. APC is 7-bit `ESC _`…`ESC \`; unaware hosts must not paint the body as text (collector + containment tests cover the Prism side). |
 
 ## Required safety (every executed row)

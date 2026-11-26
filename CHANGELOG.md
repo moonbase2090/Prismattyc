@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Experimental native terminal sessions and images have their own switch, `--experimental-native` or `PRISMATTYC_EXPERIMENTAL_NATIVE=1`, and no longer need rich overlays turned on. `--experimental-rich` still turns native sessions on too for this release; after that it turns on only rich overlays. Both stay off by default.
+
 ### Fixed
 
 - A Kitty graphics delete that also frees image data (an uppercase `d=` value) now frees only the images it names or whose placements it removed. Before, it also dropped every other uploaded image that was not placed yet, so one program cleaning up its own image could erase images another program had uploaded to place later. The activity monitor's pixel check at startup sends such a delete, so opening the monitor no longer clears those uploads.

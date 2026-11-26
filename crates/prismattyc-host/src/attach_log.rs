@@ -35,7 +35,7 @@ use prismattyc_mux::{
     Snapshot, MAX_PANE_STATE_BYTES, PROTOCOL_VERSION,
 };
 
-use crate::rich::ChildWrite;
+use crate::capability::ChildWrite;
 
 /// Idle gap after the last key before the controller lease is released.
 /// Same value as `pmux attach`: a sticky lease makes every live agent pane

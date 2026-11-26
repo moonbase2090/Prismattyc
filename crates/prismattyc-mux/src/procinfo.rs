@@ -274,7 +274,7 @@ pub(crate) fn process_tree_strict(root: u32) -> Option<Vec<u32>> {
                         .get(close + 1..)?
                         .split_whitespace()
                         .nth(1)?
-                        .parse()
+                        .parse::<u32>()
                         .ok()?;
                     parents.push((pid, ppid));
                 }

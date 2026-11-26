@@ -1026,8 +1026,7 @@ mod tests {
         pane.receive(&set_report(7, NOW, "nvim"), NOW, &lookup);
         let mut saved = pane.record().unwrap().clone();
         saved.owner = None;
-        let mut restored = PaneResume::new(Some(TOKEN.into()), Some(saved));
-        restored.mark_attempted();
+        let mut restored = PaneResume::new(Some(TOKEN.into()), Some(saved.clone()));
         assert!(restored.resumed(20, NOW, &lookup));
         assert!(restored.record().unwrap().attempted);
         restored.refresh(NOW + RESUME_SETTLE_SECS - 1, &lookup);
@@ -1036,6 +1035,11 @@ mod tests {
         assert!(!restored.record().unwrap().attempted);
         restored.resume_failed();
         assert!(restored.record().is_none());
+        // A resume handed off but never started stays marked, so the next
+        // restore skips it.
+        let mut pending = PaneResume::new(Some(TOKEN.into()), Some(saved));
+        pending.mark_attempted();
+        assert!(pending.record().unwrap().attempted);
     }
 
     fn record(argv: &[&str], cwd: Option<&str>) -> ResumeRecord {

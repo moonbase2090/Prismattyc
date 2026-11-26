@@ -4412,14 +4412,14 @@ mod tests {
             bytes
         };
         let mut emulator = Emulator::new(40, 2, 10);
-        // 2 + 4 + 1 + body + terminator = 2048 exactly.
-        emulator.feed(&report(MAX_RESUME_REPORT_BYTES - 8, b"\x07"));
-        emulator.feed(&report(MAX_RESUME_REPORT_BYTES - 9, b"\x1b\\"));
+        // The protocol's limit: 2 + 4 + 1 + body + terminator = 2048.
+        emulator.feed(&report(2040, b"\x07"));
+        emulator.feed(&report(2039, b"\x1b\\"));
         let taken = emulator.take_resume_reports();
         assert_eq!(taken.len(), 2);
-        assert_eq!(taken[0].len(), MAX_RESUME_REPORT_BYTES - 8);
-        emulator.feed(&report(MAX_RESUME_REPORT_BYTES - 7, b"\x07"));
-        emulator.feed(&report(MAX_RESUME_REPORT_BYTES - 8, b"\x1b\\"));
+        assert_eq!(taken[0].len(), 2040);
+        emulator.feed(&report(2041, b"\x07"));
+        emulator.feed(&report(2040, b"\x1b\\"));
         assert!(emulator.take_resume_reports().is_empty());
     }
 

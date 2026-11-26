@@ -411,6 +411,9 @@ pub struct Emulator {
     pending_attention: Option<String>,
     /// Window title from OSC 0/2 since the last [`Self::take_pending_title`].
     pending_title: Option<String>,
+    /// Complete OSC 7577 program resume report bodies since the last
+    /// [`Self::take_resume_reports`]. Unverified; never painted.
+    pending_resume_reports: Vec<Vec<u8>>,
     /// Kitty graphics decoder state (always active; independent of rich mode).
     graphics: graphics::GraphicsState,
     /// Graphics APC sidecar (independent of the Prismattyc `apc` collector).
@@ -445,6 +448,7 @@ impl Emulator {
             pending_bell: false,
             pending_attention: None,
             pending_title: None,
+            pending_resume_reports: Vec::new(),
             graphics: graphics::GraphicsState::new(),
             graphics_apc: prismattyc_protocol::GraphicsApcCollector::new(),
             cell_width_px: graphics::NOMINAL_CELL_W_PX,
@@ -474,6 +478,7 @@ impl Emulator {
             pending_bell: false,
             pending_attention: None,
             pending_title: None,
+            pending_resume_reports: Vec::new(),
             graphics: graphics::GraphicsState::new(),
             graphics_apc: prismattyc_protocol::GraphicsApcCollector::new(),
             cell_width_px: graphics::NOMINAL_CELL_W_PX,
@@ -583,6 +588,7 @@ impl Emulator {
             pending_bell: false,
             pending_attention: None,
             pending_title: None,
+            pending_resume_reports: Vec::new(),
             graphics,
             graphics_apc: prismattyc_protocol::GraphicsApcCollector::new(),
             cell_width_px: state.cell_width_px.max(1),
@@ -746,6 +752,14 @@ impl Emulator {
         self.pending_title.take()
     }
 
+    /// Take the OSC 7577 program resume report bodies received since the
+    /// last take, oldest first. Each is the raw text between `7577;` and the
+    /// terminator. They are unverified: the caller checks each one's MAC
+    /// against the pane's token before acting on it.
+    pub fn take_resume_reports(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.pending_resume_reports)
+    }
+
     /// Feed child output into the classic VT parser and optional APC sidecar.
     ///
     /// Returns complete APC bodies (or discards) when collection is enabled;
@@ -815,6 +829,7 @@ impl Emulator {
             pending_bell,
             pending_attention,
             pending_title,
+            pending_resume_reports,
             cell_width_px,
             cell_height_px,
             ..
@@ -837,6 +852,7 @@ impl Emulator {
                 pending_bell,
                 pending_attention,
                 pending_title,
+                pending_resume_reports,
                 cell_width_px: *cell_width_px,
                 cell_height_px: *cell_height_px,
             },
@@ -883,6 +899,7 @@ struct ScreenPerformer<'a> {
     pending_bell: &'a mut bool,
     pending_attention: &'a mut Option<String>,
     pending_title: &'a mut Option<String>,
+    pending_resume_reports: &'a mut Vec<Vec<u8>>,
     cell_width_px: u32,
     cell_height_px: u32,
 }
@@ -919,7 +936,18 @@ impl Perform for ScreenPerformer<'_> {
 
     fn unhook(&mut self) {}
 
-    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+    fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
+        // OSC 7577 ; body — program resume report. Kept whole for the mux to
+        // verify; a report over the protocol's size limit is ignored.
+        if params.first().is_some_and(|p| *p == b"7577") {
+            if let Some(body) = resume_report_body(params, bell_terminated) {
+                if self.pending_resume_reports.len() >= MAX_PENDING_RESUME_REPORTS {
+                    self.pending_resume_reports.remove(0);
+                }
+                self.pending_resume_reports.push(body);
+            }
+            return;
+        }
         // OSC 9 ; body — agent attention (iTerm2-compatible producer path).
         if params.first().is_some_and(|p| *p == b"9") {
             if let Some(message) = join_attention_parts(params.get(1..).unwrap_or_default()) {
@@ -1328,6 +1356,33 @@ fn join_attention_parts(parts: &[&[u8]]) -> Option<String> {
         bytes.extend_from_slice(part);
     }
     validated_attention(&bytes)
+}
+
+/// Largest whole OSC 7577 report, counting `ESC ]`, `7577`, `;` and the
+/// terminator, that the program resume protocol requires a terminal to take.
+pub const MAX_RESUME_REPORT_BYTES: usize = 2048;
+/// Reports kept between takes. A burst past this keeps the newest.
+const MAX_PENDING_RESUME_REPORTS: usize = 8;
+/// The parser splits OSC text into at most this many `;` fields and drops
+/// the rest, so a report that reaches it may have lost bytes.
+const MAX_OSC_FIELDS: usize = 16;
+
+/// The exact body bytes of an OSC 7577 report, or `None` when it is over the
+/// size limit or may have been cut short. The value alphabet has no `;`, so
+/// a valid body is one field; the fields are rejoined so the MAC still sees
+/// the bytes as sent and the mux rejects such a body itself.
+fn resume_report_body(params: &[&[u8]], bell_terminated: bool) -> Option<Vec<u8>> {
+    let fields = params.get(1..).filter(|fields| !fields.is_empty())?;
+    if params.len() >= MAX_OSC_FIELDS {
+        return None;
+    }
+    let body_len = fields.iter().map(|field| field.len()).sum::<usize>() + fields.len() - 1;
+    // ESC ] + "7577" + ";" + body + BEL or ESC \.
+    let total = 2 + 4 + 1 + body_len + if bell_terminated { 1 } else { 2 };
+    if total > MAX_RESUME_REPORT_BYTES {
+        return None;
+    }
+    Some(fields.join(&b';'))
 }
 
 fn osc8_id(params: &[u8]) -> Option<&str> {
@@ -2257,6 +2312,10 @@ impl PtySession {
         command.env_remove("PMUX_AGENT");
         command.env_remove("PMUX_TUTORIAL_PACK");
         command.env_remove("PRISMATTYC_NATIVE_FD");
+        // A terminal sets its own program resume token for each pane and never
+        // passes down the one it was given (OSC 7577). The mux adds a fresh one
+        // through `environment`; host in-process PTYs get none.
+        command.env_remove("OSC7577_TOKEN");
         for (key, value) in environment {
             command.env(key, value);
         }
@@ -4316,6 +4375,64 @@ mod tests {
         let _ = emulator.feed(b"\x07");
         assert!(emulator.take_pending_attention().is_none());
         assert!(emulator.take_pending_bell());
+    }
+
+    #[test]
+    fn osc7577_reports_are_kept_whole_and_never_painted() {
+        let mut emulator = Emulator::new(40, 2, 10);
+        emulator.feed(b"a\x1b]7577;pid=7:time=9:clear=1:mac=00\x07b");
+        emulator.feed(b"\x1b]7577;pid=8:argv=bnZpbQ==:mac=11\x1b\\c");
+        assert_eq!(
+            emulator.take_resume_reports(),
+            [
+                b"pid=7:time=9:clear=1:mac=00".to_vec(),
+                b"pid=8:argv=bnZpbQ==:mac=11".to_vec()
+            ]
+        );
+        assert!(emulator.take_resume_reports().is_empty());
+        let row: String = (0..3)
+            .map(|col| emulator.screen().view_cell(0, 0, col).character)
+            .collect();
+        assert_eq!(row, "abc");
+    }
+
+    #[test]
+    fn osc7577_keeps_a_body_with_semicolons_as_sent() {
+        let mut emulator = Emulator::new(40, 2, 10);
+        emulator.feed(b"\x1b]7577;pid=7;x:mac=00\x07");
+        assert_eq!(emulator.take_resume_reports(), [b"pid=7;x:mac=00".to_vec()]);
+    }
+
+    #[test]
+    fn osc7577_takes_a_report_at_the_size_limit_and_ignores_a_longer_one() {
+        let report = |body_len: usize, terminator: &[u8]| {
+            let mut bytes = b"\x1b]7577;".to_vec();
+            bytes.extend(std::iter::repeat_n(b'a', body_len));
+            bytes.extend_from_slice(terminator);
+            bytes
+        };
+        let mut emulator = Emulator::new(40, 2, 10);
+        // 2 + 4 + 1 + body + terminator = 2048 exactly.
+        emulator.feed(&report(MAX_RESUME_REPORT_BYTES - 8, b"\x07"));
+        emulator.feed(&report(MAX_RESUME_REPORT_BYTES - 9, b"\x1b\\"));
+        let taken = emulator.take_resume_reports();
+        assert_eq!(taken.len(), 2);
+        assert_eq!(taken[0].len(), MAX_RESUME_REPORT_BYTES - 8);
+        emulator.feed(&report(MAX_RESUME_REPORT_BYTES - 7, b"\x07"));
+        emulator.feed(&report(MAX_RESUME_REPORT_BYTES - 8, b"\x1b\\"));
+        assert!(emulator.take_resume_reports().is_empty());
+    }
+
+    #[test]
+    fn osc7577_keeps_only_the_newest_reports_between_takes() {
+        let mut emulator = Emulator::new(40, 2, 10);
+        for index in 0..12 {
+            emulator.feed(format!("\x1b]7577;n={index}\x07").as_bytes());
+        }
+        let taken = emulator.take_resume_reports();
+        assert_eq!(taken.len(), 8);
+        assert_eq!(taken[0], b"n=4");
+        assert_eq!(taken[7], b"n=11");
     }
 
     #[test]

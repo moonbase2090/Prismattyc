@@ -1214,8 +1214,9 @@ mod tests {
         );
     }
 
-    /// Start `/bin/sh -c script` as a stand-in pane and wait until `ready`
-    /// holds for its tree. Kills the whole tree on drop.
+    /// Start `/bin/sh -c script` as a stand-in pane. The script starts one
+    /// child that prints `ready` once it is running (inside its sandbox, if
+    /// any). Kills the whole tree on drop.
     #[cfg(target_os = "macos")]
     struct FakePane(std::process::Child);
 
@@ -1227,7 +1228,7 @@ mod tests {
                 Command::new("/bin/sh")
                     .args(["-c", script])
                     .stdin(Stdio::null())
-                    .stdout(Stdio::null())
+                    .stdout(Stdio::piped())
                     .stderr(Stdio::null()),
             )
             .unwrap();
@@ -1240,17 +1241,18 @@ mod tests {
             }
         }
 
-        fn settle(&self, want: Result<(), &'static str>) -> Result<(), &'static str> {
-            let mut last = Err(UNCHECKED);
-            for _ in 0..300 {
-                let tree = crate::procinfo::process_tree_strict(self.0.id()).unwrap_or_default();
-                last = self.lookup().pane_authority();
-                if tree.len() >= 2 && last == want {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            last
+        /// Block until the child says it is running, then check the pane.
+        fn authority_when_ready(&mut self) -> Result<(), &'static str> {
+            use std::io::BufRead;
+            let stdout = self.0.stdout.as_mut().unwrap();
+            let mut line = String::new();
+            std::io::BufReader::new(stdout)
+                .read_line(&mut line)
+                .unwrap();
+            assert_eq!(line.trim(), "ready", "the stand-in child did not start");
+            let tree = crate::procinfo::process_tree_strict(self.0.id()).unwrap();
+            assert!(tree.len() >= 2, "the child is in the pane: {tree:?}");
+            self.lookup().pane_authority()
         }
     }
 
@@ -1270,11 +1272,12 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn a_real_sandboxed_child_makes_its_pane_untrusted_and_a_plain_one_does_not() {
-        let plain = FakePane::start("/bin/sleep 30 & wait");
-        assert_eq!(plain.settle(Ok(())), Ok(()));
-        let boxed =
-            FakePane::start("sandbox-exec -p '(version 1)(allow default)' /bin/sleep 30 & wait");
-        assert_eq!(boxed.settle(Err(SANDBOXED)), Err(SANDBOXED));
+        let mut plain = FakePane::start("/bin/sh -c 'echo ready; exec /bin/sleep 30' & wait");
+        assert_eq!(plain.authority_when_ready(), Ok(()));
+        let mut boxed = FakePane::start(
+            "sandbox-exec -p '(version 1)(allow default)' /bin/sh -c 'echo ready; exec /bin/sleep 30' & wait",
+        );
+        assert_eq!(boxed.authority_when_ready(), Err(SANDBOXED));
     }
 
     #[test]

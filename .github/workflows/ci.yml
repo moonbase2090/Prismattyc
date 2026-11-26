@@ -460,7 +460,8 @@ jobs:
 
   # Frozen rich harness pin. Not a light-stage / PRD §5.6 / A-6 gate.
   # Hand / Local Actions: --event pull_request --job phase3-rich
-  # Periodic: .github/workflows/phase3-rich-nightly.yml
+  # Runs on every push, including each commit to main, so it needs no
+  # separate schedule.
   phase3-rich:
     name: Phase 3 rich harness
     runs-on: ubuntu-24.04
@@ -581,8 +582,7 @@ jobs:
 
   # Windows CI guard (PT-101). Cross-compile + Wine. Not a Windows container.
   # Portable set (named with -p below): prismattyc-core, prismattyc-protocol,
-  # prismattyc-emulator, prismattyc-render, prismattyc-labs,
-  # prismattyc-rich-client.
+  # prismattyc-emulator, prismattyc-render, prismattyc-labs.
   # Excluded (lift crate-by-crate in PT-180; no stubs here):
   # - prismattyc-mux: pmux/pmuxd/pmux-attach import Unix sockets and PTY types
   # - prismattyc-host: attach_log uses UnixStream; main.rs names unix-only mux symbols
@@ -640,8 +640,7 @@ jobs:
             -p prismattyc-protocol \
             -p prismattyc-emulator \
             -p prismattyc-render \
-            -p prismattyc-labs \
-            -p prismattyc-rich-client
+            -p prismattyc-labs
 
   windows-test:
     name: Windows test
@@ -714,7 +713,6 @@ jobs:
             -p prismattyc-emulator \
             -p prismattyc-render \
             -p prismattyc-labs \
-            -p prismattyc-rich-client \
             > "${RUNNER_TEMP:-/tmp}/windows-gnu-test-build.json"
 
       - name: Run Windows GNU test binaries under Wine

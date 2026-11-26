@@ -23,8 +23,8 @@ from pathlib import Path
 # Test: scripts/la-staged_test.py reads ci.yml and compares.
 #
 # phase3-rich stays in ci.yml for hand / --job dispatch. It is a frozen
-# regression pin, not a required light gate. Nightly covers periodic
-# exercise (.github/workflows/phase3-rich-nightly.yml).
+# regression pin, not a required light gate. On GitHub it runs on every
+# push, including each commit to main.
 UNSTAGED_CI_JOBS: frozenset[str] = frozenset({"phase3-rich"})
 STAGES: tuple[tuple[str, tuple[str, ...]], ...] = (
     (

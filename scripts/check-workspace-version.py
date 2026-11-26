@@ -10,7 +10,10 @@ Two checks, stdlib only:
 2. Agreement (every branch): Cargo.toml, every workspace-member
    Cargo.lock entry (no `source` line; member names read from the
    workspace crates, never hard-coded), the README sentence, and the
-   fidelity-matrix sentence must all name the same version.
+   fidelity-matrix sentence must all name the same version. Every other
+   tracked Cargo.lock (a standalone tool or a verification fixture) that
+   pins a workspace member by path must pin the same version too; its own
+   packages are not members and are skipped.
 
 Branch from VERSION_BRANCH, else GITHUB_HEAD_REF, else the git branch
 (detached HEAD counts as non-release). Only an exactly documented
@@ -117,6 +120,18 @@ def lock_versions(text: str) -> dict[str, str]:
         for name, version, source in LOCK_ENTRY_RE.findall(text)
         if not source
     }
+
+
+def nested_lockfiles(root: Path) -> list[str]:
+    """Tracked Cargo.lock files other than the workspace root's."""
+    code, out = run_git(root, "ls-files", "--", "*Cargo.lock")
+    if code != 0:
+        return []
+    return sorted(
+        path
+        for path in out.splitlines()
+        if path.endswith("/Cargo.lock")
+    )
 
 
 def main() -> int:
@@ -239,6 +254,16 @@ def main() -> int:
     lock = lock_versions(lock_text)
     for name in names:
         agreement.append((f"Cargo.lock {name}", lock.get(name)))
+    for path in nested_lockfiles(root):
+        try:
+            nested = lock_versions((root / path).read_text())
+        except OSError:
+            failures.append(f"{path} is tracked but missing")
+            print(f"agreement: FAIL ({path} is tracked but missing)")
+            continue
+        for name in names:
+            if name in nested:
+                agreement.append((f"{path} {name}", nested[name]))
     readme_match = README_RE.search(readme_text)
     agreement.append((
         "README.md workspace version sentence",

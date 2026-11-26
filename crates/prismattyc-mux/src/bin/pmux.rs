@@ -2875,7 +2875,7 @@ fn cmd_resume_run(paths: &Paths, rest: Vec<String>) -> Result<()> {
         handoff: handoff.clone(),
         pid: std::process::id(),
     })?;
-    let ControlResponseData::ResumeCommand { argv, cwd } = response else {
+    let ControlResponseData::ResumeCommand { argv, cwd, program } = response else {
         bail!("the pmux server did not return a command to resume");
     };
     let shown = argv
@@ -2891,9 +2891,11 @@ fn cmd_resume_run(paths: &Paths, rest: Vec<String>) -> Result<()> {
         });
         anyhow::anyhow!(message)
     };
-    let Some(program) = argv.first() else {
+    let Some(name) = argv.first() else {
         return Err(fail("the resume command is empty".into()));
     };
+    // Run the file the server verified, not whatever the name finds now.
+    let program = program.unwrap_or_else(|| PathBuf::from(name));
     if let Some(cwd) = &cwd {
         if let Err(error) = std::env::set_current_dir(cwd) {
             return Err(fail(format!(
@@ -2905,8 +2907,8 @@ fn cmd_resume_run(paths: &Paths, rest: Vec<String>) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
-        let mut command = std::process::Command::new(program);
-        command.arg0(program).args(&argv[1..]);
+        let mut command = std::process::Command::new(&program);
+        command.arg0(name).args(&argv[1..]);
         let error = prismattyc_process::exec(&mut command);
         Err(fail(format!("could not resume {shown}: {error}")))
     }

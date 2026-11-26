@@ -155,6 +155,25 @@ pub(crate) fn process_identity(pid: u32) -> Option<ProcessIdentity> {
     }
 }
 
+/// The canonical path of the executable `pid` is running, on Linux and macOS.
+pub(crate) fn process_executable(pid: u32) -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        return std::fs::read_link(format!("/proc/{pid}/exe"))
+            .ok()
+            .and_then(|path| path.canonicalize().ok());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return macos::executable(pid).and_then(|path| path.canonicalize().ok());
+    }
+    #[allow(unreachable_code)]
+    {
+        let _ = pid;
+        None
+    }
+}
+
 /// Working directory of `pid`, if the platform exposes it.
 #[must_use]
 pub fn cwd_of(pid: u32) -> Option<PathBuf> {
@@ -2027,6 +2046,24 @@ mod macos {
             return None;
         }
         Some((info.pbi_pgid, info.e_tpgid))
+    }
+
+    pub(super) fn executable(pid: u32) -> Option<PathBuf> {
+        use std::os::unix::ffi::OsStringExt;
+        let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        // SAFETY: `buf` is writable for its full length, passed as the size.
+        let n = unsafe {
+            libc::proc_pidpath(
+                pid as libc::c_int,
+                buf.as_mut_ptr().cast(),
+                buf.len() as u32,
+            )
+        };
+        if n <= 0 {
+            return None;
+        }
+        buf.truncate(n as usize);
+        Some(PathBuf::from(std::ffi::OsString::from_vec(buf)))
     }
 
     pub(super) fn identity(pid: u32) -> Option<super::ProcessIdentity> {

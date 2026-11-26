@@ -138,6 +138,15 @@ pub struct ResumeRecord {
     pub owner: Option<ResumeOwner>,
     /// User that ran the owner when the report was accepted.
     pub uid: u32,
+    /// The executable the owner was last seen running. A report only names a
+    /// command; this is what binds it to a real program. Updated each time the
+    /// owner is checked, so a wrapper that reports and then runs its target
+    /// is bound once the target runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_exe: Option<PathBuf>,
+    /// Why the last restore did not resume this record, for display.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_resumed: Option<String>,
     /// Set when a resume starts, cleared once the program has stayed up for
     /// [`RESUME_SETTLE_SECS`]. A set flag at the next restore means the last
     /// resume failed or crashed, so it is not run again.
@@ -352,6 +361,8 @@ fn decode_text(value: &[u8]) -> Option<String> {
 /// How the server looks up processes; a trait so tests can supply their own.
 pub(crate) trait OwnerLookup {
     fn identity(&self, pid: u32) -> Option<crate::procinfo::ProcessIdentity>;
+    /// The canonical path of the executable `pid` is running.
+    fn executable(&self, pid: u32) -> Option<PathBuf>;
     /// Whether `pid` is the pane's first process or one of its descendants.
     fn in_pane(&self, pid: u32) -> bool;
     /// The user the pmux server runs as.
@@ -366,6 +377,10 @@ pub(crate) struct SystemLookup {
 impl OwnerLookup for SystemLookup {
     fn identity(&self, pid: u32) -> Option<crate::procinfo::ProcessIdentity> {
         crate::procinfo::process_identity(pid)
+    }
+
+    fn executable(&self, pid: u32) -> Option<PathBuf> {
+        crate::procinfo::process_executable(pid)
     }
 
     fn in_pane(&self, pid: u32) -> bool {
@@ -491,6 +506,8 @@ impl PaneResume {
                         start: identity.start,
                     }),
                     uid: identity.uid,
+                    owner_exe: lookup.executable(pid),
+                    not_resumed: None,
                     attempted: false,
                     exited_at: None,
                     started_at: None,
@@ -540,6 +557,9 @@ impl PaneResume {
             .is_some_and(|identity| identity.start == owner.start);
         if alive {
             record.exited_at = None;
+            if let Some(exe) = lookup.executable(owner.pid) {
+                record.owner_exe = Some(exe);
+            }
             if record.attempted
                 && record
                     .started_at
@@ -564,6 +584,8 @@ impl PaneResume {
             pid,
             start: identity.start,
         });
+        record.owner_exe = lookup.executable(pid);
+        record.not_resumed = None;
         record.attempted = true;
         record.started_at = Some(now);
         record.exited_at = None;
@@ -573,6 +595,13 @@ impl PaneResume {
     /// The resume could not start: drop the record so it is not run again.
     pub(crate) fn resume_failed(&mut self) {
         self.record = None;
+    }
+
+    /// Note why the last restore did not resume this record.
+    pub(crate) fn note_not_resumed(&mut self, reason: &str) {
+        if let Some(record) = self.record.as_mut() {
+            record.not_resumed = Some(reason.to_string());
+        }
     }
 
     /// Mark a resume as started before the program is running, so a crash in
@@ -652,31 +681,96 @@ fn running_elevated() -> bool {
     server_uid() == Some(0)
 }
 
-/// Why a saved record is not resumed, or None to resume it.
-pub(crate) fn restore_refusal(
+/// Why a record is not resumed because its command is not the program its
+/// owner was running.
+pub(crate) const UNBOUND: &str = "reported command does not match the running program";
+
+/// The executable a record resumes, checked against what its owner ran.
+///
+/// A report only claims a command; any process in the pane that holds the
+/// token can claim any name. The record is bound to the owner's real
+/// executable: an absolute `argv[0]` must be that same file, and a bare name
+/// must be that file's name and also what the name finds on the resume
+/// `PATH`, so another program of the same name earlier on `PATH` cannot take
+/// its place. `canonical` resolves a path, `on_path` looks up a bare name.
+pub(crate) fn verified_executable(
+    record: &ResumeRecord,
+    canonical: impl Fn(&Path) -> Option<PathBuf>,
+    on_path: impl Fn(&str) -> Option<PathBuf>,
+) -> Result<PathBuf, &'static str> {
+    let exe = record.owner_exe.as_ref().ok_or(UNBOUND)?;
+    let program = record.argv.first().ok_or(UNBOUND)?;
+    if Path::new(program).is_absolute() {
+        return match canonical(Path::new(program)) {
+            Some(path) if path == *exe => Ok(path),
+            _ => Err(UNBOUND),
+        };
+    }
+    if exe.file_name().and_then(|name| name.to_str()) != Some(program.as_str()) {
+        return Err(UNBOUND);
+    }
+    match on_path(program) {
+        Some(path) if path == *exe => Ok(path),
+        _ => Err("another program of that name comes first on PATH"),
+    }
+}
+
+/// The canonical path of the first executable file named `name` on `path`.
+pub(crate) fn resolve_on_path(name: &str, path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    std::env::split_paths(path?)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(name))
+        .find(|candidate| is_executable_file(candidate))
+        .and_then(|candidate| candidate.canonicalize().ok())
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        metadata.is_file()
+    }
+}
+
+/// The verified executable to resume `record` with, or why it is not resumed.
+/// The trust list applies to the verified executable's name.
+pub(crate) fn restore_decision(
     record: &ResumeRecord,
     policy: &ResumePolicy,
     enabled: bool,
     uid: Option<u32>,
+    canonical: impl Fn(&Path) -> Option<PathBuf>,
+    on_path: impl Fn(&str) -> Option<PathBuf>,
     dir_exists: impl Fn(&Path) -> bool,
-) -> Option<&'static str> {
+) -> Result<PathBuf, &'static str> {
     if !enabled {
-        return Some("program resume is off for this pmux server");
+        return Err("program resume is off for this pmux server");
     }
     if record.attempted {
-        return Some("its last resume did not start or did not last");
+        return Err("its last resume did not start or did not last");
     }
     if uid != Some(record.uid) {
-        return Some("it was reported as another user");
+        return Err("it was reported as another user");
     }
-    let program = record.argv.first()?;
-    if !policy.trusts(program) {
-        return Some("its command is not in [mux] resume_trusted");
+    let exe = verified_executable(record, canonical, on_path)?;
+    let name = exe
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    if !policy.trusts(name) {
+        return Err("its command is not in [mux] resume_trusted");
     }
     if record.cwd.as_deref().is_some_and(|cwd| !dir_exists(cwd)) {
-        return Some("its directory no longer exists");
+        return Err("its directory no longer exists");
     }
-    None
+    Ok(exe)
 }
 
 #[cfg(test)]
@@ -866,6 +960,7 @@ mod tests {
 
     struct FakeLookup {
         processes: RefCell<BTreeMap<u32, ProcessIdentity>>,
+        exes: RefCell<BTreeMap<u32, PathBuf>>,
         pane: Vec<u32>,
         uid: u32,
     }
@@ -886,15 +981,23 @@ mod tests {
                 .collect();
             Self {
                 processes: RefCell::new(processes),
+                exes: RefCell::new(BTreeMap::new()),
                 pane: pane.to_vec(),
                 uid: 501,
             }
+        }
+
+        fn runs(&self, pid: u32, exe: &str) {
+            self.exes.borrow_mut().insert(pid, PathBuf::from(exe));
         }
     }
 
     impl OwnerLookup for FakeLookup {
         fn identity(&self, pid: u32) -> Option<ProcessIdentity> {
             self.processes.borrow().get(&pid).copied()
+        }
+        fn executable(&self, pid: u32) -> Option<PathBuf> {
+            self.exes.borrow().get(&pid).cloned()
         }
         fn in_pane(&self, pid: u32) -> bool {
             self.pane.contains(&pid)
@@ -1049,52 +1152,140 @@ mod tests {
             reported_at: NOW,
             owner: None,
             uid: 501,
+            owner_exe: Some(PathBuf::from(format!(
+                "/opt/bin/{}",
+                Path::new(argv[0]).file_name().unwrap().to_str().unwrap()
+            ))),
+            not_resumed: None,
             attempted: false,
             exited_at: None,
             started_at: None,
         }
     }
 
+    /// `/opt/bin` holds every program; paths are already canonical.
+    fn decide(record: &ResumeRecord, policy: &ResumePolicy) -> Result<PathBuf, &'static str> {
+        restore_decision(
+            record,
+            policy,
+            true,
+            Some(501),
+            |path| Some(path.to_path_buf()),
+            |name| Some(PathBuf::from(format!("/opt/bin/{name}"))),
+            |path| path == Path::new("/src"),
+        )
+    }
+
+    #[test]
+    fn a_child_claiming_a_trusted_name_is_recorded_but_never_resumed() {
+        let lookup = FakeLookup::new(&[7]);
+        lookup.runs(7, "/bin/sh");
+        let mut pane = PaneResume::new(Some(TOKEN.into()), None);
+        let report = signed(&format!(
+            "pid=7:time={NOW}:argv={},{},{}",
+            b64("nvim"),
+            b64("-c"),
+            b64("!touch /tmp/owned")
+        ));
+        assert_eq!(pane.receive(&report, NOW, &lookup), Outcome::Recorded);
+        let record = pane.record().unwrap();
+        assert_eq!(record.owner_exe.as_deref(), Some(Path::new("/bin/sh")));
+        assert_eq!(decide(record, &ResumePolicy::default()), Err(UNBOUND));
+    }
+
+    #[test]
+    fn the_program_that_reported_is_resumed_from_its_own_file() {
+        let lookup = FakeLookup::new(&[7]);
+        lookup.runs(7, "/opt/bin/nvim");
+        let mut pane = PaneResume::new(Some(TOKEN.into()), None);
+        let report = signed(&format!(
+            "pid=7:time={NOW}:argv={},{}",
+            b64("nvim"),
+            b64("-S")
+        ));
+        pane.receive(&report, NOW, &lookup);
+        assert_eq!(
+            decide(pane.record().unwrap(), &ResumePolicy::default()),
+            Ok(PathBuf::from("/opt/bin/nvim"))
+        );
+    }
+
+    #[test]
+    fn a_wrapper_that_reports_then_runs_its_target_is_bound_after_the_refresh() {
+        let lookup = FakeLookup::new(&[7]);
+        lookup.runs(7, "/bin/sh");
+        let mut pane = PaneResume::new(Some(TOKEN.into()), None);
+        pane.receive(&set_report(7, NOW, "nvim"), NOW, &lookup);
+        assert_eq!(
+            decide(pane.record().unwrap(), &ResumePolicy::default()),
+            Err(UNBOUND)
+        );
+        // The wrapper execs its target: same pid and start, new executable.
+        lookup.runs(7, "/opt/bin/nvim");
+        pane.refresh(NOW + 1, &lookup);
+        assert_eq!(
+            decide(pane.record().unwrap(), &ResumePolicy::default()),
+            Ok(PathBuf::from("/opt/bin/nvim"))
+        );
+    }
+
+    #[test]
+    fn a_different_program_first_on_path_or_another_absolute_file_is_refused() {
+        let policy = ResumePolicy::default();
+        let real = record(&["nvim"], None);
+        let shadowed = restore_decision(
+            &real,
+            &policy,
+            true,
+            Some(501),
+            |path| Some(path.to_path_buf()),
+            |name| Some(PathBuf::from(format!("/home/user/bin/{name}"))),
+            |_| true,
+        );
+        assert!(matches!(shadowed, Err(reason) if reason.contains("PATH")));
+        let mut absolute = record(&["/opt/bin/nvim"], None);
+        assert_eq!(
+            decide(&absolute, &policy),
+            Ok(PathBuf::from("/opt/bin/nvim"))
+        );
+        absolute.argv[0] = "/usr/bin/nvim".into();
+        assert_eq!(decide(&absolute, &policy), Err(UNBOUND));
+        let mut renamed = record(&["nvim"], None);
+        renamed.owner_exe = Some(PathBuf::from("/opt/bin/vim"));
+        assert_eq!(decide(&renamed, &policy), Err(UNBOUND));
+        let mut never_seen = record(&["nvim"], None);
+        never_seen.owner_exe = None;
+        assert_eq!(decide(&never_seen, &policy), Err(UNBOUND));
+    }
+
     #[test]
     fn only_trusted_settled_same_user_records_with_a_directory_are_resumed() {
         let policy = ResumePolicy::default();
-        let exists = |path: &Path| path == Path::new("/src");
-        let refuse = |record: &ResumeRecord, enabled, uid| {
-            restore_refusal(record, &policy, enabled, uid, exists)
-        };
-        assert_eq!(
-            refuse(&record(&["nvim"], Some("/src")), true, Some(501)),
-            None
+        assert!(decide(&record(&["nvim"], Some("/src")), &policy).is_ok());
+        assert!(decide(&record(&["/opt/bin/nvim", "-S", "x"], None), &policy).is_ok());
+        assert!(decide(&record(&["ssh", "host"], None), &policy).is_err());
+        assert!(decide(&record(&["nvim"], Some("/gone")), &policy).is_err());
+        let mut other_user = record(&["nvim"], None);
+        other_user.uid = 502;
+        assert!(decide(&other_user, &policy).is_err());
+        let off = restore_decision(
+            &record(&["nvim"], None),
+            &policy,
+            false,
+            Some(501),
+            |path| Some(path.to_path_buf()),
+            |name| Some(PathBuf::from(format!("/opt/bin/{name}"))),
+            |_| true,
         );
-        assert_eq!(
-            refuse(
-                &record(&["/opt/bin/nvim", "-S", "x"], None),
-                true,
-                Some(501)
-            ),
-            None
-        );
-        assert!(refuse(&record(&["ssh", "host"], None), true, Some(501)).is_some());
-        assert!(refuse(&record(&["nvim"], Some("/gone")), true, Some(501)).is_some());
-        assert!(refuse(&record(&["nvim"], None), true, Some(502)).is_some());
-        assert!(refuse(&record(&["nvim"], None), false, Some(501)).is_some());
+        assert!(off.is_err());
         let mut attempted = record(&["nvim"], None);
         attempted.attempted = true;
-        assert!(refuse(&attempted, true, Some(501)).is_some());
+        assert!(decide(&attempted, &policy).is_err());
         let all = ResumePolicy {
             trusted: vec!["*".into()],
             allow_elevated: false,
         };
-        assert_eq!(
-            restore_refusal(
-                &record(&["ssh", "host"], None),
-                &all,
-                true,
-                Some(501),
-                exists
-            ),
-            None
-        );
+        assert!(decide(&record(&["ssh", "host"], None), &all).is_ok());
     }
 
     #[test]

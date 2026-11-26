@@ -1573,6 +1573,9 @@ pub enum ControlResponseData {
         argv: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<PathBuf>,
+        /// The verified executable to run, with `argv[0]` as its name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        program: Option<PathBuf>,
     },
     ResumeDropped,
     Snapshot {
@@ -2472,7 +2475,7 @@ pub struct ControlPlane {
     pane_status: HashMap<u64, String>,
     /// One-time program resume handoffs typed into restored panes, not yet
     /// claimed, keyed by handoff id.
-    resume_handoffs: HashMap<String, u64>,
+    resume_handoffs: HashMap<String, (u64, PathBuf)>,
     /// Claimed handoffs whose program may still report that it failed.
     resume_claimed: HashMap<String, u64>,
     /// Last applied `queue_rev` per pane. Survives Clear so a delayed older
@@ -4501,19 +4504,22 @@ impl ControlPlane {
         &mut self,
         pane: u64,
         record: crate::program_resume::ResumeRecord,
-        resume: bool,
+        verified: Option<PathBuf>,
+        not_resumed: Option<&str>,
     ) -> Option<String> {
-        let command = resume
-            .then(|| {
-                let pmux = crate::program_resume::pmux_executable()?;
-                let id = crate::program_resume::new_token().ok()?;
-                Some((crate::program_resume::handoff_command(&pmux, &id)?, id))
-            })
-            .flatten();
+        let command = verified.and_then(|program| {
+            let pmux = crate::program_resume::pmux_executable()?;
+            let id = crate::program_resume::new_token().ok()?;
+            Some((
+                crate::program_resume::handoff_command(&pmux, &id)?,
+                id,
+                program,
+            ))
+        });
         let live = self.live.as_mut()?;
-        live.restore_resume_record(pane, record, command.is_some());
-        let (command, id) = command?;
-        self.resume_handoffs.insert(id, pane);
+        live.restore_resume_record(pane, record, command.is_some(), not_resumed);
+        let (command, id, program) = command?;
+        self.resume_handoffs.insert(id, (pane, program));
         Some(command)
     }
 
@@ -4528,7 +4534,11 @@ impl ControlPlane {
                 "unknown or already used program resume",
             )
         };
-        let pane = *self.resume_handoffs.get(handoff).ok_or_else(unknown)?;
+        let (pane, program) = self
+            .resume_handoffs
+            .get(handoff)
+            .cloned()
+            .ok_or_else(unknown)?;
         let live = self.live.as_mut().ok_or_else(unknown)?;
         if !live.resume_started(pane, pid) {
             return Err(ControlError::new(
@@ -4542,6 +4552,7 @@ impl ControlPlane {
         Ok(ControlResponseData::ResumeCommand {
             argv: record.argv,
             cwd: record.cwd,
+            program: Some(program),
         })
     }
 
@@ -13611,7 +13622,12 @@ function Read-Exact([int]$Count) {
         crate::program_resume::TEST_PMUX
             .with(|path| *path.borrow_mut() = Some(PathBuf::from("/opt/pmux it/pmux")));
         let command = plane
-            .restore_resume(pane_id, record.clone(), true)
+            .restore_resume(
+                pane_id,
+                record.clone(),
+                Some(PathBuf::from("/opt/bin/nvim")),
+                None,
+            )
             .expect("a handoff command");
         let id = command
             .strip_prefix("'/opt/pmux it/pmux' resume-run ")
@@ -13646,10 +13662,11 @@ function Read-Exact([int]$Count) {
         let child = plane.live.as_ref().unwrap().child_pid(pane_id).unwrap();
         match start(&mut plane, child).body {
             ControlResponseBody::Ok {
-                response: ControlResponseData::ResumeCommand { argv, cwd },
+                response: ControlResponseData::ResumeCommand { argv, cwd, program },
             } => {
                 assert_eq!(argv, record.argv);
                 assert_eq!(cwd.as_deref(), Some(Path::new("/tmp")));
+                assert_eq!(program.as_deref(), Some(Path::new("/opt/bin/nvim")));
             }
             other => panic!("{other:?}"),
         }
@@ -13680,14 +13697,14 @@ function Read-Exact([int]$Count) {
             .unwrap()
             .resume_record(pane_id)
             .is_none());
-        // Not resumed: the record stays for the next restart, with no handoff.
-        assert_eq!(plane.restore_resume(pane_id, record, false), None);
-        assert!(plane
-            .live
-            .as_ref()
-            .unwrap()
-            .resume_record(pane_id)
-            .is_some());
+        // Not resumed: the record stays for the next restart, with no handoff,
+        // and says why.
+        assert_eq!(
+            plane.restore_resume(pane_id, record, None, Some("not trusted here")),
+            None
+        );
+        let kept = plane.live.as_ref().unwrap().resume_record(pane_id).unwrap();
+        assert_eq!(kept.not_resumed.as_deref(), Some("not trusted here"));
     }
 
     #[test]

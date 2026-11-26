@@ -1081,11 +1081,15 @@ impl LiveRuntime {
         pane_id: u64,
         record: crate::program_resume::ResumeRecord,
         resuming: bool,
+        not_resumed: Option<&str>,
     ) {
         if let Some(pane) = self.panes.get_mut(&pane_id) {
             pane.resume.restore(record);
             if resuming {
                 pane.resume.mark_attempted();
+            }
+            if let Some(reason) = not_resumed {
+                pane.resume.note_not_resumed(reason);
             }
         }
     }
@@ -1926,6 +1930,48 @@ mod tests {
         assert_eq!(record.argv, ["nvim", "-S", "a b"]);
         assert_eq!(record.cwd.as_deref(), Some(Path::new("/tmp")));
         assert_eq!(record.owner.map(|owner| owner.pid), pane.child_pid);
+        assert!(
+            record.owner_exe.is_some(),
+            "the owner's executable is recorded"
+        );
+    }
+
+    /// A process in the pane holds the token, so it can sign a report naming
+    /// any trusted program. The record is kept, but it is bound to what the
+    /// owner really runs, so it is never resumed.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_shell_claiming_a_trusted_editor_is_recorded_but_not_resumed() {
+        let script = format!(
+            "{} printf 'SENT\\n'; exec sleep 30",
+            resume_report_script(&["nvim", "-c", "!touch /tmp/owned"], "/tmp", None),
+        );
+        let spawn = SpawnSpec {
+            program: "/bin/sh".into(),
+            argv: vec!["-c".into(), script],
+            cwd: Some(PathBuf::from("/tmp")),
+            env: BTreeMap::new(),
+        };
+        let mut pane = spawn_test_pane(6, &spawn, None);
+        wait_for_pane_text(&mut pane, 6, "SENT");
+        let lookup = crate::program_resume::SystemLookup {
+            root: pane.child_pid,
+        };
+        pane.resume
+            .refresh(crate::program_resume::unix_now(), &lookup);
+        let record = pane.resume.record().expect("the signed report is recorded");
+        assert_eq!(record.argv[0], "nvim");
+        let path = std::env::var_os("PATH");
+        let decision = crate::program_resume::restore_decision(
+            record,
+            &crate::program_resume::ResumePolicy::default(),
+            true,
+            crate::program_resume::server_uid(),
+            |program| program.canonicalize().ok(),
+            |name| crate::program_resume::resolve_on_path(name, path.as_deref()),
+            |_| true,
+        );
+        assert_eq!(decision, Err(crate::program_resume::UNBOUND));
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

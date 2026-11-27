@@ -11119,6 +11119,7 @@ fn poll_host_attach_tabs(host: &mut HostState) {
             match file.space.as_deref() {
                 Some(name) if space_json_exists(name) => {
                     set_current_space(host, file.space.clone());
+                    restore_open_space_float(host, name);
                 }
                 Some(_) => {
                     file.space = None;
@@ -11164,6 +11165,39 @@ fn touch_host_attach_ack() {
         if let Err(error) = prismattyc_mux::touch_host_ack(&ack) {
             eprintln!("prismattyc-host: could not ack attach-tabs reload: {error}");
         }
+    }
+}
+
+/// Apply the saved overlay the first time this space's layout is shown.
+fn restore_open_space_float(host: &mut HostState, space: &str) {
+    let records = match prismattyc_mux::load_floats(&spaces_dir()) {
+        Ok(records) => records,
+        Err(error) => {
+            eprintln!("prismattyc-host: float record was not read: {error:#}");
+            return;
+        }
+    };
+    if let Err(error) = host.mux.apply_open_space_float(space, &records) {
+        eprintln!("prismattyc-host: float record was not applied: {error:#}");
+    }
+}
+
+/// Write this window's overlay beside the spaces directory.
+/// A window with no current space does not touch the file.
+fn store_current_float(host: &mut HostState) {
+    let Some(space) = host.space_rail.current.clone() else {
+        return;
+    };
+    let mut records = match prismattyc_mux::load_floats(&spaces_dir()) {
+        Ok(records) => records,
+        Err(error) => {
+            eprintln!("prismattyc-host: float record was not read: {error:#}");
+            return;
+        }
+    };
+    host.mux.sync_saved_float(&space, &mut records);
+    if let Err(error) = prismattyc_mux::save_floats(&spaces_dir(), &records) {
+        eprintln!("prismattyc-host: float record was not saved: {error:#}");
     }
 }
 
@@ -11909,6 +11943,7 @@ fn apply_pane_context_action(
         PaneContextAction::Float => {
             match host.mux.toggle_float(pane) {
                 Ok(true) => {
+                    store_current_float(host);
                     mark_layout_dirty(host);
                     host.dirty = true;
                     host.window.request_redraw();
@@ -18287,11 +18322,26 @@ fn apply_mux_layout_command(
                 .inspect(|_| register_even_layout_attaches(host, &before, program, child_args))
                 .map(MuxApplyResult::Changed)
         }
-        MuxLayoutCommand::ZoomPane => host.mux.toggle_zoom().map(MuxApplyResult::Changed),
-        MuxLayoutCommand::Close => match host.mux.close_focused()? {
-            _changed if host.mux.all_children_exited() => Ok(MuxApplyResult::Exit),
-            changed => Ok(MuxApplyResult::Changed(changed)),
-        },
+        MuxLayoutCommand::ZoomPane => {
+            let had_float = host.mux.floated_pane().is_some();
+            let result = host.mux.toggle_zoom().map(MuxApplyResult::Changed);
+            if had_float {
+                store_current_float(host);
+            }
+            result
+        }
+        MuxLayoutCommand::Close => {
+            let had_float = host.mux.floated_pane().is_some();
+            match host.mux.close_focused()? {
+                _changed if host.mux.all_children_exited() => Ok(MuxApplyResult::Exit),
+                changed => {
+                    if had_float {
+                        store_current_float(host);
+                    }
+                    Ok(MuxApplyResult::Changed(changed))
+                }
+            }
+        }
     }
 }
 
@@ -22391,6 +22441,7 @@ impl ApplicationHandler<UserAction> for App {
                     return;
                 }
                 if state == ElementState::Released && host.mux.end_float_drag() {
+                    store_current_float(host);
                     host.cursor_cell = None;
                     host.window.request_redraw();
                     return;

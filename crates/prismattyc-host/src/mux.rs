@@ -19,12 +19,11 @@ use anyhow::{Context, Result};
 use portable_pty::PtySize;
 use prismattyc_core::{Cursor, GridDamage, Selection};
 use prismattyc_emulator::{CursorShape, Emulator, PlacedImage, PtySession};
-#[cfg(test)]
-use prismattyc_mux::SavedFloat;
 use prismattyc_mux::{
     apply_arrangement, even_horizontal_row, even_two_row_grid, even_vertical_column,
     layout_to_rects, rects_with_float, Arrangement, Axis, CellRect, ClientView, Domain, PaneId,
-    PaneLayout, SessionId, SizeOwner, WindowId, DEFAULT_MIN_COLS, DEFAULT_MIN_ROWS,
+    PaneLayout, SavedFloat, SavedFloats, SessionId, SizeOwner, WindowId, DEFAULT_MIN_COLS,
+    DEFAULT_MIN_ROWS,
 };
 use prismattyc_protocol::{InputModifiers, PointerPhase, ViewerId};
 
@@ -3013,6 +3012,9 @@ pub(crate) struct MuxRuntime {
     floated: Option<FloatPlacement>,
     /// Armed while the pointer is dragging the overlay.
     float_drag: Option<FloatDrag>,
+    /// Space whose saved overlay was applied. A later layout refresh for the
+    /// same space does not pull the pane back.
+    float_restored_space: Option<String>,
 }
 
 impl MuxRuntime {
@@ -3150,6 +3152,7 @@ impl MuxRuntime {
             zoomed: None,
             floated: None,
             float_drag: None,
+            float_restored_space: None,
         })
     }
 
@@ -4178,7 +4181,6 @@ impl MuxRuntime {
     }
 
     /// The active overlay as a record keyed by session and place.
-    #[cfg(test)]
     pub(crate) fn float_record(&self, space: &str) -> Option<SavedFloat> {
         let placement = self.floated?;
         let session = self.pane_session_name(placement.pane)?;
@@ -4203,8 +4205,72 @@ impl MuxRuntime {
         })
     }
 
+    /// Replace this window's saved overlay with the live one, or drop it
+    /// when the window is tiled.
+    pub(crate) fn sync_saved_float(&self, space: &str, records: &mut SavedFloats) {
+        let Some(session) = self
+            .floated
+            .and_then(|placement| self.pane_session_name(placement.pane))
+            .or_else(|| self.pane_session_name(self.focused_id()))
+        else {
+            return;
+        };
+        let Ok(window_slot) = u32::try_from(self.selected_tab_index()) else {
+            return;
+        };
+        records.floats.retain(|saved| {
+            !(saved.space == space && saved.session == session && saved.window_slot == window_slot)
+        });
+        if let Some(record) = self.float_record(space) {
+            records.upsert(record);
+        }
+    }
+
+    /// Float the pane named by this space's record for the active window.
+    /// `Ok(false)` when that place was not saved or is not in the window.
+    pub(crate) fn restore_space_float(
+        &mut self,
+        space: &str,
+        records: &SavedFloats,
+    ) -> Result<bool> {
+        if self.floated.is_some() && self.floated_here().is_none() {
+            self.floated = None;
+            self.float_drag = None;
+        }
+        let Some(session) = self.pane_session_name(self.focused_id()) else {
+            return Ok(false);
+        };
+        let Ok(window_slot) = u32::try_from(self.selected_tab_index()) else {
+            return Ok(false);
+        };
+        let Some(saved) = records.floats.iter().find(|saved| {
+            saved.space == space && saved.session == session && saved.window_slot == window_slot
+        }) else {
+            return Ok(false);
+        };
+        self.restore_float(saved)
+    }
+
+    /// Apply `records` for `space` the first time that space's layout is shown.
+    /// A later refresh of the same space leaves a moved overlay where it is.
+    /// A record that cannot be applied yet stays pending for the next refresh.
+    pub(crate) fn apply_open_space_float(
+        &mut self,
+        space: &str,
+        records: &SavedFloats,
+    ) -> Result<bool> {
+        if self.float_restored_space.as_deref() == Some(space) {
+            return Ok(false);
+        }
+        let applied = self.restore_space_float(space, records)?;
+        let pending = records.floats.iter().any(|saved| saved.space == space) && !applied;
+        if !pending {
+            self.float_restored_space = Some(space.to_string());
+        }
+        Ok(applied)
+    }
+
     /// Float the pane named by `saved` when it is on the active session and tab.
-    #[cfg(test)]
     pub(crate) fn restore_float(&mut self, saved: &SavedFloat) -> Result<bool> {
         let session = self
             .domain
@@ -9358,6 +9424,72 @@ mod tests {
         assert!(runtime.toggle_float(right).unwrap());
         assert_eq!(runtime.floated_pane(), None);
         assert_eq!(runtime.rects().collect::<Vec<_>>(), tiled);
+    }
+
+    #[test]
+    fn opening_a_space_applies_the_saved_overlay_and_a_later_refresh_keeps_a_move() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let left = runtime.focused_id();
+        let right = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        let overlay = CellRect {
+            col: 10,
+            row: 4,
+            cols: 30,
+            rows: 8,
+        };
+        assert!(runtime.float_pane(right, overlay).unwrap());
+        let mut records = SavedFloats::default();
+        runtime.sync_saved_float("work", &mut records);
+        assert_eq!(records.floats.len(), 1);
+        let saved = &records.floats[0];
+        assert_eq!(saved.space, "work");
+        assert_eq!(saved.session, "default");
+        assert_eq!(
+            (saved.window_slot, saved.pane_slot),
+            (0, 1),
+            "the record names the window and the depth-first pane"
+        );
+        assert_eq!(
+            (saved.col, saved.row, saved.cols, saved.rows),
+            (10, 4, 30, 8)
+        );
+
+        assert!(runtime.dock_float().unwrap());
+        assert!(
+            runtime.apply_open_space_float("work", &records).unwrap(),
+            "opening the space applies the saved overlay"
+        );
+        assert_eq!(
+            runtime.rects().collect::<Vec<_>>(),
+            vec![(left, full_rect(&runtime)), (right, overlay)]
+        );
+        assert_eq!(runtime.active_pane_count(), 2);
+
+        assert!(runtime.move_float(20, 6).unwrap());
+        let moved = CellRect {
+            col: 20,
+            row: 6,
+            cols: 30,
+            rows: 8,
+        };
+        assert!(
+            !runtime.apply_open_space_float("work", &records).unwrap(),
+            "a later layout refresh leaves the moved overlay"
+        );
+        assert_eq!(
+            runtime.rects().collect::<Vec<_>>(),
+            vec![(left, full_rect(&runtime)), (right, moved)],
+            "a later layout refresh does not snap the overlay back"
+        );
+
+        assert!(runtime.dock_float().unwrap());
+        runtime.sync_saved_float("work", &mut records);
+        assert!(
+            records.floats.is_empty(),
+            "docking drops this window's saved overlay"
+        );
     }
 
     #[test]

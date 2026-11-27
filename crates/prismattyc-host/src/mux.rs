@@ -2102,16 +2102,15 @@ impl PaneRuntime {
     }
 
     fn drain_grants(&mut self) {
-        while let Ok(grant) = self.grant_rx.try_recv() {
-            match grant {
-                #[cfg(native_transport)]
-                CapabilityGrant::Native(receipt) => {
-                    if let Some(native) = &mut self.native {
-                        native.authority.authorize_written_offer(receipt);
-                    }
-                }
+        #[cfg(native_transport)]
+        while let Ok(CapabilityGrant::Native(receipt)) = self.grant_rx.try_recv() {
+            if let Some(native) = &mut self.native {
+                native.authority.authorize_written_offer(receipt);
             }
         }
+        // Without native sessions no grant exists, so nothing can arrive.
+        #[cfg(not(native_transport))]
+        let _ = self.grant_rx.try_recv();
     }
 
     fn drain_until(&mut self, deadline: Option<Instant>) -> (bool, bool, bool) {

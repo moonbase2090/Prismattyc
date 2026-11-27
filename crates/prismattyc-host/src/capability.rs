@@ -107,6 +107,8 @@ pub(crate) fn drain_emulator_replies(
 /// How a [`CapabilityHost`] handled a capability query.
 #[cfg(any(test, native_transport))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Only native sessions decline a query; other targets' tests only answer.
+#[cfg_attr(not(native_transport), allow(dead_code))]
 pub(crate) enum QueryReply {
     /// Not answered: the query was not for this host, or the reply could
     /// not be made.

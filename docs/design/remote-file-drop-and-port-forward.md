@@ -92,8 +92,8 @@ remote by scraping tab titles, prompts, or local shell command lines.
 2. **`RemoteTransport` seam (future-proofing identity-based remotes):**
    ```rust
    enum RemoteLoopback {
-       Ipv4, // 127.0.0.1
-       Ipv6, // [::1]
+       Ipv4(Ipv4Addr), // exact validated loopback address in 127.0.0.0/8 (e.g. 127.0.0.1, 127.0.0.2)
+       Ipv6,           // [::1]
    }
 
    trait RemoteTransport {
@@ -132,10 +132,13 @@ remote by scraping tab titles, prompts, or local shell command lines.
      - `Host::Ipv6(ip)` where `ip.is_loopback()` (`::1`) or
        `ip.is_unspecified()` (`::`),
    - resolved port (`url.port_or_known_default()`) is in `1..=65535`.
-3. Normalize unspecified addresses by address family — never forward to an
-   unspecified address:
-   - `0.0.0.0`, `127.0.0.0/8`, and `localhost` target remote `127.0.0.1`
-     (`RemoteLoopback::Ipv4`).
+3. Preserve explicit loopback addresses and normalize only unspecified
+   addresses by address family — never forward to an unspecified address:
+   - `Host::Ipv4(ip)` with `ip.is_loopback()` (`127.0.0.0/8`) preserves the
+     exact validated address (`RemoteLoopback::Ipv4(ip)`, e.g., `127.0.0.2`
+     stays `127.0.0.2` in the tunnel target, confirmation modal, and reuse
+     key) so services bound to distinct `127/8` addresses are never conflated.
+   - `localhost` and `0.0.0.0` normalize to `RemoteLoopback::Ipv4(127.0.0.1)`.
    - `::` and `::1` target remote `[::1]` (`RemoteLoopback::Ipv6`) so
      IPv6-only listeners bound to `::` remain reachable.
 4. For **local panes** (no `RemotePaneBinding`), behavior is unchanged: open
@@ -165,7 +168,8 @@ ssh -N -T \
   -- <ssh_alias>
 ```
 
-where `<remote_loopback>` is `127.0.0.1` (`RemoteLoopback::Ipv4`) or `[::1]`
+where `<remote_loopback>` is the exact validated IPv4 loopback address
+(`RemoteLoopback::Ipv4(ip)`, e.g. `127.0.0.1` or `127.0.0.2`) or `[::1]`
 (`RemoteLoopback::Ipv6`).
 
 Why one `ssh -N` child per forward instead of `ControlMaster` / `ssh -O forward`:
@@ -203,8 +207,9 @@ silently open a local listening socket.
 - **Click on a new `(destination, remote_loopback, remote_port)`:** open a host confirmation
   modal (following `restart_modal.rs`) displaying:
   - Remote destination label and SSH alias,
-  - Remote target (`127.0.0.1:<remote_port>` or `[::1]:<remote_port>`) and local
-    bind (`127.0.0.1:<local_port>`),
+  - Remote target (`<remote_loopback>:<remote_port>`, e.g.,
+    `127.0.0.1:<remote_port>`, `127.0.0.2:<remote_port>`, or
+    `[::1]:<remote_port>`) and local bind (`127.0.0.1:<local_port>`),
   - Exact local URL that will open in the browser,
   - Explicit warning if an OSC 8 link's visible text does not match its
     parsed host/port,
@@ -295,11 +300,22 @@ immediately on Cancel, modal dismissal, or pane close):
    `FILE_ATTRIBUTE_DIRECTORY` and `FILE_ATTRIBUTE_REPARSE_POINT` are clear, and
    record the approved size from that handle. Stream from that exact `HANDLE`
    after consent.
-3. **Exact-length streaming guard:** enforce size caps (default 64 MiB/file,
-   128 MiB/batch; configurable) against the pinned-handle sizes before consent,
-   and while streaming verify that EOF occurs at the exact approved byte length
-   (aborting the upload if the underlying file shrank or grew after consent so
-   the remote side never receives unapproved bytes).
+3. **Consent scope and exact-length streaming guard:**
+   - **What approval covers:** user consent approves the **selected pinned file
+     identity and approved byte size, with bytes read from that pinned handle
+     at upload time**. Pinning the handle closes path/symlink replacement races
+     between validation and upload; on Unix, an in-place same-size overwrite of
+     the same inode while the modal is open is not snapshotted, whereas any
+     size change (growth or truncation) aborts the upload.
+   - Enforce size caps (default 64 MiB/file, 128 MiB/batch; configurable)
+     against the pinned-handle sizes before consent. While streaming, read up
+     to `bytes` from the pinned handle and then probe 1 additional byte to
+     confirm EOF at the exact approved length. Only when EOF matches `bytes`
+     does the sender emit the final commit trailer (`{"commit":true}\n`); on
+     any short read, extra trailing byte (growth discovered after `bytes` were
+     sent), or I/O error, the sender omits the commit trailer (or sends
+     `{"commit":false}\n`) and closes stdin so the receiver discards and
+     unlinks the upload.
 
 **Consent modal (following `restart_modal.rs`):**
 
@@ -334,7 +350,11 @@ ssh -T -o BatchMode=yes -o ConnectTimeout=10 -- <ssh_alias> pmux drop-receive
    ```json
    {"version":1,"name":"screenshot.png","bytes":48210,"session_id":42}
    ```
-   followed immediately by exactly `bytes` of raw file data, then closes stdin.
+   followed immediately by exactly `bytes` of raw file data, and after verifying
+   EOF on the pinned local handle at exactly `bytes`, writes a single-line
+   commit trailer (`{"commit":true}\n`) and closes stdin. If the pinned file
+   shrank, grew past `bytes`, or errored during read, the host closes stdin
+   without sending `{"commit":true}\n` (or sends `{"commit":false}\n`).
 2. Remote `pmux drop-receive`:
    - Rejects unknown versions, `bytes > max_drop_bytes` (default 64 MiB), or
      malformed headers before creating any file.
@@ -348,9 +368,13 @@ ssh -T -o BatchMode=yes -o ConnectTimeout=10 -- <ssh_alias> pmux drop-receive
    - Creates the destination file with `O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW`
      and mode **`0600`** using a random 64-bit hex prefix from `getrandom`
      (`<hex16>-<sanitized_name>`).
-   - Copies **exactly** `bytes` from stdin (failing and unlinking the partial
-     file on short read, extra trailing bytes, or I/O error), calls `sync_all`,
-     and emits one JSON line to stdout:
+   - Copies **exactly** `bytes` from stdin, then requires the explicit
+     `{"commit":true}\n` trailer followed immediately by EOF before calling
+     `sync_all` and emitting one JSON line to stdout. On short read, missing or
+     `false` commit trailer (including when the sender detects file growth
+     after `bytes` have been transmitted), unexpected trailing bytes after the
+     trailer, or I/O error, `pmux drop-receive` **unlinks the file and exits
+     non-zero**:
      ```json
      {"version":1,"path":"/run/user/1000/prism-drops/s-42/9f4c2a1b8e3d7051-screenshot.png"}
      ```
@@ -492,10 +516,11 @@ behavior):
     `[::1]`), fetch through the forwarded local `127.0.0.1` port, verify
     `GatewayPorts=no` and clean teardown when the forward is stopped or the
     last remote tab closes.
-  - Unit tests for localhost URL classification (`localhost`, `127.x`,
-    `0.0.0.0` -> `127.0.0.1`, `[::1]` -> `[::1]`, `[::]` -> `[::1]`,
-    non-localhost ignored, OSC 8 mismatch flagged, port collision fallback to
-    ephemeral local port, cap enforcement).
+  - Unit tests for localhost URL classification (`localhost` -> `127.0.0.1`,
+    `0.0.0.0` -> `127.0.0.1`, explicit `127.0.0.2` preserved as `127.0.0.2`
+    with distinct reuse key from `127.0.0.1`, `[::1]` -> `[::1]`,
+    `[::]` -> `[::1]`, non-localhost ignored, OSC 8 mismatch flagged, port
+    collision fallback to ephemeral local port, cap enforcement).
   - Windows VM proof: verify `ssh.exe -N` runs without console flash, opens the
     local browser via `ShellExecuteW`, and terminates cleanly via Job Object on
     host exit.
@@ -508,8 +533,11 @@ behavior):
     directories, FIFOs, traversal names (`../x`), trailing bytes, and Windows
     UNC / `.lnk` / reparse-point paths; verify that replacing a dropped path
     (with a symlink or another file) after the consent modal opens cannot swap
-    the uploaded bytes (the pinned handle streams the approved content or fails
-    closed on length mismatch).
+    the selected file handle (the pinned handle reads from the approved inode
+    and size at upload time), and verify that both file truncation and file
+    growth after consent cause the sender to omit/negate the commit trailer and
+    `pmux drop-receive` to unlink and reject the upload (including after all
+    announced `bytes` have been streamed).
   - Host UI tests: consent modal cancels cleanly without spawning `ssh`,
     "Upload and paste path" delivers via `PasteJobs` with bracketed paste and
     no newline, and "Upload and copy path" writes clipboard only.

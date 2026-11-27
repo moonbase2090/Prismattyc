@@ -4031,7 +4031,6 @@ impl MuxRuntime {
     /// Lift `pane` into a client overlay at `rect` and reflow the tile.
     /// Clears zoom. `Ok(false)` when `pane` is not on the active tab.
     /// The placement is rolled back when the rectangles cannot be applied.
-    #[cfg(test)]
     pub(crate) fn float_pane(&mut self, pane: PaneId, rect: CellRect) -> Result<bool> {
         let on_tab = self
             .domain
@@ -4053,6 +4052,29 @@ impl MuxRuntime {
             return Err(error);
         }
         Ok(true)
+    }
+
+    /// The floated pane when it is on the active tab.
+    pub(crate) fn floated_pane(&self) -> Option<PaneId> {
+        self.floated_here()
+    }
+
+    /// Float `pane`, or dock it when it is already the overlay.
+    /// A tab with one pane stays tiled. `Ok(false)` when `pane` cannot float.
+    pub(crate) fn toggle_float(&mut self, pane: PaneId) -> Result<bool> {
+        if self.floated_here() == Some(pane) {
+            return self.dock_float();
+        }
+        if self.active_pane_count() < 2 {
+            return Ok(false);
+        }
+        let rect = CellRect {
+            col: self.cols / 8,
+            row: self.rows / 6,
+            cols: (self.cols / 2).max(1),
+            rows: (self.rows / 3).max(1),
+        };
+        self.float_pane(pane, rect)
     }
 
     /// Move the overlay to `col`, `row`. The size stays. `Ok(false)` when
@@ -9304,6 +9326,38 @@ mod tests {
             runtime.rects().collect::<Vec<_>>(),
             vec![(left, full_rect(&runtime))]
         );
+    }
+
+    #[test]
+    fn toggle_float_lifts_the_pane_and_a_second_call_docks_it() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let only = runtime.focused_id();
+        assert!(!runtime.toggle_float(only).unwrap());
+        let left = only;
+        let right = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        let tiled = runtime.rects().collect::<Vec<_>>();
+        runtime.focus(right);
+        assert!(runtime.toggle_zoom().unwrap());
+        assert!(runtime.toggle_float(right).unwrap());
+        assert_eq!(runtime.zoomed_pane(), None);
+        assert_eq!(runtime.floated_pane(), Some(right));
+        let overlay = CellRect {
+            col: 10,
+            row: 4,
+            cols: 40,
+            rows: 8,
+        };
+        assert_eq!(
+            runtime.rects().collect::<Vec<_>>(),
+            vec![(left, full_rect(&runtime)), (right, overlay)],
+            "the menu float uses one inset overlay"
+        );
+        assert_eq!(runtime.active_pane_count(), 2);
+        assert!(runtime.toggle_float(right).unwrap());
+        assert_eq!(runtime.floated_pane(), None);
+        assert_eq!(runtime.rects().collect::<Vec<_>>(), tiled);
     }
 
     #[test]

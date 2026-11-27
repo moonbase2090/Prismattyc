@@ -1842,6 +1842,7 @@ enum PaneContextAction {
     Detach,
     Close,
     SaveSpace,
+    Float,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1896,6 +1897,7 @@ fn context_menu_choice(kind: ContextMenuKind, index: usize) -> ContextMenuChoice
                 9 => PaneContextAction::MoveSessionToSpace,
                 10 => PaneContextAction::RemoveSessionFromSpace,
                 11 => PaneContextAction::RemoveAndKillSession,
+                12 => PaneContextAction::Float,
                 _ => return ContextMenuChoice::Noop,
             };
             ContextMenuChoice::Pane(action)
@@ -11457,6 +11459,11 @@ fn context_menu_rows(host: &HostState) -> Option<(String, Vec<PaletteRow>)> {
                     "Remove and kill session…",
                     "Remove from Space and stop its processes",
                 ),
+                if host.mux.floated_pane() == Some(pane) {
+                    ("Dock pane", "Put this pane back in the tile")
+                } else {
+                    ("Float pane", "Lift this pane into an overlay")
+                },
             ];
             (
                 header,
@@ -11896,6 +11903,18 @@ fn apply_pane_context_action(
                 save_space_from_host(host, &name);
             } else {
                 rail_error_toast(host, " create or open a space first ");
+            }
+            None
+        }
+        PaneContextAction::Float => {
+            match host.mux.toggle_float(pane) {
+                Ok(true) => {
+                    mark_layout_dirty(host);
+                    host.dirty = true;
+                    host.window.request_redraw();
+                }
+                Ok(false) => {}
+                Err(error) => eprintln!("prismattyc-host: float failed: {error:#}"),
             }
             None
         }
@@ -23412,6 +23431,7 @@ mod tests {
             (9, PaneContextAction::MoveSessionToSpace),
             (10, PaneContextAction::RemoveSessionFromSpace),
             (11, PaneContextAction::RemoveAndKillSession),
+            (12, PaneContextAction::Float),
         ];
         for (index, expected) in panes {
             assert_eq!(
@@ -23421,7 +23441,7 @@ mod tests {
             );
         }
         assert_eq!(
-            context_menu_choice(ContextMenuKind::Pane, 12),
+            context_menu_choice(ContextMenuKind::Pane, 13),
             ContextMenuChoice::Noop
         );
         assert_eq!(

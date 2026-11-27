@@ -18,9 +18,15 @@ by an **overlay VPN** the host already uses. Each device gets its own key,
 installed with a **restricted `authorized_keys` entry** whose forced command is
 a small, fixed **companion gate** (`pmux companion gate`, proposed). The gate
 runs on the host as the user, talks to the local socket like any other `pmux`
-command, and accepts only a short list of verbs. The raw socket never leaves
-the host, and no caller reaches the gate without a device key that the user
-added by hand.
+command, and accepts only a short list of verbs. The companion path never puts
+the raw socket on the network, and no caller reaches the gate without a device
+key that the user added by hand.
+
+The restricted entry limits only the companion's own keys. Other ways into the
+same account, such as passwords or ordinary keys, are not limited by it. The
+note states which host settings it assumes, what pairing checks, and an
+optional companion-only SSH listener that closes those other paths on the
+network the companion uses.
 
 A dedicated network protocol for the pmux server is deferred. The gate's stdio
 framing is designed so that the same protocol could later run over another
@@ -253,6 +259,73 @@ accepts a replacement on an unverified connection.
 `pmux companion list` shows each device, its scope and when it last connected.
 On the overlay, removing the phone's node is a second, independent cut-off.
 
+### Other ways into the same account
+
+The gate constrains a connection only when the SSH server authenticated it
+with a companion key. The same account can usually also be reached:
+
+- with a password or keyboard-interactive login, if the SSH server allows them;
+- with any other key in `authorized_keys` that has no `command=` or `restrict`;
+- through other credentials the server accepts (certificates, other key files).
+
+Any of these gives a normal login shell. From that shell the caller can run
+`pmux` directly or forward the socket. The gate cannot stop this, and Prismattyc
+does not edit the host's SSH server configuration. The design therefore keeps
+three layers apart.
+
+**What the companion itself does.** The client offers only its own device key.
+It never uses an SSH agent, a password or an interactive prompt. A companion
+credential therefore always lands in the gate.
+
+**What the design assumes about the host.** On every address and port in the
+pairing code:
+
+1. The SSH server accepts public keys only. Password and keyboard-interactive
+   logins are off.
+2. Every other key the account accepts there belongs to someone the user
+   already trusts with a full shell on that account.
+
+When either is false, the companion adds no new exposure, but the account is
+only as safe as its weakest SSH credential. Neither the gate nor the overlay
+changes that.
+
+**What pairing checks.** `pmux companion pair` and `pmux companion list` report
+what they can see, without changing anything:
+
+- They probe the address and port in the pairing code for the authentication
+  methods the server offers (an authentication attempt with method `none`).
+  A warning is shown when `password` or `keyboard-interactive` is offered.
+- They list the account's `authorized_keys` entries that are not companion
+  entries and have no `command=` or `restrict`, as "full-access keys".
+- Neither check reads the server's configuration or needs elevated rights.
+
+**Optional hardening: a companion-only listener.** A user with admin rights can
+give the companion its own SSH listener, for example on the overlay address
+only. The settings below are applied by the user, never by Prismattyc:
+
+```
+# SSH server configuration, applied by an administrator
+Match LocalPort 2222
+    AuthenticationMethods publickey
+    AuthorizedKeysFile .ssh/prismattyc_companion_keys
+    DisableForwarding yes
+    ExposeAuthInfo yes
+    ForceCommand pmux companion gate --from-auth-info
+```
+
+- On this port the server reads only the companion key file, which holds only
+  entries pairing wrote.
+- Passwords, ordinary keys and every kind of forwarding are refused.
+- The gate always runs. `ForceCommand` replaces any per-key `command=`, so the
+  gate identifies the device from the key the server reports through
+  `ExposeAuthInfo` and looks it up in the companion key file. An unknown key
+  exits.
+
+When the ordinary SSH port is not reachable from the overlay, the only SSH path
+over the overlay goes through the gate. That is the configuration this note
+recommends for users who can apply it. Without it, the assumptions above
+apply.
+
 ## Threat note
 
 Assets:
@@ -264,15 +337,16 @@ Assets:
 
 | Threat | Effect | Mitigation | Residual risk |
 | --- | --- | --- | --- |
-| Anonymous caller on the network | Probes or brute-forces the host | No new listener. SSH key-only; on the overlay, SSH not exposed to the internet. | Option A's public SSH port depends on host SSH settings the project cannot enforce. Docs should say so. |
+| Anonymous caller on the network | Probes or brute-forces the host | No new listener. On the overlay, SSH is not exposed to the internet. Pairing warns when the server offers password or keyboard-interactive logins. | Key-only login is a host assumption the project cannot enforce. A public SSH port (option A) with passwords on is exposed to guessing. |
 | Interception on public Wi-Fi | Reads or alters the session | SSH encryption with host keys pinned at pairing; no trust on first use. | None beyond SSH itself. |
-| Socket forwarding to reach the raw control plane | Full control, including shutdown and plug-in admin | `restrict` turns off socket and port forwarding; the forced command cannot be bypassed. | A hand-edited entry without `restrict` loses this. `pmux companion list` should flag such entries. |
+| Socket forwarding to reach the raw control plane | Full control, including shutdown and plug-in admin | For companion keys, `restrict` turns off socket and port forwarding and the forced command cannot be bypassed. On the companion-only listener, `DisableForwarding` covers every key. | On an ordinary SSH port, other keys or a password can still forward the socket. `pmux companion list` flags full-access keys. |
+| Other credentials on the same account | A normal shell, bypassing the gate | Out of the gate's reach. Host assumptions are stated; pairing reports offered methods and full-access keys; the companion-only listener closes these paths on its port. | Without that listener, the account is as safe as its weakest SSH credential, with or without the companion. |
 | Gate command injection | Shell access through crafted verbs | Fixed grammar, no shell, identifiers checked against the catalog, refused input exits. | Gate bugs. The gate is small and gets its own tests. |
 | Lost or stolen phone | Someone types into panes | Key needs user presence (biometric or passcode) per connection. Revoke from the host. Watch-only scope for devices that do not need input. | A `drive` device that is unlocked and in hand can type commands. This is inherent to "full terminal input" and should be stated plainly in the app. |
 | Malicious app or backup on the phone | Copies the key | Key is non-exportable and never in backups. | A compromised OS can still ask the key store to sign while unlocked. |
 | Host key swapped by an attacker | Phishing host collects input | Pinned keys, hard stop, no override. | A user who re-pairs without checking the desktop. The pairing code comes from the desktop screen, not the network. |
 | Revoked device keeps a live session | Continued access after revoke | Revoke ends live gate processes. | A short window between key removal and the signal. |
-| Overlay account compromise | Attacker joins the overlay | Still needs an enrolled SSH key; `from=` alone is not trusted. | Network reach to the SSH port. |
+| Overlay account compromise | Attacker joins the overlay | Still needs an SSH credential the server accepts on the overlay. With the companion-only listener as the only SSH path there, that means an enrolled device key. `from=` alone is not trusted. | Without that listener, any credential the account accepts (another key, or a password if allowed) works over the overlay. |
 | Secrets in the inbox | Message text exposed on the lock screen | Inbox items carry attention messages, which are capped at 512 bytes. The app chooses lock-screen redaction. | App behavior, out of scope here. |
 
 Out of scope:
@@ -320,7 +394,23 @@ Checks (each must fail before the gate exists and pass after):
 9. `pmux companion revoke dev-drive` during a live attach ends that attach and
    makes the next connection fail. The watch device is unaffected.
 10. No new listening socket appears: compare `lsof -nP -iTCP -sTCP:LISTEN` (or
-    `ss -ltn`) before and after a full session.
+    `ss -ltn`) before and after a full session. The test SSH server's own
+    ports are the only TCP listeners.
+
+Checks for the other ways in (the test SSH server also has a password set for
+the test user and one ordinary, unrestricted key):
+
+11. With password login on, the pairing probe reports `password` and shows a
+    warning. With it off, no warning. `pmux companion list` lists the ordinary
+    key as a full-access key.
+12. On the ordinary port, the unrestricted key still gets a shell and can
+    forward the socket. This records the limit stated above; it is expected to
+    pass before and after the gate.
+13. On the companion-only port configured as above, the unrestricted key and
+    the password are both refused, `ssh -L` to the socket is refused for the
+    drive key, and a connection with no command still lands in `hello`. A key
+    removed from the companion key file is refused even with `ForceCommand`
+    present.
 
 Phone-side checks belong to the prototype spike: key creation with user
 presence, the pairing transfer, VPN co-existence, and background behavior.
@@ -333,7 +423,7 @@ proof. They are based on recent pmux CLI pull requests of similar size.
 | Slice | Scope | Agent-hours | Wall-clock |
 | --- | --- | --- | --- |
 | Gate | `pmux companion gate`: grammar, scopes, catalog and attach dispatch, polled inbox, pid file, tests and proof checks 1–7 and 10 | 6–8 | 1.5–2 days |
-| Pairing and revocation | `pmux companion pair`, `add`, `list` and `revoke`; atomic `authorized_keys` edits; checks 8–9 | 6–9 | 1.5–2 days |
+| Pairing and revocation | `pmux companion pair`, `add`, `list` and `revoke`; atomic `authorized_keys` edits; method probe and full-access key report; `--from-auth-info`; checks 8–9 and 11–13 | 8–11 | 2–2.5 days |
 | Inbox on the event stream | Switch `inbox` to the streaming endpoint once it lands | 1–2 | 0.5 day |
 
 The catalog and prototype spike should start from the gate's verb list and
@@ -347,3 +437,5 @@ the pairing flow above.
    choice?
 3. When no overlay is present, should the client allow option A on a public
    SSH port, or refuse and point to the overlay?
+4. Should setup docs present the companion-only listener as the expected
+   configuration, or as optional hardening? It needs admin rights on the host.

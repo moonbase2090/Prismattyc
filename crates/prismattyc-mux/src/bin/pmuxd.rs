@@ -179,7 +179,11 @@ fn main() -> Result<()> {
     }
     // A running server asks the installed binary which live-update records
     // it can read.
-    if std::env::args().nth(1).as_deref() == Some(prismattyc_mux::handoff::PROBE_ARG) {
+    if std::env::args()
+        .skip(1)
+        .take_while(|arg| arg != "--")
+        .any(|arg| arg == prismattyc_mux::handoff::PROBE_ARG)
+    {
         println!(
             "{}",
             serde_json::to_string(&prismattyc_mux::handoff::ProbeReply::current())?

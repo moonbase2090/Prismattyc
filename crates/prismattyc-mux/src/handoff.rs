@@ -66,8 +66,11 @@ pub(crate) struct PaneHandoff {
     pub resume_times: BTreeMap<u32, u64>,
 }
 
-/// pmuxd prints a [`ProbeReply`] as JSON and exits when started with this.
+/// pmuxd prints a [`ProbeReply`] as JSON and exits when started with this
+/// before any `--`.
 pub const PROBE_ARG: &str = "--handoff-probe";
+/// The socket the probe names: under `/dev/null`, so no server can start on it.
+pub const PROBE_SOCKET: &str = "/dev/null/pmuxd-probe.sock";
 /// pmuxd reads a [`HandoffRecord`] from this descriptor and adopts its panes.
 pub const FD_ARG: &str = "--handoff-fd";
 
@@ -94,7 +97,11 @@ pub fn probe(binary: &std::path::Path) -> std::io::Result<ProbeReply> {
     use std::time::{Duration, Instant};
 
     let mut command = prismattyc_process::capture_command(binary);
+    // An older pmuxd takes an unknown flag for the first pane's program and
+    // starts a server. Give it a socket it cannot create, so it fails at once
+    // and starts nothing.
     command
+        .args(["--socket", PROBE_SOCKET])
         .arg(PROBE_ARG)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -402,6 +409,38 @@ mod tests {
 
     fn strings(args: &[&str]) -> Vec<std::ffi::OsString> {
         args.iter().map(Into::into).collect()
+    }
+
+    /// An older pmuxd takes the probe flag for a program and starts a server
+    /// on the socket it is given. The probe's socket cannot be created, so
+    /// such a binary fails without starting anything.
+    #[cfg(unix)]
+    #[test]
+    fn probing_an_older_pmuxd_starts_no_server() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("handoff-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("started");
+        let old = dir.join("pmuxd-old");
+        std::fs::write(
+            &old,
+            format!(
+                "#!/bin/sh\nsocket=\nwhile [ $# -gt 0 ]; do [ \"$1\" = --socket ] && socket=$2; shift; done\n\
+                 mkdir -p \"$(dirname \"${{socket:-/tmp/x}}\")\" 2>/dev/null || exit 1\n\
+                 touch '{}'\nsleep 30\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let error = probe(&old).expect_err("an older pmuxd must not pass the probe");
+        assert!(
+            error.to_string().contains("does not support live updates"),
+            "{error}"
+        );
+        assert!(!marker.exists(), "the probe started an older server");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

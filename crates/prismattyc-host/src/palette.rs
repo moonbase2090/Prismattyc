@@ -326,10 +326,10 @@ impl Palette {
     }
 
     /// Every selectable entry in documentation order, families collapsed.
-    fn entries(rich: bool, graphite: bool) -> Vec<PaletteEntry> {
+    fn entries(graphite: bool) -> Vec<PaletteEntry> {
         let mut entries = Vec::new();
         for action in Action::all() {
-            if excluded(action, rich, graphite) {
+            if excluded(action, graphite) {
                 continue;
             }
             match action {
@@ -352,13 +352,13 @@ impl Palette {
 
     /// Return the sections for the current query, chip, and recents.
     #[must_use]
-    pub fn view(&self, keymap: &KeyMap, rich: bool) -> PaletteView {
+    pub fn view(&self, keymap: &KeyMap) -> PaletteView {
         let query = folded(&self.query);
         let recent = self
             .recent
             .iter()
             .copied()
-            .filter(|action| !excluded(*action, rich, self.show_graphite))
+            .filter(|action| !excluded(*action, self.show_graphite))
             .map(PaletteEntry::Action)
             .filter(|entry| self.passes(*entry, &query).is_some())
             .take(RECENT_CAP)
@@ -366,10 +366,7 @@ impl Palette {
             .collect();
 
         let mut ranked = Vec::new();
-        for (order, entry) in Self::entries(rich, self.show_graphite)
-            .into_iter()
-            .enumerate()
-        {
+        for (order, entry) in Self::entries(self.show_graphite).into_iter().enumerate() {
             if let Some(score) = self.passes(entry, &query) {
                 ranked.push((score, order, entry));
             }
@@ -397,7 +394,6 @@ impl Palette {
         mods: ModifiersState,
         action: Option<Action>,
         keymap: &KeyMap,
-        rich: bool,
     ) -> PaletteVerdict {
         match action {
             Some(Action::PaletteFilterNext) => {
@@ -464,7 +460,7 @@ impl Palette {
             Key::Named(named) => match named {
                 NamedKey::Backspace => {
                     self.query.pop();
-                    self.clamp(keymap, rich);
+                    self.clamp(keymap);
                     PaletteVerdict::Consumed
                 }
                 NamedKey::Space => {
@@ -475,7 +471,7 @@ impl Palette {
                     PaletteVerdict::Consumed
                 }
                 NamedKey::Escape => PaletteVerdict::Close,
-                NamedKey::Enter => self.activate_selected(keymap, rich),
+                NamedKey::Enter => self.activate_selected(keymap),
                 NamedKey::ArrowLeft => {
                     self.cycle_filter(-1);
                     PaletteVerdict::Consumed
@@ -484,16 +480,16 @@ impl Palette {
                     self.cycle_filter(1);
                     PaletteVerdict::Consumed
                 }
-                NamedKey::ArrowUp => self.move_selection(-1, keymap, rich),
-                NamedKey::ArrowDown => self.move_selection(1, keymap, rich),
-                NamedKey::PageUp => self.page_selection(-1, keymap, rich),
-                NamedKey::PageDown => self.page_selection(1, keymap, rich),
+                NamedKey::ArrowUp => self.move_selection(-1, keymap),
+                NamedKey::ArrowDown => self.move_selection(1, keymap),
+                NamedKey::PageUp => self.page_selection(-1, keymap),
+                NamedKey::PageDown => self.page_selection(1, keymap),
                 NamedKey::Home => {
                     self.selected = 0;
                     PaletteVerdict::Consumed
                 }
                 NamedKey::End => {
-                    let count = self.view(keymap, rich).len();
+                    let count = self.view(keymap).len();
                     self.selected = count.saturating_sub(1);
                     PaletteVerdict::Consumed
                 }
@@ -505,11 +501,11 @@ impl Palette {
 
     /// Handle the selected row as Enter does, including collapsed action families.
     #[must_use]
-    pub fn activate_selected(&mut self, keymap: &KeyMap, rich: bool) -> PaletteVerdict {
+    pub fn activate_selected(&mut self, keymap: &KeyMap) -> PaletteVerdict {
         if self.awaiting_digit.is_some() {
             return PaletteVerdict::Consumed;
         }
-        let view = self.view(keymap, rich);
+        let view = self.view(keymap);
         match view.row(self.selected).map(|row| row.entry) {
             Some(PaletteEntry::Action(action)) => PaletteVerdict::Run(action),
             Some(family) => {
@@ -527,7 +523,6 @@ impl Palette {
         delta_milli_px: i64,
         row_pitch_px: usize,
         keymap: &KeyMap,
-        rich: bool,
     ) -> bool {
         if row_pitch_px == 0 || delta_milli_px == 0 {
             return false;
@@ -541,7 +536,7 @@ impl Palette {
         }
         self.wheel_remainder_milli_px %= row_distance;
 
-        let count = self.view(keymap, rich).len();
+        let count = self.view(keymap).len();
         if count == 0 {
             return false;
         }
@@ -555,13 +550,13 @@ impl Palette {
         true
     }
 
-    fn clamp(&mut self, keymap: &KeyMap, rich: bool) {
-        let count = self.view(keymap, rich).len();
+    fn clamp(&mut self, keymap: &KeyMap) {
+        let count = self.view(keymap).len();
         self.selected = self.selected.min(count.saturating_sub(1));
     }
 
-    fn move_selection(&mut self, direction: isize, keymap: &KeyMap, rich: bool) -> PaletteVerdict {
-        let count = self.view(keymap, rich).len();
+    fn move_selection(&mut self, direction: isize, keymap: &KeyMap) -> PaletteVerdict {
+        let count = self.view(keymap).len();
         if count == 0 {
             return PaletteVerdict::Consumed;
         }
@@ -574,8 +569,8 @@ impl Palette {
         PaletteVerdict::Consumed
     }
 
-    fn page_selection(&mut self, direction: isize, keymap: &KeyMap, rich: bool) -> PaletteVerdict {
-        let count = self.view(keymap, rich).len();
+    fn page_selection(&mut self, direction: isize, keymap: &KeyMap) -> PaletteVerdict {
+        let count = self.view(keymap).len();
         if count == 0 {
             return PaletteVerdict::Consumed;
         }
@@ -1051,12 +1046,11 @@ fn selected_inside_window(
     selected.clamp(first_row, last_row.max(first_row))
 }
 
-fn excluded(action: Action, rich: bool, graphite: bool) -> bool {
+fn excluded(action: Action, graphite: bool) -> bool {
     matches!(
         action,
         Action::CommandPalette | Action::PaletteFilterNext | Action::PaletteFilterPrev
-    ) || (!rich && action == Action::RichFocus)
-        || (!graphite && matches!(action, Action::Transparency | Action::ChromeLayout))
+    ) || (!graphite && matches!(action, Action::Transparency | Action::ChromeLayout))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1158,7 +1152,7 @@ mod tests {
     }
 
     fn press(palette: &mut Palette, key: Key) -> PaletteVerdict {
-        palette.key(&key, empty_mods(), None, &keymap(), false)
+        palette.key(&key, empty_mods(), None, &keymap())
     }
 
     fn names(rows: &[PaletteRow]) -> Vec<&str> {
@@ -1167,7 +1161,7 @@ mod tests {
 
     #[test]
     fn preset_actions_appear_and_filter() {
-        let view = Palette::default().view(&keymap(), false);
+        let view = Palette::default().view(&keymap());
         let names = names(&view.matches);
         for name in [
             "preset_single",
@@ -1188,7 +1182,7 @@ mod tests {
             query: "preset_grid".into(),
             ..Palette::default()
         };
-        let view = filtered.view(&keymap(), false);
+        let view = filtered.view(&keymap());
         assert_eq!(
             view.matches.first().map(|row| row.entry),
             Some(PaletteEntry::Action(Action::PresetGrid))
@@ -1202,7 +1196,7 @@ mod tests {
             query: "open_config".into(),
             ..Palette::default()
         };
-        let view = palette.view(&keymap(), false);
+        let view = palette.view(&keymap());
         let row = view
             .matches
             .iter()
@@ -1270,7 +1264,7 @@ mod tests {
             );
         }
         assert_eq!(palette.query, "rename_pane");
-        let view = palette.view(&keymap(), false);
+        let view = palette.view(&keymap());
         assert_eq!(
             view.matches.first().map(|row| row.entry),
             Some(PaletteEntry::Action(Action::RenamePane))
@@ -1292,11 +1286,7 @@ mod tests {
             ..Palette::default()
         };
         assert_eq!(
-            renamed
-                .view(&keymap(), false)
-                .matches
-                .first()
-                .map(|row| row.entry),
+            renamed.view(&keymap()).matches.first().map(|row| row.entry),
             Some(PaletteEntry::Action(Action::RenamePane))
         );
     }
@@ -1307,7 +1297,7 @@ mod tests {
             query: "zzzz".into(),
             ..Palette::default()
         };
-        assert!(palette.view(&keymap(), false).is_empty());
+        assert!(palette.view(&keymap()).is_empty());
     }
 
     #[test]
@@ -1316,13 +1306,12 @@ mod tests {
             show_graphite: true,
             ..Palette::default()
         };
-        let graphite_view = graphite.view(&keymap(), false);
+        let graphite_view = graphite.view(&keymap());
         let graphite_names = names(&graphite_view.matches);
         assert!(graphite_names.contains(&"transparency"));
-        let view = Palette::default().view(&keymap(), false);
+        let view = Palette::default().view(&keymap());
         let names = names(&view.matches);
         assert_eq!(names.first(), Some(&"split_right"));
-        assert!(!names.contains(&"rich_focus"));
         assert!(!names.contains(&"command_palette"));
         assert!(!names.contains(&"palette_filter_next"));
         assert!(
@@ -1353,7 +1342,7 @@ mod tests {
 
     #[test]
     fn chord_column_joins_same_modifier_aliases_only() {
-        let view = Palette::default().view(&keymap(), false);
+        let view = Palette::default().view(&keymap());
         let split = view
             .matches
             .iter()
@@ -1368,7 +1357,7 @@ mod tests {
             query: "select_tab".into(),
             ..Palette::default()
         };
-        let view = palette.view(&keymap(), false);
+        let view = palette.view(&keymap());
         assert_eq!(
             view.matches.first().map(|row| row.entry),
             Some(PaletteEntry::SelectTabFamily)
@@ -1416,17 +1405,11 @@ mod tests {
         let mut palette = Palette::default();
         assert_eq!(palette.chip_index(), 0);
         assert_eq!(
-            palette.key(
-                &Key::Named(NamedKey::ArrowRight),
-                ctrl(),
-                None,
-                &keymap(),
-                false
-            ),
+            palette.key(&Key::Named(NamedKey::ArrowRight), ctrl(), None, &keymap(),),
             PaletteVerdict::Consumed
         );
         assert_eq!(palette.filter, Some(ActionGroup::Panes));
-        let view = palette.view(&keymap(), false);
+        let view = palette.view(&keymap());
         assert!(view
             .matches
             .iter()
@@ -1434,21 +1417,9 @@ mod tests {
         assert!(names(&view.matches).contains(&"split_right"));
         assert!(!names(&view.matches).contains(&"new_tab"));
 
-        let _ = palette.key(
-            &Key::Named(NamedKey::ArrowLeft),
-            ctrl(),
-            None,
-            &keymap(),
-            false,
-        );
+        let _ = palette.key(&Key::Named(NamedKey::ArrowLeft), ctrl(), None, &keymap());
         assert_eq!(palette.filter, None);
-        let _ = palette.key(
-            &Key::Named(NamedKey::ArrowLeft),
-            ctrl(),
-            None,
-            &keymap(),
-            false,
-        );
+        let _ = palette.key(&Key::Named(NamedKey::ArrowLeft), ctrl(), None, &keymap());
         assert_eq!(palette.filter, Some(ActionGroup::ViewEdit));
         assert_eq!(palette.chip_index(), Palette::chip_labels().len() - 1);
 
@@ -1458,7 +1429,6 @@ mod tests {
             empty_mods(),
             Some(Action::PaletteFilterNext),
             &keymap(),
-            false,
         );
         assert_eq!(palette.filter, None);
         assert_eq!(palette.query, "", "a bound chip key does not type");
@@ -1471,7 +1441,7 @@ mod tests {
             filter: Some(ActionGroup::Spaces),
             ..Palette::default()
         };
-        let view = palette.view(&keymap(), false);
+        let view = palette.view(&keymap());
         assert_eq!(
             names(&view.matches),
             vec![
@@ -1495,7 +1465,7 @@ mod tests {
             filter: Some(ActionGroup::Panes),
             ..Palette::default()
         };
-        let view = panes.view(&keymap(), false);
+        let view = panes.view(&keymap());
         assert_eq!(
             names(&view.matches).first(),
             Some(&"split_right"),
@@ -1532,7 +1502,7 @@ mod tests {
         assert!(!recent.contains(&Action::Find), "oldest falls off");
 
         let mut palette = Palette::with_recent(recent.clone());
-        let view = palette.view(&keymap(), false);
+        let view = palette.view(&keymap());
         assert_eq!(view.recent.len(), RECENT_CAP);
         assert_eq!(view.recent[0].name, "select_tab_4");
         assert_eq!(
@@ -1545,13 +1515,13 @@ mod tests {
         );
 
         palette.query = "split".into();
-        let view = palette.view(&keymap(), false);
+        let view = palette.view(&keymap());
         assert_eq!(names(&view.recent), vec!["split_right"]);
         assert_eq!(names(&view.matches).first(), Some(&"split_right"));
 
         palette.query.clear();
         palette.filter = Some(ActionGroup::Tabs);
-        let view = palette.view(&keymap(), false);
+        let view = palette.view(&keymap());
         assert_eq!(
             names(&view.recent),
             vec![
@@ -1590,7 +1560,7 @@ mod tests {
             query: "split_right".into(),
             ..Palette::default()
         };
-        let view = palette.view(&keymap(), false);
+        let view = palette.view(&keymap());
         let detail = view.detail(0).unwrap();
         assert_eq!(detail.name, "split_right");
         assert_eq!(
@@ -1603,7 +1573,7 @@ mod tests {
             query: "layout".into(),
             ..Palette::default()
         };
-        let view = family.view(&keymap(), false);
+        let view = family.view(&keymap());
         let detail = view.detail(0).unwrap();
         assert_eq!(detail.config_key, "layout_N");
         assert!(detail.text.contains("Spawns panes up to N"));
@@ -1615,7 +1585,7 @@ mod tests {
             query: "split".into(),
             ..Palette::default()
         };
-        let view = palette.view(&keymap(), false);
+        let view = palette.view(&keymap());
         assert_eq!(names(&view.matches)[..2], ["split_right", "split_down"]);
     }
 
@@ -1625,7 +1595,7 @@ mod tests {
             query: "spr".into(),
             ..Palette::default()
         };
-        let view = palette.view(&keymap(), false);
+        let view = palette.view(&keymap());
         assert_eq!(names(&view.matches).first(), Some(&"split_right"));
     }
 
@@ -1635,7 +1605,7 @@ mod tests {
             query: "tab".into(),
             ..Palette::default()
         };
-        let view = palette.view(&keymap(), false);
+        let view = palette.view(&keymap());
         let top: Vec<&str> = names(&view.matches).into_iter().take(5).collect();
         assert!(
             top.iter().all(|name| name.contains("tab")),
@@ -1653,7 +1623,7 @@ mod tests {
             query: "focus".into(),
             ..Palette::with_recent(vec![Action::FocusLeft])
         };
-        let count = palette.view(&keymap(), false).len();
+        let count = palette.view(&keymap()).len();
         assert!(count > 2);
         let _ = press(&mut palette, Key::Named(NamedKey::ArrowUp));
         assert_eq!(palette.selected, count - 1);
@@ -1800,7 +1770,7 @@ mod tests {
             for key in escape_spellings() {
                 let mut palette = Palette::default();
                 assert_eq!(
-                    palette.key(&key, mods, None, &keymap, false),
+                    palette.key(&key, mods, None, &keymap),
                     PaletteVerdict::Close,
                     "{key:?} with {mods:?}"
                 );
@@ -1818,13 +1788,13 @@ mod tests {
             };
             let escape = Key::Named(NamedKey::Escape);
             assert_eq!(
-                palette.key(&escape, mods, None, &keymap, false),
+                palette.key(&escape, mods, None, &keymap),
                 PaletteVerdict::Consumed,
                 "{mods:?}"
             );
             assert!(palette.awaiting_digit.is_none(), "{mods:?}");
             assert_eq!(
-                palette.key(&escape, mods, None, &keymap, false),
+                palette.key(&escape, mods, None, &keymap),
                 PaletteVerdict::Close,
                 "{mods:?}"
             );
@@ -1837,7 +1807,7 @@ mod tests {
         let mut palette = Palette::default();
         for key in [Key::Named(NamedKey::Enter), Key::Character("q".into())] {
             assert_eq!(
-                palette.key(&key, ModifiersState::ALT, None, &keymap, false),
+                palette.key(&key, ModifiersState::ALT, None, &keymap),
                 PaletteVerdict::Consumed
             );
         }

@@ -24,14 +24,13 @@ use prismattyc_mux::{
     layout_to_rects, Arrangement, Axis, CellRect, ClientView, Domain, PaneId, PaneLayout,
     SessionId, SizeOwner, WindowId, DEFAULT_MIN_COLS, DEFAULT_MIN_ROWS,
 };
-use prismattyc_protocol::{InputModifiers, PointerPhase, ViewerId};
+use prismattyc_protocol::ViewerId;
 
 use crate::attach_log::{self, LogMessage};
 pub(crate) use crate::capability::Experimental;
 #[cfg(native_transport)]
 use crate::capability::QueryReply;
 use crate::capability::{self, CapabilityGrant, ChildWrite};
-use crate::rich::{self, RichSession};
 
 const FROM_PTY_CAP: usize = 64;
 const TO_CHILD_CAP: usize = 32;
@@ -831,8 +830,6 @@ impl capability::CapabilityHost for NativeFlow<'_> {
         {
             return QueryReply::Pass;
         }
-        // From here the PTY may take the outer rows, so state laid out for
-        // the old geometry (rich reservations) is stale even if this fails.
         if *self.rows != self.outer_rows {
             if self
                 .session
@@ -845,7 +842,7 @@ impl capability::CapabilityHost for NativeFlow<'_> {
                 .is_err()
             {
                 self.owner.authority.close();
-                return QueryReply::Reset;
+                return QueryReply::Pass;
             }
             emulator.resize(self.columns, self.outer_rows);
             *self.rows = self.outer_rows;
@@ -855,12 +852,12 @@ impl capability::CapabilityHost for NativeFlow<'_> {
             Ok(offer) => offer,
             Err(_) => {
                 self.owner.authority.close();
-                return QueryReply::Reset;
+                return QueryReply::Pass;
             }
         };
         let Some(bytes) = profile::encode_reply(&offer) else {
             self.owner.authority.close();
-            return QueryReply::Reset;
+            return QueryReply::Pass;
         };
         let message = ChildWrite::capability(bytes, CapabilityGrant::Native(offer.receipt));
         if to_child.try_send(message).is_err() {
@@ -1071,15 +1068,15 @@ pub(crate) struct PaneRuntime {
     policy_frames: usize,
     pub(crate) to_child_tx: mpsc::SyncSender<ChildWrite>,
     grant_rx: mpsc::Receiver<CapabilityGrant>,
-    pub(crate) rich: RichSession,
-    rich_viewer_id: ViewerId,
+    view_id: ViewerId,
     experimental: Experimental,
     /// Opt-in alternate-screen scrollback retention (B1 gate, default off).
     pub(crate) alt_screen_scrollback: bool,
     pub(crate) cols: usize,
-    /// Full pane content height before a rich workspace reservation.
+    /// Full pane content height.
     pub(crate) outer_rows: usize,
-    /// Current guest PTY height after subtracting a granted workspace.
+    /// Current guest PTY height. Equal to `outer_rows` once a resize has
+    /// been applied to the guest.
     pub(crate) rows: usize,
     pub(crate) selection: Selection,
     pub(crate) keyboard_select_mode: bool,
@@ -1212,7 +1209,7 @@ impl PaneRuntime {
     /// Minted for every runtime, including plain terminals. A replacement in
     /// the same pane slot must not inherit transient chrome from its predecessor.
     pub(crate) fn view_identity(&self) -> ViewerId {
-        self.rich_viewer_id
+        self.view_id
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1502,7 +1499,7 @@ impl PaneRuntime {
         cell_h: usize,
     ) -> Result<Self> {
         let (to_child_tx, to_child_rx) = mpsc::sync_channel::<ChildWrite>(TO_CHILD_CAP);
-        // Capability grants come from a rich guest over its own PTY; a log
+        // Capability grants come from a native guest over its own PTY; a log
         // replica never sees one, so this end stays empty.
         let (_grant_tx, grant_rx) = mpsc::channel();
         let session_key = connection.session_key().to_string();
@@ -1806,7 +1803,6 @@ impl PaneRuntime {
             self.cell_h,
         );
         self.log = Some(log);
-        self.rich = RichSession::default();
         self.restore_state_seq = None;
         self.log_exit_reason = None;
         self.log_write_notice = None;
@@ -1847,7 +1843,7 @@ impl PaneRuntime {
         let last_content_epoch = emulator.screen().content_epoch();
         let mut viewer_bytes = [0u8; 16];
         getrandom::fill(&mut viewer_bytes)
-            .map_err(|error| anyhow::anyhow!("mint rich viewer identity: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("mint pane view identity: {error}"))?;
         let (session, from_pty_rx, log) = match backing {
             Backing::Empty => (None, None, None),
             Backing::Pty {
@@ -1875,8 +1871,7 @@ impl PaneRuntime {
             policy_frames: 0,
             to_child_tx,
             grant_rx,
-            rich: RichSession::default(),
-            rich_viewer_id: ViewerId::from_bytes(viewer_bytes),
+            view_id: ViewerId::from_bytes(viewer_bytes),
             experimental,
             alt_screen_scrollback,
             cols,
@@ -1995,8 +1990,7 @@ impl PaneRuntime {
         self.cell_h = cell_h;
         self.cols = cols;
         self.outer_rows = rows;
-        self.reconcile_workspace_geometry()?;
-        Ok(())
+        self.resize_guest(cols, rows.max(1))
     }
 
     fn resize_guest(&mut self, cols: usize, rows: usize) -> Result<()> {
@@ -2059,32 +2053,6 @@ impl PaneRuntime {
         }
     }
 
-    fn reconcile_workspace_geometry(&mut self) -> Result<()> {
-        let pane_rows = u16::try_from(self.outer_rows).unwrap_or(u16::MAX);
-        let pane_cols = u16::try_from(self.cols).unwrap_or(u16::MAX);
-        let workspace_rows = match self.rich.workspace_layout(pane_rows, pane_cols) {
-            Ok(layout) => layout.map_or(0, |layout| usize::from(layout.rows)),
-            Err(_) => {
-                self.rich.drop_workspace();
-                0
-            }
-        };
-        self.resize_guest(
-            self.cols,
-            self.outer_rows.saturating_sub(workspace_rows).max(1),
-        )
-    }
-
-    pub(crate) fn workspace_layout(&self) -> Option<prismattyc_render::WorkspaceLayout> {
-        self.rich
-            .workspace_layout(
-                u16::try_from(self.outer_rows).unwrap_or(u16::MAX),
-                u16::try_from(self.cols).unwrap_or(u16::MAX),
-            )
-            .ok()
-            .flatten()
-    }
-
     pub(crate) fn child_pid(&self) -> Option<u32> {
         self.session.as_ref().and_then(PtySession::process_id)
     }
@@ -2136,12 +2104,10 @@ impl PaneRuntime {
     fn drain_grants(&mut self) {
         while let Ok(grant) = self.grant_rx.try_recv() {
             match grant {
-                CapabilityGrant::Rich(grant) => self.rich.apply_grant(grant),
                 #[cfg(native_transport)]
                 CapabilityGrant::Native(receipt) => {
                     if let Some(native) = &mut self.native {
                         native.authority.authorize_written_offer(receipt);
-                        self.rich = RichSession::default();
                     }
                 }
             }
@@ -2232,9 +2198,8 @@ impl PaneRuntime {
         }
     }
 
-    /// Feed one PTY chunk through rich, native sessions or the plain
-    /// emulator, as the pane's experimental features ask. True when a native
-    /// session revoked what the pane showed.
+    /// Feed one PTY chunk through native sessions or the plain emulator.
+    /// True when a native session revoked what the pane showed.
     fn feed_pty_chunk(&mut self, bytes: &[u8]) -> bool {
         #[cfg(native_transport)]
         if let Some((owner, session)) = self.native.as_mut().zip(self.session.as_ref()) {
@@ -2248,30 +2213,11 @@ impl PaneRuntime {
                 cell_height: self.cell_h,
                 now: Instant::now(),
             };
-            return if self.experimental.rich {
-                rich::process_rich_chunk(
-                    &mut self.emulator,
-                    &mut self.rich,
-                    &self.to_child_tx,
-                    bytes,
-                    &mut flow,
-                )
-            } else {
-                capability::process_native_chunk(
-                    &mut self.emulator,
-                    &self.to_child_tx,
-                    bytes,
-                    &mut flow,
-                )
-            };
-        }
-        if self.experimental.rich {
-            return rich::process_rich_chunk(
+            return capability::process_native_chunk(
                 &mut self.emulator,
-                &mut self.rich,
                 &self.to_child_tx,
                 bytes,
-                &mut (),
+                &mut flow,
             );
         }
         let _ = self.emulator.feed(bytes);
@@ -2306,10 +2252,6 @@ impl PaneRuntime {
                         self.selection.clear();
                         self.keyboard_select_mode = false;
                         self.view_scroll = 0;
-                    }
-                    if self.experimental.rich && self.reconcile_workspace_geometry().is_err() {
-                        self.rich.drop_workspace();
-                        let _ = self.resize_guest(self.cols, self.outer_rows.max(1));
                     }
                     self.view_scroll = self
                         .view_scroll
@@ -2704,10 +2646,6 @@ impl PaneRuntime {
     pub(crate) fn send_bytes(&self, bytes: Vec<u8>) -> Result<(), mpsc::SendError<ChildWrite>> {
         self.to_child_tx.send(ChildWrite::bytes(bytes))
     }
-
-    pub(crate) fn experimental_rich(&self) -> bool {
-        self.experimental.rich
-    }
 }
 
 impl MuxRuntime {
@@ -2719,118 +2657,6 @@ impl MuxRuntime {
             pane.alt_screen_scrollback = retain;
             pane.emulator.set_retain_alt_history(retain);
         }
-    }
-
-    pub(crate) fn toggle_rich_focus(&mut self) -> bool {
-        if !self.focused().experimental_rich() {
-            return false;
-        }
-        let viewer_id = self.focused().rich_viewer_id;
-        let bytes = self
-            .focused_mut()
-            .rich
-            .toggle_structured_focus(viewer_id)
-            .or_else(|| self.focused_mut().rich.toggle_focus());
-        let Some(bytes) = bytes else {
-            return false;
-        };
-        let _ = self.focused().try_send_bytes(bytes);
-        true
-    }
-
-    pub(crate) fn rich_focus_active(&self) -> bool {
-        let pane = self.focused();
-        pane.experimental_rich()
-            && (pane.rich.focus_id().is_some()
-                || pane.rich.structured_focus_active(pane.rich_viewer_id))
-    }
-
-    pub(crate) fn send_rich_focus_key(&mut self, key: &str, modifiers: InputModifiers) -> bool {
-        if !self.rich_focus_active() {
-            return false;
-        }
-        let viewer_id = self.focused().rich_viewer_id;
-        let bytes = self
-            .focused_mut()
-            .rich
-            .encode_structured_key(viewer_id, key.to_string(), modifiers)
-            .or_else(|| self.focused().rich.encode_focused_key(key));
-        let Some(bytes) = bytes else {
-            return false;
-        };
-        self.focused().try_send_bytes(bytes).is_ok()
-    }
-
-    pub(crate) fn focused_rich_region(&self) -> Option<(i32, u16, u16, u16)> {
-        self.focused()
-            .rich
-            .focused_attachment()
-            .map(|(_, row, col, rows, cols)| (row, col, rows, cols))
-    }
-
-    pub(crate) fn revoke_rich_focus(&mut self, pane: PaneId) {
-        let Some(runtime) = self.panes.get_mut(&pane) else {
-            return;
-        };
-        let bytes = runtime
-            .rich
-            .revoke_structured_focus(runtime.rich_viewer_id)
-            .or_else(|| runtime.rich.revoke_focus());
-        if let Some(bytes) = bytes {
-            let _ = runtime.try_send_bytes(bytes);
-        }
-    }
-
-    pub(crate) fn workspace_hit(
-        &self,
-        pane: PaneId,
-        row: u16,
-        col: u16,
-    ) -> Option<crate::rich::WorkspaceHit> {
-        let runtime = self.panes.get(&pane)?;
-        runtime.rich.workspace_hit(
-            u16::try_from(runtime.outer_rows).ok()?,
-            u16::try_from(runtime.cols).ok()?,
-            row,
-            col,
-        )
-    }
-
-    pub(crate) fn send_rich_pointer(
-        &mut self,
-        pane: PaneId,
-        hit: crate::rich::WorkspaceHit,
-        phase: PointerPhase,
-    ) -> bool {
-        let Some(runtime) = self.panes.get_mut(&pane) else {
-            return false;
-        };
-        let Some(bytes) =
-            runtime
-                .rich
-                .encode_structured_pointer(runtime.rich_viewer_id, hit, phase)
-        else {
-            return false;
-        };
-        runtime.try_send_bytes(bytes).is_ok()
-    }
-
-    pub(crate) fn send_rich_scroll(
-        &mut self,
-        pane: PaneId,
-        hit: crate::rich::WorkspaceHit,
-        delta: i16,
-    ) -> bool {
-        let Some(runtime) = self.panes.get_mut(&pane) else {
-            return false;
-        };
-        let Some(bytes) = runtime
-            .rich
-            .encode_structured_scroll(runtime.rich_viewer_id, hit, delta)
-        else {
-            return false;
-        };
-        runtime.try_send_bytes(bytes).is_ok()
     }
 }
 
@@ -4131,7 +3957,6 @@ impl MuxRuntime {
                         old.finish_watch = true;
                     }
                 }
-                self.revoke_rich_focus(prior);
                 self.last_pane.insert(self.active_window(), prior);
             }
             self.view.set_focused_pane(self.active_window(), pane);
@@ -4265,10 +4090,6 @@ impl MuxRuntime {
             .expect("live mux window always has one pane")
     }
 
-    pub(crate) fn take_semantic_copy(&mut self) -> Option<String> {
-        self.focused_mut().rich.take_semantic_copy()
-    }
-
     pub(crate) fn focused(&self) -> &PaneRuntime {
         self.panes
             .get(&self.focused_id())
@@ -4336,13 +4157,6 @@ impl MuxRuntime {
 
     pub(crate) fn rects(&self) -> impl Iterator<Item = (PaneId, CellRect)> + '_ {
         self.rects.iter().copied()
-    }
-
-    pub(crate) fn workspace_rows(&self, pane: PaneId) -> usize {
-        self.panes
-            .get(&pane)
-            .and_then(PaneRuntime::workspace_layout)
-            .map_or(0, |layout| usize::from(layout.rows))
     }
 
     #[cfg(test)]
@@ -5261,7 +5075,6 @@ impl MuxRuntime {
                 old.finish_watch = true;
             }
         }
-        self.revoke_rich_focus(prior);
         let rects = self.window_rects(window)?;
         self.last_window = self.view.window;
         self.view.window = Some(window);
@@ -9973,61 +9786,6 @@ mod tests {
     fn flag_off_emulator_does_not_collect_apc() {
         let runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
         assert!(!runtime.focused().emulator.collects_apc());
-        assert!(!runtime.focused().experimental_rich());
-    }
-
-    #[test]
-    fn rich_focus_toggle_is_noop_when_flag_off() {
-        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
-        assert!(!runtime.focused().experimental_rich());
-        assert!(!runtime.toggle_rich_focus());
-        assert!(!runtime.rich_focus_active());
-    }
-
-    #[test]
-    fn closing_a_rich_pane_drops_its_regions() {
-        #[cfg(native_transport)]
-        let _clock = crate::native::service::PausedClockScope::enter();
-        let mut runtime = MuxRuntime::spawn_experimental("/bin/sh", &[], 80, 24).unwrap();
-        let first = runtime.focused_id();
-        {
-            let pane = runtime.focused_mut();
-            pane.rich.apply_grant(capability::RichGrant {
-                features: prismattyc_protocol::Feature::V1.into_iter().collect(),
-                region_limit: 8,
-            });
-            let attach = prismattyc_protocol::encode_attach_cell_rect(
-                &prismattyc_protocol::AttachCellRect {
-                    id: 1,
-                    row: 0,
-                    col: 0,
-                    rows: 1,
-                    cols: 4,
-                    text: "STAT".into(),
-                },
-            )
-            .unwrap();
-            rich::process_rich_chunk(
-                &mut pane.emulator,
-                &mut pane.rich,
-                &pane.to_child_tx,
-                &attach,
-                &mut (),
-            );
-            assert_eq!(pane.rich.attachments_len_for_test(), 1);
-        }
-        let second = runtime
-            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
-            .unwrap();
-        runtime.focus(first);
-        assert!(runtime.close_focused().unwrap());
-        assert!(!runtime.panes.contains_key(&first));
-        assert!(runtime.panes.contains_key(&second));
-        assert_eq!(
-            runtime.panes[&second].rich.attachments_len_for_test(),
-            0,
-            "surviving pane must not inherit the closed pane's regions"
-        );
     }
 
     #[test]
@@ -10036,7 +9794,6 @@ mod tests {
         let _clock = crate::native::service::PausedClockScope::enter();
         let mut runtime = MuxRuntime::spawn_experimental("/bin/sh", &[], 80, 24).unwrap();
         assert!(runtime.focused().emulator.collects_apc());
-        assert!(runtime.focused().experimental_rich());
         let second = runtime
             .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
             .unwrap();

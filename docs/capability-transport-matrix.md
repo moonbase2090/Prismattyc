@@ -12,6 +12,8 @@ in `crates/prismattyc/tests/transport_matrix.rs`.
 The classic TTY host (`prismattyc`) no longer has rich mode. It accepts
 `--experimental-rich` for one release and ignores it. T2 and T6 now check
 that it keeps capability messages out of the grid; T3 was removed with it.
+The windowed host (`prismattyc-host`) no longer has rich mode either, so the
+T1 rich evidence below is historical; its rich tests were removed with it.
 
 Schema follows PRD.md:549–564. Rows whose environment cannot be reproduced
 here are **inconclusive**; expected results are not rewritten after the fact.

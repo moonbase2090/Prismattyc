@@ -1794,6 +1794,30 @@ future_remote = { values = [3, 4] }
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// Rich mode is gone, so a `rich_focus` binding left in an older config
+    /// is ignored with a warning instead of failing the whole file.
+    #[test]
+    fn a_leftover_rich_focus_binding_is_ignored_with_a_warning() {
+        let dir = temp_dir("rich-focus-binding");
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "[keys]\nrich_focus = \"ctrl+shift+g\"\ncopy = \"ctrl+shift+c\"\n",
+        )
+        .unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(
+            loaded.unknown_key_warnings(),
+            ["unknown config key \"keys.rich_focus\"; ignored"]
+        );
+        let keymap = loaded.loaded_keymap();
+        assert_eq!(
+            keymap.chords(crate::keybind::Action::Copy),
+            [crate::keybind::Chord::parse("ctrl+shift+c").unwrap()]
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn unknown_mux_key_keeps_host_settings() {
         let dir = temp_dir("mux-unknown");

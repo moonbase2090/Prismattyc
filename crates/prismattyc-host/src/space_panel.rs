@@ -2585,7 +2585,7 @@ mod pt68_palette_width_tests {
             let mut palette = Palette::default();
             palette.query = "preset_single".into();
             palette.show_graphite = true;
-            let view = palette.view(&host.keymap, host.experimental_rich);
+            let view = palette.view(&host.keymap);
             let rows: Vec<_> = view.recent.iter().chain(&view.matches).collect();
             assert!(!rows.is_empty(), "palette query returns rows");
             let (selected, longest, longest_width) = rows

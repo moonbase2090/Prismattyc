@@ -3,8 +3,8 @@
 Prismattyc accepts native cell grids and uploaded images from eligible direct
 local PTY children when started with `--experimental-native` (or
 `PRISMATTYC_EXPERIMENTAL_NATIVE=1`). The feature is off by default.
-`--experimental-rich` still turns it on as well, for one release; after that,
-native sessions need their own flag. Applications that do not negotiate a native session keep their
+`--experimental-rich` also turns it on for one release; rich mode itself was
+removed, so that flag now only enables native sessions. Applications that do not negotiate a native session keep their
 ANSI output.
 
 This is the host implementation. The separately locked verification client

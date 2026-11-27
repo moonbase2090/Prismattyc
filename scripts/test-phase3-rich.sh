@@ -29,31 +29,6 @@ rich_protocol_tests=(
   "tests::status_snapshot_rejects_invented_or_unbounded_values"
   "tests::status_snapshot_round_trips_static_primitives_and_drop"
 )
-rich_host_tests=(
-  "rich::tests::grant_required_before_attach"
-  "rich::tests::paint_policy_skips_primary_overlays_on_alt"
-  "rich::tests::scroll_translates_then_detaches_fully_above"
-  "rich::tests::process_rich_chunk_flood_stays_responsive"
-  "rich::tests::rich_focus_grant_revoke_and_detach"
-  "rich::tests::rich_focus_does_not_auto_grant_and_flag_off_has_no_focus"
-  "rich::tests::two_regions_keep_independent_z_and_damage"
-  "rich::tests::resize_below_region_hides_rows_past_grid"
-  "rich::tests::flood_with_live_region_updates_stays_responsive"
-  "mux::tests::flag_off_emulator_does_not_collect_apc"
-  "mux::tests::flag_on_emulator_collects_apc"
-  "mux::tests::closing_a_rich_pane_drops_its_regions"
-  "raster::tests::overlay_paint_clips_to_pane_content_rect"
-  "raster::tests::overlay_paint_clips_after_pane_shrink"
-  "raster::tests::overlay_paint_clips_partially_scrolled_region"
-  "raster::tests::viewport_overlay_paints_above_cell_rect"
-  "rich::tests::workspace_is_grant_gated_ordered_and_malformed_drops_only_surface"
-  "rich::tests::collection_gap_drops_only_that_collection_and_requests_resnapshot"
-  "rich::tests::cached_collection_does_not_overwrite_workspace_tree"
-  "rich::tests::semantic_snapshot_copies_location_without_decoration"
-  "rich::tests::status_is_scene_bound_static_and_malformed_drops_only_status"
-  "theme::tests::status_tones_resolve_through_each_active_theme"
-  "tests::idle_control_flow_is_wait_not_poll"
-)
 classic_core_tests=(
   "wraps_only_when_the_next_character_arrives"
   "scrolling_is_bounded"
@@ -107,12 +82,10 @@ rich_render_tests=(
   "status_layer_is_static_themed_and_narrow_text_first"
 )
 require_tests prismattyc-protocol "${rich_protocol_tests[@]}"
-require_tests prismattyc-host "${rich_host_tests[@]}"
 require_tests prismattyc-render "${rich_render_tests[@]}"
 
-echo "phase3-rich: named protocol / host rich proofs"
+echo "phase3-rich: named protocol rich proofs"
 run_named prismattyc-protocol "${rich_protocol_tests[@]}"
-run_named prismattyc-host "${rich_host_tests[@]}"
 run_named prismattyc-render "${rich_render_tests[@]}"
 
 echo "phase3-rich: classic Spike Baseline v0 fixtures"

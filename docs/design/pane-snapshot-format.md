@@ -238,7 +238,7 @@ A control connection serves one request at a time, to completion (`handle_client
 
 ## Parking and at-rest
 
-Parking writes this format to disk. The design is in `docs/design/park-idle-panes.md`. This section sets down what the format guarantees a parked file and what the store adds.
+Parking writes this format to disk. The design is in [park-idle-panes.md](park-idle-panes.md). This section sets down what the format guarantees a parked file and what the store adds.
 
 **File layout.** A parked file is the screen part, then history chunks and gaps from newest to oldest, then image parts, then the trailer. Every part is sealed separately. A new client's first frame comes from the screen part alone. In practice a parked pane keeps its screen in memory, so the file is read only for history.
 

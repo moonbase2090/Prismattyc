@@ -97,7 +97,7 @@ new failure or a shared-code change justifies it.
 ## Run Local Actions in stages
 
 Use `scripts/la-staged-pr.sh` on the 32 GiB host. The stages are
-`light` and `e2e`. `phase3-rich` stays in
+`light` and `e2e`. `phase3-transport` stays in
 `ci.yml` for hand and nightly runs. It is not a required light-stage
 job. `local-actions run --job` returns when the job is queued
 (exit 0). That is not a pass. The script waits on

@@ -483,12 +483,13 @@ jobs:
       - name: Test GPU adapter enumeration without hardware
         run: cargo test -p prismattyc-host --features gpu,wgpu/noop --bin prismattyc-host instance_enumerates_adapters_without_a_window
 
-  # Frozen rich harness pin. Not a light-stage / PRD §5.6 / A-6 gate.
-  # Hand / Local Actions: --event pull_request --job phase3-rich
+  # Classic host transport rows T2/T3/T6: capability messages never reach
+  # the grid through tmux or a nested host. Not a light-stage gate.
+  # Hand / Local Actions: --event pull_request --job phase3-transport
   # Runs on every push, including each commit to main, so it needs no
   # separate schedule.
-  phase3-rich:
-    name: Phase 3 rich harness
+  phase3-transport:
+    name: Capability transport rows
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
@@ -519,13 +520,6 @@ jobs:
           fi
           sudo apt-get update -qq
           sudo apt-get install -y -qq tmux
-
-      - name: Run test-phase3-rich.sh
-        run: |
-          cargo_env="${CARGO_HOME:-$HOME/.cargo}/env"
-          [ -f "$cargo_env" ] && . "$cargo_env"
-          [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
-          ./scripts/test-phase3-rich.sh
 
       - name: Run test-phase3-transport.sh
         run: |

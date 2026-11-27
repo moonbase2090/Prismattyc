@@ -25,10 +25,10 @@ class StagePartitionTests(unittest.TestCase):
         self.assertEqual(ci_jobs - staged.UNSTAGED_CI_JOBS, staged_jobs)
         self.assertTrue(staged.UNSTAGED_CI_JOBS.isdisjoint(staged_jobs))
 
-    def test_phase3_rich_is_not_a_light_gate(self) -> None:
-        self.assertNotIn("phase3-rich", staged.jobs_for("light"))
-        self.assertIsNone(staged.stage_of("phase3-rich"))
-        self.assertIn("phase3-rich", staged.UNSTAGED_CI_JOBS)
+    def test_phase3_transport_is_not_a_light_gate(self) -> None:
+        self.assertNotIn("phase3-transport", staged.jobs_for("light"))
+        self.assertIsNone(staged.stage_of("phase3-transport"))
+        self.assertIn("phase3-transport", staged.UNSTAGED_CI_JOBS)
 
     def test_no_job_in_two_stages(self) -> None:
         seen: set[str] = set()
@@ -71,12 +71,12 @@ class StagePartitionTests(unittest.TestCase):
         self.assertEqual(staged.main(["--list-stages"]), 0)
 
 
-class Phase3RichPinTests(unittest.TestCase):
+class Phase3TransportPinTests(unittest.TestCase):
     def test_ci_job_still_present(self) -> None:
         text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-        self.assertIn("\n  phase3-rich:\n", text)
-        self.assertIn("./scripts/test-phase3-rich.sh", text)
+        self.assertIn("\n  phase3-transport:\n", text)
         self.assertIn("./scripts/test-phase3-transport.sh", text)
+        self.assertNotIn("test-phase3-rich.sh", text)
 
 
 class ReclaimPlanTests(unittest.TestCase):

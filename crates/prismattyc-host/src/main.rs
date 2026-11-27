@@ -15590,6 +15590,7 @@ enum StripClickResult {
 }
 
 fn close_tab_from_strip(host: &mut HostState, index: usize) -> StripClickResult {
+    let prior_slot = host.mux.floated_window_slot();
     let result = if host.mux.tab_count() == 1 {
         host.mux.detach_view().map(|view| match view {
             mux::DetachView::ExitHost => StripClickResult::Exit,
@@ -15606,10 +15607,12 @@ fn close_tab_from_strip(host: &mut HostState, index: usize) -> StripClickResult 
     };
     match result {
         Ok(StripClickResult::Exit) => {
+            persist_docked_float(host, prior_slot);
             persist_attach_layout_from_live(host);
             StripClickResult::Exit
         }
         Ok(StripClickResult::Handled) => {
+            persist_docked_float(host, prior_slot);
             mark_layout_dirty(host);
             App::refit_geom(host, host.window.inner_size(), Some("tab close"));
             host.window
@@ -18544,12 +18547,15 @@ fn handle_mux_command(
         return false;
     }
     if matches!(plan, MuxCommandPlan::Detach) {
+        let prior_slot = host.mux.floated_window_slot();
         match host.mux.detach_view() {
             Ok(mux::DetachView::ExitHost) => {
+                persist_docked_float(host, prior_slot);
                 persist_attach_layout_from_live(host);
                 return true;
             }
             Ok(mux::DetachView::ClosedTab) => {
+                persist_docked_float(host, prior_slot);
                 persist_attach_layout_from_live(host);
                 App::refit_geom(host, host.window.inner_size(), Some("mux detach"));
                 host.app_mouse_button = None;

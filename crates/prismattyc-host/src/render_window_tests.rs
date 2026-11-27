@@ -2825,3 +2825,106 @@ fn measure_border_frame_cost(host: &mut HostState) {
         }
     }
 }
+
+/// Closing the floated tab from the strip, or detaching that view, drops the
+/// saved overlay. A later open must not float whatever pane now sits there.
+#[test]
+fn strip_close_and_detach_drop_the_saved_overlay() {
+    const NAME: &str = "render_window_tests::strip_close_and_detach_drop_the_saved_overlay";
+    if std::env::var_os(CHILD_ENV).is_none() {
+        run_in_private_display(NAME);
+        return;
+    }
+    struct Proof {
+        app: App,
+        completed: bool,
+    }
+    impl ApplicationHandler<UserAction> for Proof {
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+            let id = self.app.open_window(event_loop, false).unwrap();
+            let host = self.app.windows.get_mut(&id).unwrap();
+            lift_overlay_on_the_open_tab(host);
+            let slot = host.mux.selected_tab_index();
+            assert_eq!(
+                super::close_tab_from_strip(host, slot),
+                super::StripClickResult::Handled
+            );
+            assert_closed_overlay_stays_down(host);
+
+            lift_overlay_on_the_open_tab(host);
+            assert!(
+                !super::handle_mux_command(
+                    host,
+                    super::MuxCommand::Detach,
+                    keybind::Action::Detach,
+                    "/bin/cat",
+                    &[],
+                ),
+                "detaching an extra tab stays in the window"
+            );
+            assert_closed_overlay_stays_down(host);
+
+            self.completed = true;
+            self.app.windows.clear();
+            event_loop.exit();
+        }
+        fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
+    }
+    let event_loop = EventLoop::<UserAction>::with_user_event()
+        .with_x11()
+        .with_any_thread(true)
+        .build()
+        .unwrap();
+    let cli = Cli::parse(["--no-splash", "/bin/cat"].into_iter().map(String::from)).unwrap();
+    let config = config::ConfigFile {
+        a11y: Some(config::A11ySection {
+            os_tree: Some(false),
+            announce: Some(false),
+        }),
+        ..Default::default()
+    };
+    let app = App::new(cli, config, None, event_loop.create_proxy()).unwrap();
+    let mut proof = Proof {
+        app,
+        completed: false,
+    };
+    event_loop.run_app(&mut proof).unwrap();
+    assert!(proof.completed);
+    std::fs::write(std::env::var_os(RESULT_ENV).unwrap(), b"complete").unwrap();
+}
+
+fn lift_overlay_on_the_open_tab(host: &mut HostState) {
+    host.space_rail.set_current(Some("work".into()));
+    host.mux.new_tab("/bin/cat", &[]).unwrap();
+    let right = host
+        .mux
+        .split_focused("/bin/cat", &[], prismattyc_mux::Axis::Horizontal, 0.5)
+        .unwrap();
+    assert!(
+        host.mux.toggle_float(right).unwrap(),
+        "the split pane floats"
+    );
+    let slot = host
+        .mux
+        .floated_window_slot()
+        .expect("the overlay names its tab");
+    assert_eq!(slot as usize, host.mux.selected_tab_index());
+    super::store_current_float(host);
+    let records = prismattyc_mux::load_floats(&prismattyc_mux::spaces_dir()).unwrap();
+    assert_eq!(records.floats.len(), 1, "the overlay is saved");
+    assert_eq!(records.floats[0].window_slot, slot);
+}
+
+fn assert_closed_overlay_stays_down(host: &mut HostState) {
+    assert!(
+        host.mux.floated_pane().is_none(),
+        "the close docks the overlay"
+    );
+    let records = prismattyc_mux::load_floats(&prismattyc_mux::spaces_dir()).unwrap();
+    assert!(
+        records.floats.is_empty(),
+        "the closed tab's saved overlay is dropped"
+    );
+    assert!(!host.mux.apply_open_space_float("work", &records).unwrap());
+    assert!(host.mux.floated_pane().is_none());
+}

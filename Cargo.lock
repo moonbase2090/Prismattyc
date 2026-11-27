@@ -3322,7 +3322,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "pmux-activity-connector-plugin"
-version = "0.3.78"
+version = "0.3.79"
 dependencies = [
  "anyhow",
  "jsonschema",
@@ -3334,7 +3334,7 @@ dependencies = [
 
 [[package]]
 name = "pmux-activity-monitor-plugin"
-version = "0.3.78"
+version = "0.3.79"
 dependencies = [
  "anyhow",
  "lunatui-badge",
@@ -3354,7 +3354,7 @@ dependencies = [
 
 [[package]]
 name = "pmux-mcp"
-version = "0.3.78"
+version = "0.3.79"
 dependencies = [
  "http-body-util",
  "hyper",
@@ -3373,7 +3373,7 @@ dependencies = [
 
 [[package]]
 name = "pmux-plugin-api"
-version = "0.3.78"
+version = "0.3.79"
 dependencies = [
  "prismattyc-core",
  "schemars",
@@ -3388,7 +3388,7 @@ dependencies = [
 
 [[package]]
 name = "pmux-plugin-fixture"
-version = "0.3.78"
+version = "0.3.79"
 dependencies = [
  "anyhow",
  "pmux-plugin-api",
@@ -3399,7 +3399,7 @@ dependencies = [
 
 [[package]]
 name = "pmux-plugin-runtime"
-version = "0.3.78"
+version = "0.3.79"
 dependencies = [
  "anyhow",
  "pmux-plugin-api",
@@ -3533,7 +3533,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc"
-version = "0.3.78"
+version = "0.3.79"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -3551,14 +3551,14 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-cmd-forwarder"
-version = "0.3.78"
+version = "0.3.79"
 dependencies = [
  "prismattyc-process",
 ]
 
 [[package]]
 name = "prismattyc-core"
-version = "0.3.78"
+version = "0.3.79"
 dependencies = [
  "prismattyc-process",
  "serde",
@@ -3568,7 +3568,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-emulator"
-version = "0.3.78"
+version = "0.3.79"
 dependencies = [
  "anyhow",
  "flate2",
@@ -3586,7 +3586,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-host"
-version = "0.3.78"
+version = "0.3.79"
 dependencies = [
  "accesskit",
  "accesskit_winit",
@@ -3639,7 +3639,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-labs"
-version = "0.3.78"
+version = "0.3.79"
 dependencies = [
  "prismattyc-core",
  "serde",
@@ -3649,7 +3649,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-mux"
-version = "0.3.78"
+version = "0.3.79"
 dependencies = [
  "anyhow",
  "arboard",
@@ -3693,18 +3693,18 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-process"
-version = "0.3.78"
+version = "0.3.79"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "prismattyc-protocol"
-version = "0.3.78"
+version = "0.3.79"
 
 [[package]]
 name = "prismattyc-render"
-version = "0.3.78"
+version = "0.3.79"
 dependencies = [
  "prismattyc-core",
  "prismattyc-protocol",
@@ -3712,7 +3712,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-winres"
-version = "0.3.78"
+version = "0.3.79"
 dependencies = [
  "winresource",
 ]

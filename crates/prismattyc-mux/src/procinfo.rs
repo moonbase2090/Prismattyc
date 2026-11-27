@@ -3931,11 +3931,28 @@ mod tests {
         let mut idle_shell = prismattyc_process::spawn(
             std::process::Command::new("/bin/sh")
                 .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::null()),
         )
         .expect("spawn idle shell");
         let pid = idle_shell.id();
+
+        // The check below reads the shell's live argv, which is only a shell's
+        // while the shell is running. A line echoed by the shell proves it is
+        // running and reading stdin; stdin stays open so it then sits idle.
+        std::io::Write::write_all(idle_shell.stdin.as_mut().unwrap(), b"echo ready\n")
+            .expect("write to idle shell");
+        let stdout = idle_shell.stdout.take().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            let _ = std::io::BufRead::read_line(&mut std::io::BufReader::new(stdout), &mut line);
+            let _ = tx.send(line);
+        });
+        let line = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("idle shell answered");
+        assert_eq!(line.trim(), "ready");
 
         let spawn = crate::SpawnSpec {
             program: "/bin/sh".into(),
@@ -3943,7 +3960,13 @@ mod tests {
             cwd: None,
             env: Default::default(),
         };
-        assert!(spawn_needs_resume_rewrite(&spawn, pid));
+        assert!(
+            spawn_needs_resume_rewrite(&spawn, pid),
+            "idle shell not seen at its prompt: argv {:?}, foreground {:?}, exit {:?}",
+            cmdline_strings(pid),
+            live_foreground_command(pid),
+            idle_shell.try_wait(),
+        );
         assert_eq!(replay_spawn_command(&spawn, Some(pid)), None);
 
         let non_agent = crate::SpawnSpec {

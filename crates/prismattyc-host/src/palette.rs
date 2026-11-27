@@ -162,6 +162,39 @@ pub struct PaletteRow {
     pub describe: String,
     pub chord_label: String,
     pub full_width: bool,
+    /// Actions are focusable. Detail and status lines are information only:
+    /// they are painted but never selected, hovered or chosen.
+    pub kind: RowKind,
+}
+
+/// What a palette row is. Only [`RowKind::Action`] takes focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RowKind {
+    #[default]
+    Action,
+    /// A label and value, or a line of explanation, in the details block.
+    Detail,
+    /// A status badge with its tone. The row name is the badge text and the
+    /// description is the muted line beside it.
+    Status(StatusTone),
+}
+
+impl RowKind {
+    #[must_use]
+    pub fn focusable(self) -> bool {
+        matches!(self, RowKind::Action)
+    }
+}
+
+/// Tone of a status badge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusTone {
+    /// Up to date, restarted.
+    Good,
+    /// Update available, restart postponed.
+    Notice,
+    /// The operation failed.
+    Failed,
 }
 
 impl PaletteRow {
@@ -172,6 +205,7 @@ impl PaletteRow {
             describe: entry.describe(),
             chord_label: entry.chord_label(keymap),
             full_width: false,
+            kind: RowKind::Action,
         }
     }
 
@@ -184,6 +218,26 @@ impl PaletteRow {
             describe,
             chord_label,
             full_width: false,
+            kind: RowKind::Action,
+        }
+    }
+
+    /// A non-focusable detail line: `label` muted, `value` beside it.
+    #[must_use]
+    pub fn detail(label: String, value: String) -> Self {
+        PaletteRow {
+            full_width: value.is_empty(),
+            kind: RowKind::Detail,
+            ..Self::plain(label, value, String::new())
+        }
+    }
+
+    /// A non-focusable status badge with an optional muted line beside it.
+    #[must_use]
+    pub fn status(tone: StatusTone, badge: String, line: String) -> Self {
+        PaletteRow {
+            kind: RowKind::Status(tone),
+            ..Self::plain(badge, line, String::new())
         }
     }
 }

@@ -7,6 +7,7 @@
 use crate::graphite::{self, Face, Rect};
 pub(crate) use crate::graphite::{LegendPaint, LegendRun};
 use crate::mux::ChromeGeom;
+use crate::palette::{RowKind, StatusTone};
 use crate::raster::{
     self, FontMetrics, OverlaySurface, PaletteFrame, PaletteLayout, PaletteLine, ThemePickerRow,
 };
@@ -221,6 +222,178 @@ fn menu_row_label(text: &str, max_px: f32, font_px: f32) -> String {
         head.pop();
     }
     format!("{head}{separator}{suffix}")
+}
+
+/// Text area of one non-focusable palette line.
+struct InfoGeom {
+    text_x: usize,
+    text_y: usize,
+    text_right: usize,
+    cell_h: usize,
+    name_w: usize,
+    px: f32,
+    small_px: f32,
+}
+
+/// A status badge (tinted pill with a dot) and its line, or a detail line:
+/// a muted label with its value, or muted explanation across the row. No
+/// selection or hover is ever drawn here.
+fn paint_info_row(
+    buffer: &mut [u32],
+    width: usize,
+    tok: &graphite::Tokens,
+    chrome: ChromeGeom,
+    row: &crate::palette::PaletteRow,
+    at: InfoGeom,
+) {
+    let pad = chrome.px(10.0);
+    let left = at.text_x.saturating_add(pad);
+    let right = at.text_right.saturating_sub(pad);
+    match row.kind {
+        RowKind::Status(tone) => {
+            let ink = match tone {
+                StatusTone::Good => tok.working,
+                StatusTone::Notice => tok.unseen,
+                StatusTone::Failed => tok.attention,
+            };
+            let dot = chrome.px(7.0).max(5);
+            let gap = chrome.px(6.0);
+            let text_w =
+                graphite::text_width(Face::SemiBold, at.small_px, &row.name).ceil() as usize;
+            let pill_h = at.cell_h.saturating_add(chrome.px(4.0));
+            let pill_w = text_w + dot + gap + pad * 2;
+            let pill = Rect::new(
+                at.text_x,
+                at.text_y
+                    .saturating_add(at.cell_h / 2)
+                    .saturating_sub(pill_h / 2),
+                pill_w,
+                pill_h,
+            );
+            let tint = raster::mix_rgb(tok.panel, ink, 52);
+            graphite::fill_round_rect(buffer, width, pill, pill_h as f32 / 2.0, tint, 255);
+            graphite::fill_round_rect(
+                buffer,
+                width,
+                Rect::new(
+                    pill.x + pad,
+                    (pill.y + pill.h / 2).saturating_sub(dot / 2),
+                    dot,
+                    dot,
+                ),
+                dot as f32 / 2.0,
+                ink,
+                255,
+            );
+            let label_x = pill.x + pad + dot + gap;
+            draw_text(
+                buffer,
+                width,
+                Rect::new(label_x, at.text_y, text_w, at.cell_h),
+                Face::SemiBold,
+                at.small_px,
+                &row.name,
+                ink,
+                label_x,
+                pill.right(),
+            );
+            let line_x = pill.right().saturating_add(chrome.px(12.0));
+            let line = graphite::ellipsize(
+                Face::Regular,
+                at.px,
+                &row.describe,
+                at.text_right.saturating_sub(line_x) as f32,
+            );
+            draw_text(
+                buffer,
+                width,
+                Rect::new(
+                    line_x,
+                    at.text_y,
+                    at.text_right.saturating_sub(line_x),
+                    at.cell_h,
+                ),
+                Face::Regular,
+                at.px,
+                &line,
+                tok.text,
+                line_x,
+                at.text_right,
+            );
+        }
+        _ if row.name.is_empty() => {
+            // Continues the description of the action above, in its column.
+            let value_x = at
+                .text_x
+                .saturating_add(at.name_w)
+                .saturating_add(chrome.px(14.0));
+            draw_text(
+                buffer,
+                width,
+                Rect::new(
+                    value_x,
+                    at.text_y,
+                    at.text_right.saturating_sub(value_x),
+                    at.cell_h,
+                ),
+                Face::Regular,
+                at.small_px,
+                &graphite::ellipsize(
+                    Face::Regular,
+                    at.small_px,
+                    &row.describe,
+                    at.text_right.saturating_sub(value_x) as f32,
+                ),
+                tok.muted,
+                value_x,
+                at.text_right,
+            );
+        }
+        _ if row.full_width || row.describe.is_empty() => {
+            draw_text(
+                buffer,
+                width,
+                Rect::new(left, at.text_y, right.saturating_sub(left), at.cell_h),
+                Face::Regular,
+                at.small_px,
+                &graphite::ellipsize(
+                    Face::Regular,
+                    at.small_px,
+                    &row.name,
+                    right.saturating_sub(left) as f32,
+                ),
+                tok.muted,
+                left,
+                right,
+            );
+        }
+        _ => {
+            let label_w = at.name_w.min(right.saturating_sub(left));
+            draw_text(
+                buffer,
+                width,
+                Rect::new(left, at.text_y, label_w, at.cell_h),
+                Face::Regular,
+                at.small_px,
+                &menu_row_label(&row.name, label_w as f32, at.small_px),
+                tok.muted,
+                left,
+                left.saturating_add(label_w),
+            );
+            let value_x = left.saturating_add(label_w).saturating_add(chrome.px(14.0));
+            draw_text(
+                buffer,
+                width,
+                Rect::new(value_x, at.text_y, right.saturating_sub(value_x), at.cell_h),
+                Face::Regular,
+                at.px,
+                &menu_row_label(&row.describe, right.saturating_sub(value_x) as f32, at.px),
+                tok.text_strong,
+                value_x,
+                right,
+            );
+        }
+    }
 }
 
 /// Paint the shared fixed-height palette geometry with Graphite tokens.
@@ -528,6 +701,57 @@ pub(crate) fn palette(
                     tok.key_text,
                     chord_x,
                     text_right,
+                );
+            }
+            PaletteLine::Info(section_index, row_index) => {
+                let row = &frame.sections[section_index].rows[row_index];
+                let line_index = layout.start + visible;
+                // A detail with no label continues the description above it
+                // and sits outside the details block.
+                let is_detail = |line: Option<&PaletteLine>| {
+                    matches!(line, Some(PaletteLine::Info(s, r))
+                        if frame.sections[*s].rows[*r].kind == RowKind::Detail
+                            && !frame.sections[*s].rows[*r].name.is_empty())
+                };
+                if is_detail(lines.get(line_index))
+                    && !is_detail(line_index.checked_sub(1).and_then(|i| lines.get(i)))
+                {
+                    // One details block behind each run of detail lines.
+                    let run = lines[line_index..]
+                        .iter()
+                        .take(layout.start + layout.shown - line_index)
+                        .take_while(|line| is_detail(Some(line)))
+                        .count();
+                    let block = Rect::new(
+                        row_rect.x,
+                        row_rect.y,
+                        row_rect.w,
+                        layout.geom.row_pitch_px.saturating_mul(run),
+                    );
+                    // The field fill reads as a well on dark panels; light
+                    // panels share the field's white, so tint the block.
+                    let fill = if tok.field == tok.panel {
+                        raster::mix_rgb(tok.panel, tok.muted, 22)
+                    } else {
+                        tok.field
+                    };
+                    graphite::fill_round_rect(buffer, width, block, 6.0, fill, 255);
+                }
+                paint_info_row(
+                    buffer,
+                    width,
+                    tok,
+                    chrome,
+                    row,
+                    InfoGeom {
+                        text_x,
+                        text_y,
+                        text_right,
+                        cell_h,
+                        name_w: natural_name_width,
+                        px,
+                        small_px,
+                    },
                 );
             }
         }

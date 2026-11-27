@@ -3420,7 +3420,11 @@ pub(crate) fn palette_collect_lines(frame: &PaletteFrame<'_>) -> (Vec<PaletteLin
             continue;
         }
         lines.push(PaletteLine::Header(section_index));
-        for row_index in 0..section.rows.len() {
+        for (row_index, row) in section.rows.iter().enumerate() {
+            if !row.kind.focusable() {
+                lines.push(PaletteLine::Info(section_index, row_index));
+                continue;
+            }
             if global == frame.selected {
                 selected_line = lines.len();
             }
@@ -3429,6 +3433,142 @@ pub(crate) fn palette_collect_lines(frame: &PaletteFrame<'_>) -> (Vec<PaletteLin
         }
     }
     (lines, selected_line)
+}
+
+/// Where a classic detail or status line may draw, in the row's text area.
+struct InfoColumns {
+    text_x: usize,
+    text_y: usize,
+    text_right: usize,
+    inner_cells: usize,
+    name_cells: usize,
+    name_x: usize,
+    gap: usize,
+}
+
+/// Classic paint for a non-focusable line: a status mark in its tone, or a
+/// muted label with its value. It never draws a selection.
+#[allow(clippy::too_many_arguments)]
+fn paint_info_line(
+    buffer: &mut [u32],
+    stride_px: usize,
+    font: &FontMetrics,
+    theme: &crate::theme::Theme,
+    row: &crate::palette::PaletteRow,
+    at: InfoColumns,
+    muted: [u8; 3],
+) {
+    use crate::palette::{RowKind, StatusTone};
+    let cell_x = |cells: usize| at.text_x.saturating_add(font.cell_w.saturating_mul(cells));
+    match row.kind {
+        RowKind::Status(tone) => {
+            let ink = match tone {
+                StatusTone::Good => theme.active_badge,
+                StatusTone::Notice => theme.unseen_badge,
+                StatusTone::Failed => theme.attention_badge,
+            };
+            let badge = format!("\u{25cf} {}", row.name);
+            draw_theme_text(
+                buffer,
+                stride_px,
+                font,
+                &badge,
+                cell_x(at.name_x),
+                at.text_y,
+                ink,
+                at.text_right,
+            );
+            let after = at.name_x + text_cells(&badge) + 2;
+            let line = ellipsized(&row.describe, at.inner_cells.saturating_sub(after));
+            draw_theme_text(
+                buffer,
+                stride_px,
+                font,
+                &line,
+                cell_x(after),
+                at.text_y,
+                muted,
+                at.text_right,
+            );
+        }
+        _ if row.full_width || row.describe.is_empty() => {
+            let text = menu_row_text(&row.name, at.inner_cells.saturating_sub(at.name_x));
+            draw_theme_text(
+                buffer,
+                stride_px,
+                font,
+                &text,
+                cell_x(at.name_x),
+                at.text_y,
+                muted,
+                at.text_right,
+            );
+        }
+        _ if !row.name.is_empty() && {
+            let (_, _, desc_max, _) =
+                palette_row_columns(at.inner_cells, 0, at.name_cells, at.name_x, at.gap);
+            text_cells(&row.describe) > desc_max
+        } =>
+        {
+            // A value too long for its column keeps the whole row instead of
+            // being cut: label, then value, across the line.
+            let label = format!("{}  ", row.name);
+            draw_theme_text(
+                buffer,
+                stride_px,
+                font,
+                &label,
+                cell_x(at.name_x),
+                at.text_y,
+                muted,
+                at.text_right,
+            );
+            let value_c = at.name_x + text_cells(&label);
+            let value = ellipsized(&row.describe, at.inner_cells.saturating_sub(value_c));
+            draw_theme_text(
+                buffer,
+                stride_px,
+                font,
+                &value,
+                cell_x(value_c),
+                at.text_y,
+                theme.chrome_fg,
+                at.text_right,
+            );
+        }
+        _ => {
+            let (name_c, desc_c, desc_max, _) =
+                palette_row_columns(at.inner_cells, 0, at.name_cells, at.name_x, at.gap);
+            let name = menu_row_text(&row.name, at.name_cells);
+            draw_theme_text(
+                buffer,
+                stride_px,
+                font,
+                &name,
+                cell_x(name_c),
+                at.text_y,
+                muted,
+                at.text_right,
+            );
+            let value = ellipsized(&row.describe, desc_max);
+            // No label: the line continues an action's description.
+            let ink = if row.name.is_empty() {
+                muted
+            } else {
+                theme.chrome_fg
+            };
+            draw_theme_text(
+                buffer,
+                stride_px,
+                font,
+                &value,
+                cell_x(desc_c),
+                at.text_y,
+                ink,
+                at.text_right,
+            );
+        }
+    }
 }
 
 /// Display width of `text` in cells.
@@ -3566,7 +3706,10 @@ fn wrap_lines(text: &str, max_cells: usize, lines: usize) -> Vec<String> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PaletteLine {
     Header(usize),
+    /// A focusable row. Selection, hover and clicks count only these.
     Row(usize, usize),
+    /// A detail or status line. Painted in the list, never selected.
+    Info(usize, usize),
 }
 
 fn palette_window(
@@ -4193,6 +4336,26 @@ pub fn rasterize_palette_with_hover(
                     text_y,
                     chord_ink,
                     text_right,
+                );
+            }
+            PaletteLine::Info(section_index, row_index) => {
+                let row = &frame.sections[section_index].rows[row_index];
+                paint_info_line(
+                    buffer,
+                    stride_px,
+                    font,
+                    theme,
+                    row,
+                    InfoColumns {
+                        text_x,
+                        text_y,
+                        text_right,
+                        inner_cells,
+                        name_cells: regular_name_cells,
+                        name_x: geom.name_x,
+                        gap: geom.chord_gap_cells,
+                    },
+                    muted,
                 );
             }
         }
@@ -12362,6 +12525,80 @@ mod tests {
         let wrapped = wrap_lines("one two three four five", 9, 2);
         assert_eq!(wrapped, vec!["one two", "three fo…"]);
         assert_eq!(wrap_lines("short", 9, 2), vec!["short"]);
+    }
+
+    #[test]
+    fn detail_and_status_lines_are_painted_but_never_selected_or_hit() {
+        use crate::palette::{PaletteRow, StatusTone};
+        let Ok(font) = FontMetrics::load(14.0) else {
+            return;
+        };
+        let rows = [
+            PaletteRow::status(StatusTone::Good, "Up to date".into(), String::new()),
+            PaletteRow::detail("Installed release".into(), "0.3.41".into()),
+            PaletteRow::plain("Check again".into(), String::new(), String::new()),
+            PaletteRow::detail("A line of explanation".into(), String::new()),
+            PaletteRow::plain("Back".into(), String::new(), String::new()),
+        ];
+        let sections = [PaletteSection {
+            header: "UPDATE AND RESTART RESULT",
+            subtitle: "",
+            rows: &rows,
+        }];
+        let frame = PaletteFrame {
+            layout_mode: PaletteLayoutMode::ContentFit,
+            query: None,
+            query_focused: false,
+            chips: None,
+            sections: &sections,
+            selected: 1,
+            scroll: 0,
+            detail: None,
+            footer: "Enter select · Esc close · ↑↓ move",
+        };
+        let (lines, selected_line) = palette_collect_lines(&frame);
+        assert_eq!(
+            lines,
+            vec![
+                PaletteLine::Header(0),
+                PaletteLine::Info(0, 0),
+                PaletteLine::Info(0, 1),
+                PaletteLine::Row(0, 2),
+                PaletteLine::Info(0, 3),
+                PaletteLine::Row(0, 4),
+            ]
+        );
+        assert_eq!(selected_line, 5, "selection 1 is the second action, Back");
+        let width = 160 * font.cell_w;
+        let height = 48 * font.cell_h;
+        let layout = palette_layout(&font, &frame, width, height).expect("menu fits");
+        assert_eq!(
+            layout.rows.iter().map(|row| row.global).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        let pitch = layout.geom.row_pitch_px;
+        let x = layout.panel_x + layout.panel_w / 2;
+        // The badge and detail lines sit just above the first action.
+        let first = layout.rows[0].y;
+        assert_eq!(palette_hit(&layout, x, first - pitch + 1), None);
+        assert_eq!(palette_hit(&layout, x, first - 2 * pitch + 1), None);
+        assert_eq!(palette_hit(&layout, x, first + 1), Some(0));
+        // The explanation line between the actions is not a target either.
+        assert_eq!(palette_hit(&layout, x, first + pitch + 1), None);
+        assert_eq!(palette_hit(&layout, x, layout.rows[1].y + 1), Some(1));
+        let theme = default_theme();
+        let mut buffer = vec![pack_rgb(theme.default_bg); width * height];
+        rasterize_palette(
+            &font,
+            &frame,
+            theme,
+            OverlaySurface::default(),
+            &mut buffer,
+            width,
+            height,
+            FOCUS_BORDER_PALETTE[0].1,
+        )
+        .expect("classic palette renders information lines");
     }
 
     fn assert_full_width_menu_row_fits(header: &str, label: &str) {

@@ -303,8 +303,9 @@ on the host and keeps the data on SSH:
    token through the gate's `push-register` verb.
 2. On the host, a small sender runs beside the pmux server as a local client,
    like any `pmux` command, and watches the same signals the inbox uses. When
-   a seat joins the inbox or rises in it, the sender sends one wake-up to each
-   registered device of that host.
+   a seat enters the inbox for an urgent reason (every rank except a finished
+   turn, as set out in [`phone-seat-attention.md`](phone-seat-attention.md)),
+   the sender sends one wake-up to each registered device of that host.
 3. The wake-up is **content-free**: the host label from pairing and a
    generic line such as "A seat needs you". It carries no seat name, message,
    pane text or session id. The platform push service sees only that this host

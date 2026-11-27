@@ -5,9 +5,14 @@ prototype was disposable and is not part of this change. Nothing here alters
 the pmux server, the attach client or any shipped command.
 
 Base: `origin/main` `3bba8e8f`. The transport follows the decision record in
-[`remote-attach-transport.md`](remote-attach-transport.md) (in review): SSH to
-the host's own SSH server, one restricted key per device, and a fixed gate as
-the forced command.
+[`remote-attach-transport.md`](remote-attach-transport.md): SSH to the host's
+own SSH server over a private network, one restricted key per device, and a
+fixed gate as the forced command.
+
+The owner's decisions of November 27, 2026 came after the prototype ran. They
+change the pairing defaults, notifications and reachability, not the
+measurements below. [After the owner's decisions](#after-the-owners-decisions)
+lists what changes and shows design frames for the new screens.
 
 ## Summary
 
@@ -177,12 +182,31 @@ These need real devices and belong to the platform and distribution work:
   with user presence for each connection, and pinned host keys.
 - Background behaviour. A suspended app loses its connection. The measured
   reconnect (about 3 s after the network returns) is the floor for "app comes
-  back to the foreground".
+  back to the foreground", including after the user taps a push.
+- Push delivery and token rotation on each platform.
 - The pairing transfer of the device's public key, and coexistence with
   another VPN on the phone.
 - The on-screen keyboard, IME composition, and a key bar on a real touch
   screen.
 - Rendering cost on a phone GPU or CPU.
+
+## After the owner's decisions
+
+| Decision | Effect on the companion |
+| --- | --- |
+| Push notifications in v1 | The host sends a content-free wake-up when a seat needs the user. The phone registers its push token at pairing through the gate. The details still come over SSH after the user opens the app. |
+| Full input by default | Pairing preselects full input. Opening a pane gives a keyboard at once, and the first key takes the lease, as attach does. Watch only stays a choice at pairing. |
+| No public-port fallback | The phone dials only the private-network address from the pairing code. When that network is off, the host shows as not connected, with its last known rows greyed. The prototype reached its host through a jump host, which a shipped companion will not do. |
+| Companion-only SSH listener optional, off by default | No change for the companion. Pairing works against the host's ordinary SSH service. |
+
+The frames below are design mock-ups for the new or changed screens. They
+were drawn for review in the prototype's style. Unlike the captures above,
+they are not screenshots of a run.
+
+| | | | |
+| --- | --- | --- | --- |
+| ![Paired hosts with scope and notification state](companion-terminal/design-hosts.png) | ![Pairing with full input preselected](companion-terminal/design-pairing-scope.png) | ![A content-free push on the lock screen](companion-terminal/design-push.png) | ![The private network is off; no other address is tried](companion-terminal/design-network-unreachable.png) |
+| Paired hosts | Pairing: scope and notifications | Push | Private network off |
 
 ## Proof plan for the follow-ups
 

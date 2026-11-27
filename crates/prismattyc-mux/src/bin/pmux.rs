@@ -3422,9 +3422,8 @@ pmux send PANE TEXT [--enter] [--literal] [--force] [-- TEXT]
 Write keys to a pane without holding the controller lease for 750 ms.
 Refuses (exit 1) when a live controller exists or the input ledger is
 dirty, unless --force. --force takes the lease, writes, and releases; it
-does not hand the lease back, and taking it from a live attach also
-revokes that attach's rich viewer grant (the attach re-acquires on its
-next key). The server refuses a lease-free write into unsubmitted input
+does not hand the lease back (a live attach re-acquires it on its next
+key). The server refuses a lease-free write into unsubmitted input
 even when the snapshot looked clean. --enter appends CR. Default text interprets
 \\n \\r \\t \\e \\\\ ; --literal sends the bytes as typed.
 A leading -- lets TEXT start with -. Writes chunk at 64 KiB.

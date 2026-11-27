@@ -5,6 +5,11 @@ Rich rendering remains optional and experimental. Query capabilities before
 sending rich content. See [capability discovery](capability-protocol.md) for
 how to negotiate.
 
+Rich mode is being removed. `pmuxd` and `pmux-attach` no longer carry rich
+surfaces: daemon panes do not answer capability queries, and attach paints no
+overlays or dock and sends no rich focus or input. The mux rules below
+describe the earlier behaviour.
+
 ### 1. Compatibility profiles and capability cut
 
 Protocol `0.3` is the first rich-surface-v2 profile. Minor-version negotiation

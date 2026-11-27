@@ -1,8 +1,8 @@
 //! Thin local attach client for the Phase 2B control protocol.
 //!
 //! Non-TTY (or `--json`) prints the bounded `ReadPane` projection as JSON so
-//! scripts stay working. `--styled-json` exposes the bounded styled and
-//! rich projection for proof/debug tooling. TTY stdin and stdout enter an interactive raw-mode
+//! scripts stay working. `--styled-json` exposes the bounded styled
+//! projection for proof/debug tooling. TTY stdin and stdout enter an interactive raw-mode
 //! client that paints the pane, forwards keys via `WritePane`, and detaches
 //! on `C-\ d` without killing the server-owned child. PageUp / `C-\ [`
 //! enter local copy mode over server-side scrollback. `C-\ a` cycles
@@ -16,8 +16,7 @@
 //! full-width row does not wrap. Erase-line runs *before* glyphs so
 //! it cannot wipe the last column. MailAttention `depth > 0` paints
 //! the envelope as one Nerd Font letter cell (U+F0E0) after the
-//! guest grid; it does not mutate server cells. With `--experimental-rich`,
-//! C-S-G grants `input.rich_focus` on a requested overlay.
+//! guest grid; it does not mutate server cells.
 
 use std::{
     io::{self, BufRead, BufReader, Write},
@@ -47,10 +46,9 @@ use prismattyc_mux::{
     route_seat_to_host, should_host_route_seat, space_sessions_in_tab_order, spaces_dir,
     wait_host_ack, ArrangementWire, ColorWire, ControlError, ControlErrorCode, ControlIdMatch,
     ControlRequest, ControlResponse, ControlResponseBody, ControlResponseData, Event, OverlayKind,
-    OverlayRun, PaneContent, PaneOverlay, PaneStyled, RichInputKind, RichPointerPhase, Snapshot,
-    SocketLiveness, SpawnSpec, StyleRun, WorkspaceInverseRun, WorkspaceStyleRun, PROTOCOL_VERSION,
+    PaneContent, PaneOverlay, PaneStyled, Snapshot, SocketLiveness, SpawnSpec, StyleRun,
+    PROTOCOL_VERSION,
 };
-use prismattyc_protocol::encode_focus_key;
 #[cfg(unix)]
 use rustix::{
     event::{poll, PollFd, PollFlags, Timespec},
@@ -223,13 +221,11 @@ stays live when history is empty so the child still sees it. Esc/q or
 wheeling back to the tail returns to live;
 plain drag selects while attach is idle. Hold Shift when the
 child has application mouse and this attach holds the lease. MailAttention lights a
-one-cell Nerd envelope (U+F0E0) at the upper-left. With the server
-`--experimental-rich` flag, C-S-G grants input.rich_focus on a requested
-overlay; Esc or C-S-G revokes. Flag-off leaves C-S-G for the child.
+one-cell Nerd envelope (U+F0E0) at the upper-left.
 --json, or a
 non-TTY stdin, prints the JSON ReadPane dump used by. --watch keeps
 polling that projection (JSON) or stays attached (TTY). --styled-json selects
-the richer ReadPaneStyled dump for local proof/debug tooling without changing
+the styled ReadPaneStyled dump for local proof/debug tooling without changing
 the stable --json shape.
 --read-only never acquires the controller lease. Keys are dropped. Scroll
 and copy still work. The attach chrome shows [ro].
@@ -1316,7 +1312,7 @@ fn write_pane(client: &mut Client, client_id: u64, pane_id: u64, data: String) -
     }
 }
 
-/// Interactive attach must survive `WritePane`/`RichInput` `NotController`.
+/// Interactive attach must survive a `WritePane` `NotController`.
 /// A `pmux send --force` takeover is the usual cause. Drop the stale
 /// controller flag, paint a chip, and keep the TTY session up.
 fn absorb_not_controller(
@@ -1504,49 +1500,22 @@ struct PaintFrame {
     max_view_scroll: Option<u32>,
     child_mouse_tracking: Option<bool>,
     child_mouse_sgr: Option<bool>,
-    overlays: Vec<PaneOverlay>,
-    experimental_rich: bool,
-    rich_focus_id: Option<u32>,
-    structured_focus: bool,
-    workspace_rows: u32,
-    semantic_clipboard: Option<String>,
-    semantic_clipboard_seq: Option<u64>,
 }
 
 impl PaintFrame {
     fn from_styled(styled: PaneStyled) -> Self {
-        let guest_runs = if styled.runs.len() == styled.content.lines.len() {
+        let runs = if styled.runs.len() == styled.content.lines.len() {
             styled.runs
         } else {
             plain_runs(&styled.content.lines)
         };
-        let workspace_rows = u32::try_from(styled.workspace.len()).unwrap_or(u32::MAX);
-        let mut runs = selected_workspace_runs(
-            &styled.workspace,
-            &styled.workspace_inverse,
-            &styled.workspace_styles,
-        );
-        runs.extend(guest_runs);
-        let mut content = styled.content;
-        let mut lines = styled.workspace;
-        lines.append(&mut content.lines);
-        content.lines = lines;
-        content.rows = content.rows.saturating_add(workspace_rows);
-        content.cursor_row = content.cursor_row.saturating_add(workspace_rows);
         Self {
-            content,
+            content: styled.content,
             view_offset: styled.view_offset,
             max_view_scroll: styled.max_view_scroll,
             child_mouse_tracking: styled.child_mouse_tracking,
             child_mouse_sgr: styled.child_mouse_sgr,
-            overlays: styled.overlays,
-            experimental_rich: styled.experimental_rich,
-            rich_focus_id: styled.rich_focus_id,
-            structured_focus: styled.structured_focus,
-            workspace_rows,
             runs,
-            semantic_clipboard: styled.semantic_clipboard,
-            semantic_clipboard_seq: styled.semantic_clipboard_seq,
         }
     }
 
@@ -1559,13 +1528,6 @@ impl PaintFrame {
             max_view_scroll: None,
             child_mouse_tracking: None,
             child_mouse_sgr: None,
-            overlays: Vec::new(),
-            experimental_rich: false,
-            rich_focus_id: None,
-            structured_focus: false,
-            workspace_rows: 0,
-            semantic_clipboard: None,
-            semantic_clipboard_seq: None,
         }
     }
 }
@@ -1638,71 +1600,6 @@ fn clip_style_runs(runs: &[StyleRun], origin_col: u32, term_cols: u32) -> Vec<St
     out
 }
 
-/// Viewport overlays stay in visible-terminal coordinates.
-/// CellRect overlays follow pane panning. Drop a CellRect that sits fully
-/// left of the origin; trim one that straddles the left edge.
-fn clip_overlay_into_viewport(
-    mut overlay: PaneOverlay,
-    origin_row: u32,
-    origin_col: u32,
-    view_rows: u32,
-    view_cols: u32,
-) -> Option<PaneOverlay> {
-    match overlay.kind {
-        OverlayKind::Viewport => Some(overlay),
-        OverlayKind::CellRect => {
-            overlay.row -= i32::try_from(origin_row).unwrap_or(i32::MAX);
-            let view_rows_i = i32::try_from(view_rows).unwrap_or(i32::MAX);
-            if overlay.row >= view_rows_i {
-                return None;
-            }
-            if overlay.row.saturating_add(i32::from(overlay.rows)) <= 0 {
-                return None;
-            }
-            let start = u32::from(overlay.col);
-            let end = start.saturating_add(u32::from(overlay.cols));
-            if end <= origin_col || start >= origin_col.saturating_add(view_cols) {
-                return None;
-            }
-            if start < origin_col {
-                skip_overlay_cols(&mut overlay, origin_col - start);
-                overlay.col = 0;
-            } else {
-                overlay.col = u16::try_from(start - origin_col).unwrap_or(u16::MAX);
-            }
-            if overlay.cols == 0 {
-                return None;
-            }
-            Some(overlay)
-        }
-    }
-}
-
-fn skip_overlay_cols(overlay: &mut PaneOverlay, skip: u32) {
-    let skip_u = u16::try_from(skip).unwrap_or(u16::MAX);
-    overlay.cols = overlay.cols.saturating_sub(skip_u);
-    let skip_n = skip as usize;
-    if !overlay.text.is_empty() {
-        overlay.text = overlay.text.chars().skip(skip_n).collect();
-    }
-    if overlay.runs.is_empty() {
-        return;
-    }
-    let mut remaining = skip_n;
-    let mut kept = Vec::new();
-    for run in overlay.runs.drain(..) {
-        let n = run.text.chars().count();
-        if remaining >= n {
-            remaining -= n;
-            continue;
-        }
-        let text: String = run.text.chars().skip(remaining).collect();
-        remaining = 0;
-        kept.push(OverlayRun { text, ..run });
-    }
-    overlay.runs = kept;
-}
-
 /// Clip a pane frame to a terminal. Scroll so the cursor cell stays visible.
 /// Cursor is rewritten to the on-screen cell and never past the last row/col.
 fn clip_frame_to_terminal(mut frame: PaintFrame, term_cols: u32, term_rows: u32) -> PaintFrame {
@@ -1735,13 +1632,6 @@ fn clip_frame_to_terminal(mut frame: PaintFrame, term_cols: u32, term_rows: u32)
     } else {
         frame.runs.clear();
     }
-    frame.overlays = frame
-        .overlays
-        .into_iter()
-        .filter_map(|overlay| {
-            clip_overlay_into_viewport(overlay, origin_row, origin_col, view_rows, view_cols)
-        })
-        .collect();
     while frame.content.lines.len() < view_rows as usize {
         frame.content.lines.push(String::new());
         frame.runs.push(vec![StyleRun::plain(String::new())]);
@@ -1758,11 +1648,6 @@ fn clip_frame_to_terminal(mut frame: PaintFrame, term_cols: u32, term_rows: u32)
         .cursor_col
         .saturating_sub(origin_col)
         .min(view_cols.saturating_sub(1));
-    if origin_row < frame.workspace_rows {
-        frame.workspace_rows = frame.workspace_rows.saturating_sub(origin_row);
-    } else {
-        frame.workspace_rows = 0;
-    }
     frame
 }
 
@@ -1780,67 +1665,6 @@ fn plain_runs(lines: &[String]) -> Vec<Vec<StyleRun>> {
     lines
         .iter()
         .map(|line| vec![StyleRun::plain(line.clone())])
-        .collect()
-}
-
-fn selected_workspace_runs(
-    lines: &[String],
-    inverse: &[WorkspaceInverseRun],
-    styles: &[WorkspaceStyleRun],
-) -> Vec<Vec<StyleRun>> {
-    lines
-        .iter()
-        .enumerate()
-        .map(|(row, line)| {
-            let mut runs = Vec::new();
-            let mut current = String::new();
-            let mut current_inverse = false;
-            let mut current_fg = ColorWire::Default;
-            for_each_display_scalar(line, |col, ch, width| {
-                let col = u32::try_from(col).unwrap_or(u32::MAX);
-                let inverse = if width == 0 {
-                    current_inverse
-                } else {
-                    inverse.iter().any(|run| {
-                        run.row == row as u32
-                            && col >= run.col
-                            && col < run.col.saturating_add(run.cols)
-                    })
-                };
-                let fg = if width == 0 {
-                    current_fg
-                } else {
-                    styles
-                        .iter()
-                        .find(|run| {
-                            run.row == row as u32
-                                && col >= run.col
-                                && col < run.col.saturating_add(run.cols)
-                        })
-                        .map(|run| run.fg)
-                        .unwrap_or_default()
-                };
-                if !current.is_empty() && (inverse != current_inverse || fg != current_fg) {
-                    let mut style = StyleRun::plain(std::mem::take(&mut current));
-                    style.inverse = current_inverse;
-                    style.fg = current_fg;
-                    runs.push(style);
-                }
-                current_inverse = inverse;
-                current_fg = fg;
-                current.push(ch);
-            });
-            if !current.is_empty() {
-                let mut style = StyleRun::plain(current);
-                style.inverse = current_inverse;
-                style.fg = current_fg;
-                runs.push(style);
-            }
-            if runs.is_empty() {
-                runs.push(StyleRun::plain(String::new()));
-            }
-            runs
-        })
         .collect()
 }
 
@@ -2115,11 +1939,6 @@ fn append_copy_selection(out: &mut Vec<u8>, frame: &PaintFrame, scroll: &ScrollS
 fn paint_bytes(prev: Option<&PaintFrame>, next: &PaintFrame, clipboard: Option<&str>) -> Vec<u8> {
     let mut out = Vec::new();
     if let Some(text) = clipboard {
-        if let Some(osc) = prismattyc_core::encode_osc52_clipboard(text) {
-            out.extend_from_slice(&osc);
-        }
-    }
-    if let Some(text) = next.semantic_clipboard.as_deref() {
         if let Some(osc) = prismattyc_core::encode_osc52_clipboard(text) {
             out.extend_from_slice(&osc);
         }
@@ -2470,147 +2289,6 @@ fn append_attach_toast(
     append_caret(out, next);
 }
 
-fn overlay_cells(overlay: &PaneOverlay) -> Vec<(char, OverlayRun)> {
-    if overlay.runs.is_empty() {
-        return overlay
-            .text
-            .chars()
-            .map(|ch| {
-                (
-                    ch,
-                    OverlayRun {
-                        text: String::new(),
-                        fg: None,
-                        bg: None,
-                        bold: false,
-                        italic: false,
-                        underline: false,
-                        inverse: true,
-                    },
-                )
-            })
-            .collect();
-    }
-    let mut out = Vec::new();
-    for run in &overlay.runs {
-        for ch in run.text.chars() {
-            out.push((ch, run.clone()));
-        }
-    }
-    out
-}
-
-fn write_overlay_style(out: &mut Vec<u8>, style: &OverlayRun) {
-    out.extend_from_slice(b"\x1b[0m");
-    if style.bold {
-        out.extend_from_slice(b"\x1b[1m");
-    }
-    if style.italic {
-        out.extend_from_slice(b"\x1b[3m");
-    }
-    if style.underline {
-        out.extend_from_slice(b"\x1b[4m");
-    }
-    if style.inverse {
-        out.extend_from_slice(b"\x1b[7m");
-    }
-    if let Some(n) = style.fg {
-        let _ = write!(out, "\x1b[38;5;{n}m");
-    }
-    if let Some(n) = style.bg {
-        let _ = write!(out, "\x1b[48;5;{n}m");
-    }
-}
-
-fn paint_one_overlay(
-    out: &mut Vec<u8>,
-    overlay: &PaneOverlay,
-    cols: u32,
-    rows: u32,
-    row_offset: u32,
-) {
-    if overlay.rows == 0 || overlay.cols == 0 || cols == 0 || rows == 0 {
-        return;
-    }
-    let cells = overlay_cells(overlay);
-    let mut cell_i = 0usize;
-    if overlay.row < 0 {
-        let skipped = overlay.row.unsigned_abs() as usize;
-        cell_i = skipped.saturating_mul(usize::from(overlay.cols));
-    }
-    for overlay_row in 0..overlay.rows {
-        let absolute = overlay.row.saturating_add(i32::from(overlay_row));
-        if absolute < 0 {
-            continue;
-        }
-        let row = (absolute as u32).saturating_add(row_offset);
-        if row >= rows {
-            break;
-        }
-        for col_offset in 0..overlay.cols {
-            let (ch, style) = cells.get(cell_i).cloned().unwrap_or((
-                ' ',
-                OverlayRun {
-                    text: String::new(),
-                    fg: None,
-                    bg: None,
-                    bold: false,
-                    italic: false,
-                    underline: false,
-                    inverse: true,
-                },
-            ));
-            cell_i = cell_i.saturating_add(1);
-            let col = u32::from(overlay.col).saturating_add(u32::from(col_offset));
-            if col >= cols {
-                continue;
-            }
-            let _ = write!(
-                out,
-                "\x1b[{};{}H",
-                row.saturating_add(1),
-                col.saturating_add(1)
-            );
-            write_overlay_style(out, &style);
-            let mut utf8 = [0u8; 4];
-            out.extend_from_slice(ch.encode_utf8(&mut utf8).as_bytes());
-            out.extend_from_slice(b"\x1b[0m");
-        }
-    }
-}
-
-/// z1 `cell_rect` then z2 `viewport`. Clip to the attach grid.
-/// Skip `cell_rect` while panning history. Skip all overlays on alt.
-fn append_rich_overlays(out: &mut Vec<u8>, next: &PaintFrame) {
-    if next.overlays.is_empty() || next.content.alt_active {
-        return;
-    }
-    let scrolled = next.view_offset.unwrap_or(0) > 0;
-    let mut ordered: Vec<&PaneOverlay> = next
-        .overlays
-        .iter()
-        .filter(|overlay| !(scrolled && overlay.kind == OverlayKind::CellRect))
-        .collect();
-    ordered.sort_by_key(|overlay| match overlay.kind {
-        OverlayKind::CellRect => 0,
-        OverlayKind::Viewport => 1,
-    });
-    if ordered.is_empty() {
-        return;
-    }
-    out.extend_from_slice(b"\x1b[?25l");
-    for overlay in ordered {
-        paint_one_overlay(
-            out,
-            overlay,
-            next.content.cols,
-            next.content.rows,
-            next.workspace_rows,
-        );
-    }
-    append_caret(out, next);
-}
-
 /// Nested copy-mode chip text.
 ///
 /// An empty live query omits `0/0`. A typed query with no matches
@@ -2731,7 +2409,6 @@ fn compose_paint_with_terminal_cols(
     }
     append_copy_search(&mut bytes, next, scroll);
     append_copy_selection(&mut bytes, next, scroll);
-    append_rich_overlays(&mut bytes, next);
     append_mail_overlay(&mut bytes, next, mail_depth);
     append_attach_toast(&mut bytes, next, toast, terminal_cols);
     let chip = chrome.chip_suffix();
@@ -3701,8 +3378,8 @@ fn forward_child_mouse(scroll: &ScrollState, controller: bool, shift: bool) -> b
 /// pane child enabled application mouse. An idle observer (#143) must stay
 /// on 7700 so prismattyc-host can drag-select. Wheel-only (7700) leaves buttons
 /// with the host. Full mouse turns 7700 off so the host does not see both.
-fn outer_mouse_full(controller: bool, child_mouse: Option<bool>, structured_focus: bool) -> bool {
-    controller && (child_mouse == Some(true) || structured_focus)
+fn outer_mouse_full(controller: bool, child_mouse: Option<bool>) -> bool {
+    controller && child_mouse == Some(true)
 }
 
 fn outer_mouse_seq(child_full: bool) -> &'static [u8] {
@@ -3825,8 +3502,6 @@ fn loop_input_ctx<'a>(
     pending_utf8: &'a mut Vec<u8>,
     scroll: &'a mut ScrollState,
     previous: Option<&PaintFrame>,
-    rich_focus_id: &'a mut Option<u32>,
-    structured_focus: &'a mut bool,
     read_only: bool,
     held_notice: &'a mut Option<String>,
     session_switch: &'a mut Option<SessionSwitch>,
@@ -3844,10 +3519,6 @@ fn loop_input_ctx<'a>(
         pending_keys,
         pending_utf8,
         scroll,
-        experimental_rich: previous.is_some_and(|frame| frame.experimental_rich),
-        rich_focus_id,
-        structured_focus,
-        workspace_rows: previous.map_or(0, |frame| frame.workspace_rows),
         child_pid: previous.and_then(|frame| frame.content.child_pid),
         read_only,
         held_notice,
@@ -3864,14 +3535,11 @@ fn maybe_idle_release_lease(
     controller: &mut bool,
     got_input: bool,
     pending_utf8: &[u8],
-    rich_focus_id: &mut Option<u32>,
-    structured_focus: &mut bool,
     last_typed: &mut Option<Instant>,
 ) {
     if !*controller
         || got_input
         || !pending_utf8.is_empty()
-        || rich_focus_id.is_some()
         || !last_typed.is_some_and(|t| t.elapsed() >= LEASE_IDLE)
     {
         return;
@@ -3893,8 +3561,6 @@ fn maybe_idle_release_lease(
     }
     *controller = false;
     *last_typed = None;
-    *rich_focus_id = None;
-    *structured_focus = false;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4012,15 +3678,6 @@ fn refresh_space_identity(
     );
 }
 
-fn idle_revoke_rich_focus(ctx: &mut InputCtx<'_>) -> Result<()> {
-    ctx.ensure_controller()?;
-    if !*ctx.controller {
-        return Ok(());
-    }
-    *ctx.last_typed = Some(Instant::now());
-    apply_rich_focus_toggle(ctx, true)
-}
-
 fn idle_forward_escape(ctx: &mut InputCtx<'_>) -> Result<()> {
     ctx.ensure_controller()?;
     if !*ctx.controller {
@@ -4046,8 +3703,6 @@ fn handle_idle_escape(
     pending_utf8: &mut Vec<u8>,
     scroll: &mut ScrollState,
     previous: &mut Option<PaintFrame>,
-    rich_focus_id: &mut Option<u32>,
-    structured_focus: &mut bool,
     sync_input: &mut bool,
     controller: &mut bool,
     lease_held: &mut bool,
@@ -4078,17 +3733,11 @@ fn handle_idle_escape(
         pending_utf8,
         scroll,
         previous.as_ref(),
-        rich_focus_id,
-        structured_focus,
         read_only,
         held_notice,
         session_switch,
     );
-    if ctx.rich_focus_id.is_some() {
-        idle_revoke_rich_focus(&mut ctx)
-    } else {
-        idle_forward_escape(&mut ctx)
-    }
+    idle_forward_escape(&mut ctx)
 }
 
 fn run_interactive(
@@ -4203,7 +3852,7 @@ fn run_interactive(
             }
         }
         sync_outer_mouse(
-            outer_mouse_full(controller, scroll.child_mouse, frame.structured_focus),
+            outer_mouse_full(controller, scroll.child_mouse),
             &mut last_outer_full,
         );
         scroll.anchor_to(frame.max_view_scroll);
@@ -4246,13 +3895,8 @@ fn run_interactive(
             },
             last_size.map(|size| (size.cols, size.rows)),
         )?;
-        ack_painted_semantic_copy(client, client_id, pane_id, frame.semantic_clipboard_seq);
         Some(frame)
     };
-    let mut rich_focus_id = previous.as_ref().and_then(|frame| frame.rich_focus_id);
-    let mut structured_focus = previous
-        .as_ref()
-        .is_some_and(|frame| frame.structured_focus);
     let mut prev_mail = Some(mail_depth);
     // --write then interactive starts already holding the lease. Seed the
     // idle timer so InjectMail is not blocked until the first key.
@@ -4329,8 +3973,6 @@ fn run_interactive(
                             &mut pending_utf8,
                             &mut scroll,
                             previous.as_ref(),
-                            &mut rich_focus_id,
-                            &mut structured_focus,
                             read_only,
                             &mut held_notice,
                             &mut session_switch,
@@ -4408,8 +4050,6 @@ fn run_interactive(
                                         &mut pending_utf8,
                                         &mut scroll,
                                         previous.as_ref(),
-                                        &mut rich_focus_id,
-                                        &mut structured_focus,
                                         read_only,
                                         &mut held_notice,
                                         &mut session_switch,
@@ -4473,8 +4113,6 @@ fn run_interactive(
             &mut pending_utf8,
             &mut scroll,
             &mut previous,
-            &mut rich_focus_id,
-            &mut structured_focus,
             &mut sync_input,
             &mut controller,
             &mut lease_held,
@@ -4492,8 +4130,6 @@ fn run_interactive(
             &mut controller,
             got_input,
             &pending_utf8,
-            &mut rich_focus_id,
-            &mut structured_focus,
             &mut last_typed,
         );
 
@@ -4601,7 +4237,7 @@ fn run_interactive(
         }
         scroll.apply_frame_flags(&frame);
         sync_outer_mouse(
-            outer_mouse_full(controller, scroll.child_mouse, frame.structured_focus),
+            outer_mouse_full(controller, scroll.child_mouse),
             &mut last_outer_full,
         );
         let prior_offset = scroll.offset;
@@ -4663,13 +4299,8 @@ fn run_interactive(
                 last_size.map(|size| (size.cols, size.rows)),
             )?;
             scroll.clear_pending_clipboard();
-            ack_painted_semantic_copy(client, client_id, pane_id, frame.semantic_clipboard_seq);
             previous = Some(frame);
             prev_mail = Some(mail_depth);
-            rich_focus_id = previous.as_ref().and_then(|frame| frame.rich_focus_id);
-            structured_focus = previous
-                .as_ref()
-                .is_some_and(|frame| frame.structured_focus);
         }
     };
 
@@ -4737,17 +4368,9 @@ enum AttachKey {
         x: u32,
         y: u32,
         primary: bool,
-        phase: RichPointerPhase,
     },
     /// Incomplete or junk mouse prefix — drop.
     MouseOther,
-    /// Ctrl+Shift+G (xterm 27;6;103~ / kitty 103;6u). Stolen only when rich is on.
-    RichFocusToggle {
-        bytes: Vec<u8>,
-    },
-    SemanticCopy {
-        bytes: Vec<u8>,
-    },
     Forward(Vec<u8>),
 }
 
@@ -4877,11 +4500,7 @@ fn drain_keys(pending: &mut Vec<u8>) -> Vec<AttachKey> {
                         {
                             let end = i + 3 + rel;
                             let seq = pending[i..=end].to_vec();
-                            if is_rich_focus_toggle_seq(&seq) {
-                                out.push(AttachKey::RichFocusToggle { bytes: seq });
-                            } else if is_semantic_copy_seq(&seq) {
-                                out.push(AttachKey::SemanticCopy { bytes: seq });
-                            } else if let Some((kind, modifiers)) = parse_csi_nav(&seq) {
+                            if let Some((kind, modifiers)) = parse_csi_nav(&seq) {
                                 out.push(AttachKey::Nav {
                                     kind,
                                     bytes: seq,
@@ -4947,13 +4566,6 @@ fn drain_keys(pending: &mut Vec<u8>) -> Vec<AttachKey> {
                                     x,
                                     y,
                                     primary: matches!(button & !28, 0 | 32),
-                                    phase: if !press {
-                                        RichPointerPhase::Release
-                                    } else if button & 32 != 0 {
-                                        RichPointerPhase::Move
-                                    } else {
-                                        RichPointerPhase::Press
-                                    },
                                 },
                             });
                             i = end + 1;
@@ -5041,63 +4653,6 @@ fn parse_csi_nav(seq: &[u8]) -> Option<(NavKey, u8)> {
     Some((kind, modifiers))
 }
 
-fn is_semantic_copy_seq(bytes: &[u8]) -> bool {
-    matches!(
-        bytes,
-        b"\x1b[27;6;99~" | b"\x1b[27;6;67~" | b"\x1b[99;6u" | b"\x1b[67;6u"
-    )
-}
-
-fn ack_painted_semantic_copy(client: &mut Client, client_id: u64, pane_id: u64, seq: Option<u64>) {
-    let Some(seq) = seq else {
-        return;
-    };
-    let _ = keep_request_ok(
-        "CopySemantic",
-        pane_id,
-        None,
-        client.request(|request_id| ControlRequest::CopySemantic {
-            version: PROTOCOL_VERSION,
-            request_id,
-            client_id,
-            pane_id,
-            seq: Some(seq),
-        }),
-    );
-}
-
-fn apply_semantic_copy(ctx: &mut InputCtx<'_>) -> Result<()> {
-    match ctx
-        .client
-        .request(|request_id| ControlRequest::CopySemantic {
-            version: PROTOCOL_VERSION,
-            request_id,
-            client_id: ctx.client_id,
-            pane_id: ctx.pane_id,
-            seq: None,
-        }) {
-        Ok(ControlResponseData::SemanticCopy {
-            text: Some(text), ..
-        }) => {
-            if let Some(osc) = prismattyc_core::encode_osc52_clipboard(&text) {
-                let mut out = io::stdout().lock();
-                out.write_all(&osc)?;
-                out.flush()?;
-            }
-            Ok(())
-        }
-        Ok(_) => Ok(()),
-        Err(error) => Err(error).context("copy semantic text"),
-    }
-}
-
-fn is_rich_focus_toggle_seq(bytes: &[u8]) -> bool {
-    matches!(
-        bytes,
-        b"\x1b[27;6;103~" | b"\x1b[27;6;71~" | b"\x1b[103;6u" | b"\x1b[71;6u"
-    )
-}
-
 struct InputCtx<'a> {
     client: &'a mut Client,
     client_id: u64,
@@ -5111,99 +4666,10 @@ struct InputCtx<'a> {
     pending_keys: &'a mut Vec<u8>,
     pending_utf8: &'a mut Vec<u8>,
     scroll: &'a mut ScrollState,
-    experimental_rich: bool,
-    rich_focus_id: &'a mut Option<u32>,
-    structured_focus: &'a mut bool,
-    workspace_rows: u32,
     child_pid: Option<u32>,
     read_only: bool,
     held_notice: &'a mut Option<String>,
     session_switch: &'a mut Option<SessionSwitch>,
-}
-
-fn nav_focus_token(kind: NavKey) -> Option<&'static str> {
-    match kind {
-        NavKey::Up => Some("Up"),
-        NavKey::Down => Some("Down"),
-        NavKey::Left => Some("Left"),
-        NavKey::Right => Some("Right"),
-        NavKey::PageUp => Some("PageUp"),
-        NavKey::PageDown => Some("PageDown"),
-        NavKey::Home => Some("Home"),
-        NavKey::End => Some("End"),
-    }
-}
-
-fn vt_focus_token(data: &[u8]) -> Option<String> {
-    match data {
-        [b'\r'] | [b'\n'] => Some("Enter".into()),
-        [b'\t'] => Some("Tab".into()),
-        [0x7f] | [0x08] => Some("Backspace".into()),
-        [b] if (0x20..=0x7e).contains(b) => Some(char::from(*b).to_string()),
-        _ => None,
-    }
-}
-
-fn apply_rich_focus_toggle(ctx: &mut InputCtx<'_>, revoke: bool) -> Result<()> {
-    match ctx
-        .client
-        .request(|request_id| ControlRequest::RichFocusToggle {
-            version: PROTOCOL_VERSION,
-            request_id,
-            client_id: ctx.client_id,
-            pane_id: ctx.pane_id,
-            revoke,
-        }) {
-        Ok(ControlResponseData::RichFocus {
-            granted,
-            region_id,
-            structured,
-            ..
-        }) => {
-            *ctx.rich_focus_id = if granted { region_id } else { None };
-            *ctx.structured_focus = granted && structured;
-            Ok(())
-        }
-        Ok(_) => Ok(()),
-        Err(error) if control_code(&error) == Some(ControlErrorCode::Backpressure) => {
-            thread::sleep(Duration::from_millis(10));
-            apply_rich_focus_toggle(ctx, revoke)
-        }
-        Err(error)
-            if absorb_not_controller(
-                &error,
-                ctx.controller,
-                ctx.lease_held,
-                ctx.pending_utf8,
-                ctx.held_notice,
-            ) =>
-        {
-            Ok(())
-        }
-        Err(error) => Err(error),
-    }
-}
-
-fn write_focus_key(ctx: &mut InputCtx<'_>, token: &str, modifiers: u8) -> Result<()> {
-    if *ctx.structured_focus {
-        return send_rich_input(
-            ctx,
-            RichInputKind::Key {
-                key: token.to_string(),
-                modifiers,
-            },
-        );
-    }
-    let Some(id) = *ctx.rich_focus_id else {
-        return Ok(());
-    };
-    let Ok(bytes) = encode_focus_key(id, token) else {
-        return Ok(());
-    };
-    let Ok(data) = String::from_utf8(bytes) else {
-        return Ok(());
-    };
-    write_as_controller(ctx, data)
 }
 
 fn write_as_controller(ctx: &mut InputCtx<'_>, data: String) -> Result<()> {
@@ -5251,34 +4717,6 @@ fn write_as_controller(ctx: &mut InputCtx<'_>, data: String) -> Result<()> {
             }
             Err(error) => return Err(error),
         }
-    }
-}
-
-fn send_rich_input(ctx: &mut InputCtx<'_>, input: RichInputKind) -> Result<()> {
-    match ctx.client.request(|request_id| ControlRequest::RichInput {
-        version: PROTOCOL_VERSION,
-        request_id,
-        client_id: ctx.client_id,
-        pane_id: ctx.pane_id,
-        input,
-    }) {
-        Ok(ControlResponseData::RichInput { .. }) | Ok(_) => Ok(()),
-        Err(error) if control_code(&error) == Some(ControlErrorCode::Backpressure) => {
-            thread::sleep(Duration::from_millis(10));
-            Err(error)
-        }
-        Err(error)
-            if absorb_not_controller(
-                &error,
-                ctx.controller,
-                ctx.lease_held,
-                ctx.pending_utf8,
-                ctx.held_notice,
-            ) =>
-        {
-            Ok(())
-        }
-        Err(error) => Err(error),
     }
 }
 
@@ -5337,8 +4775,6 @@ fn attach_key_bytes(key: AttachKey) -> Vec<u8> {
         AttachKey::Nav { bytes, .. }
         | AttachKey::LeaveScroll { bytes }
         | AttachKey::MouseReport { bytes, .. }
-        | AttachKey::RichFocusToggle { bytes }
-        | AttachKey::SemanticCopy { bytes }
         | AttachKey::Forward(bytes) => bytes,
         AttachKey::Wheel { .. } | AttachKey::MouseOther => Vec::new(),
     }
@@ -5350,12 +4786,8 @@ struct InputView {
     copy_mode: bool,
     scroll_active: bool,
     search_prompt: bool,
-    experimental_rich: bool,
-    structured_focus: bool,
     history_available: bool,
     scroll_supported: bool,
-    rich_focus: bool,
-    workspace_rows: u32,
     controller: bool,
     child_mouse: Option<bool>,
     alt_active: bool,
@@ -5369,12 +4801,8 @@ impl InputView {
             copy_mode: ctx.scroll.copy_mode,
             scroll_active: ctx.scroll.active,
             search_prompt: ctx.scroll.search.prompt.is_some(),
-            experimental_rich: ctx.experimental_rich,
-            structured_focus: *ctx.structured_focus,
             history_available: attach_history_available(ctx.scroll),
             scroll_supported: ctx.scroll.supported,
-            rich_focus: ctx.rich_focus_id.is_some(),
-            workspace_rows: ctx.workspace_rows,
             controller: *ctx.controller,
             child_mouse: ctx.scroll.child_mouse,
             alt_active: ctx.scroll.alt_active,
@@ -5393,23 +4821,12 @@ enum InputRoute {
     Arrange,
     Skip,
     ToggleSync,
-    SemanticCopy,
-    RichFocusToggle,
     Write(Vec<u8>),
     EnterScroll,
     StayLive,
     CopyNav(NavKey),
     ScrollNav(NavKey),
     PageUpEnter,
-    FocusNav {
-        token: &'static str,
-        modifiers: u8,
-    },
-    RichScroll {
-        up: bool,
-        x: u32,
-        y: u32,
-    },
     Wheel {
         up: bool,
         x: u32,
@@ -5417,17 +4834,11 @@ enum InputRoute {
         shift: bool,
         acquire: bool,
     },
-    RichPointer {
-        x: u32,
-        y: u32,
-        phase: RichPointerPhase,
-    },
     ForwardMouse(Vec<u8>),
     Ignore,
     CancelSearch,
     FeedSearch(Vec<u8>),
     LeaveScroll,
-    RichFocusEsc,
     SearchCommit,
     SearchBackspace,
     CopySearchStart(CopySearchDir),
@@ -5436,7 +4847,6 @@ enum InputRoute {
     },
     CopyToggleSelect,
     CopyYank,
-    FocusVt(String),
 }
 
 fn route_attach_key(key: &AttachKey, view: &InputView) -> InputRoute {
@@ -5460,43 +4870,13 @@ fn route_attach_key(key: &AttachKey, view: &InputView) -> InputRoute {
                 InputRoute::ToggleSync
             }
         }
-        AttachKey::SemanticCopy { .. } => {
-            if view.experimental_rich && !view.scroll_active {
-                InputRoute::SemanticCopy
-            } else {
-                InputRoute::Skip
-            }
-        }
-        AttachKey::RichFocusToggle { bytes } => route_rich_focus(view, bytes),
         AttachKey::EnterScroll => route_enter_scroll(view),
-        AttachKey::Nav {
-            kind,
-            bytes,
-            modifiers,
-        } => route_nav(view, *kind, bytes, *modifiers),
+        AttachKey::Nav { kind, bytes, .. } => route_nav(view, *kind, bytes),
         AttachKey::Wheel { up, x, y, shift } => route_wheel(view, *up, *x, *y, *shift),
-        AttachKey::MouseReport {
-            x,
-            y,
-            shift,
-            primary,
-            phase,
-            bytes,
-            ..
-        } => route_mouse(view, *x, *y, *shift, *primary, *phase, bytes),
+        AttachKey::MouseReport { shift, bytes, .. } => route_mouse(view, *shift, bytes),
         AttachKey::MouseOther => InputRoute::Ignore,
         AttachKey::LeaveScroll { bytes } => route_leave_scroll(view, bytes),
         AttachKey::Forward(data) => route_forward(view, data),
-    }
-}
-
-fn route_rich_focus(view: &InputView, bytes: &[u8]) -> InputRoute {
-    if view.experimental_rich && !view.scroll_active {
-        InputRoute::RichFocusToggle
-    } else if !view.scroll_active {
-        InputRoute::Write(bytes.to_vec())
-    } else {
-        InputRoute::Skip
     }
 }
 
@@ -5512,7 +4892,7 @@ fn route_enter_scroll(view: &InputView) -> InputRoute {
     }
 }
 
-fn route_nav(view: &InputView, kind: NavKey, bytes: &[u8], modifiers: u8) -> InputRoute {
+fn route_nav(view: &InputView, kind: NavKey, bytes: &[u8]) -> InputRoute {
     if view.search_prompt {
         InputRoute::Skip
     } else if view.copy_mode {
@@ -5521,26 +4901,12 @@ fn route_nav(view: &InputView, kind: NavKey, bytes: &[u8], modifiers: u8) -> Inp
         InputRoute::ScrollNav(kind)
     } else if kind == NavKey::PageUp && view.history_available {
         InputRoute::PageUpEnter
-    } else if view.rich_focus {
-        match nav_focus_token(kind) {
-            Some(token) => InputRoute::FocusNav { token, modifiers },
-            None => InputRoute::Skip,
-        }
     } else {
         InputRoute::Write(bytes.to_vec())
     }
 }
 
 fn route_wheel(view: &InputView, up: bool, x: u32, y: u32, shift: bool) -> InputRoute {
-    if view.structured_focus
-        && !shift
-        && !view.scroll_active
-        && y > 0
-        && y <= view.workspace_rows
-        && x > 0
-    {
-        return InputRoute::RichScroll { up, x, y };
-    }
     InputRoute::Wheel {
         up,
         x,
@@ -5561,25 +4927,8 @@ fn wheel_wants_child_view(view: &InputView, shift: bool) -> bool {
     }
 }
 
-fn route_mouse(
-    view: &InputView,
-    x: u32,
-    y: u32,
-    shift: bool,
-    primary: bool,
-    phase: RichPointerPhase,
-    bytes: &[u8],
-) -> InputRoute {
-    if view.structured_focus
-        && !shift
-        && primary
-        && !view.scroll_active
-        && y > 0
-        && y <= view.workspace_rows
-        && x > 0
-    {
-        InputRoute::RichPointer { x, y, phase }
-    } else if view.controller && !view.scroll_active && !shift && view.child_mouse == Some(true) {
+fn route_mouse(view: &InputView, shift: bool, bytes: &[u8]) -> InputRoute {
+    if view.controller && !view.scroll_active && !shift && view.child_mouse == Some(true) {
         InputRoute::ForwardMouse(bytes.to_vec())
     } else {
         InputRoute::Ignore
@@ -5595,8 +4944,6 @@ fn route_leave_scroll(view: &InputView, bytes: &[u8]) -> InputRoute {
         }
     } else if view.scroll_active {
         InputRoute::LeaveScroll
-    } else if view.rich_focus && bytes == [0x1b] {
-        InputRoute::RichFocusEsc
     } else {
         InputRoute::Write(bytes.to_vec())
     }
@@ -5618,11 +4965,6 @@ fn route_forward(view: &InputView, data: &[u8]) -> InputRoute {
             [b' ', ..] | [b'v' | b'V'] => InputRoute::CopyToggleSelect,
             [b'y' | b'Y'] | [b'\r'] | [b'\n'] => InputRoute::CopyYank,
             _ => InputRoute::Skip,
-        }
-    } else if !view.scroll_active && view.rich_focus {
-        match vt_focus_token(data) {
-            Some(token) => InputRoute::FocusVt(token),
-            None => InputRoute::Skip,
         }
     } else if !view.scroll_active {
         InputRoute::Write(data.to_vec())
@@ -5651,18 +4993,6 @@ fn stash_session_leftover(
 fn queue_utf8(ctx: &mut InputCtx<'_>, want_write: &mut bool, bytes: &[u8]) {
     *want_write = true;
     ctx.pending_utf8.extend_from_slice(bytes);
-}
-
-fn with_lease(
-    ctx: &mut InputCtx<'_>,
-    body: impl FnOnce(&mut InputCtx<'_>) -> Result<()>,
-) -> Result<()> {
-    ctx.ensure_controller()?;
-    if !*ctx.controller {
-        return Ok(());
-    }
-    *ctx.last_typed = Some(Instant::now());
-    body(ctx)
 }
 
 fn apply_session_route(
@@ -5732,20 +5062,6 @@ fn apply_toggle_sync(ctx: &mut InputCtx<'_>) -> Result<()> {
     Ok(())
 }
 
-fn apply_rich_chrome(ctx: &mut InputCtx<'_>, route: InputRoute) -> Result<()> {
-    match route {
-        InputRoute::SemanticCopy => {
-            ctx.ensure_controller()?;
-            if *ctx.controller {
-                apply_semantic_copy(ctx)?;
-            }
-            Ok(())
-        }
-        InputRoute::RichFocusToggle => with_lease(ctx, |ctx| apply_rich_focus_toggle(ctx, false)),
-        _ => Ok(()),
-    }
-}
-
 fn apply_chrome_fit(ctx: &mut InputCtx<'_>) {
     apply_fit(ctx);
 }
@@ -5755,7 +5071,6 @@ fn apply_chrome_route(ctx: &mut InputCtx<'_>, route: InputRoute) -> Result<Input
         InputRoute::Fit => apply_chrome_fit(ctx),
         InputRoute::Arrange => apply_arrange(ctx),
         InputRoute::ToggleSync => apply_toggle_sync(ctx)?,
-        InputRoute::SemanticCopy | InputRoute::RichFocusToggle => apply_rich_chrome(ctx, route)?,
         _ => {}
     }
     Ok(InputLoop::Continue)
@@ -5805,9 +5120,6 @@ fn apply_copy_keys(ctx: &mut InputCtx<'_>, route: InputRoute) {
 
 fn apply_copy_edit_route(ctx: &mut InputCtx<'_>, route: InputRoute) -> Result<InputLoop> {
     match route {
-        InputRoute::RichFocusEsc => {
-            with_lease(ctx, |ctx| apply_rich_focus_toggle(ctx, true))?;
-        }
         InputRoute::CopySearchStart(_)
         | InputRoute::CopySearchStep { .. }
         | InputRoute::CopyToggleSelect
@@ -5826,37 +5138,6 @@ fn apply_scroll_copy_route(ctx: &mut InputCtx<'_>, route: InputRoute) -> Result<
         | InputRoute::LeaveScroll => Ok(apply_scroll_nav_route(ctx, route)),
         other => apply_copy_edit_route(ctx, other),
     }
-}
-
-fn send_rich_scroll(ctx: &mut InputCtx<'_>, up: bool, x: u32, y: u32) -> Result<()> {
-    send_rich_input(
-        ctx,
-        RichInputKind::Scroll {
-            row: u16::try_from(y - 1).unwrap_or(u16::MAX),
-            col: u16::try_from(x - 1).unwrap_or(u16::MAX),
-            delta: if up {
-                -(WHEEL_LINES as i16)
-            } else {
-                WHEEL_LINES as i16
-            },
-        },
-    )
-}
-
-fn send_rich_pointer(
-    ctx: &mut InputCtx<'_>,
-    x: u32,
-    y: u32,
-    phase: RichPointerPhase,
-) -> Result<()> {
-    send_rich_input(
-        ctx,
-        RichInputKind::Pointer {
-            phase,
-            row: u16::try_from(y - 1).unwrap_or(u16::MAX),
-            col: u16::try_from(x - 1).unwrap_or(u16::MAX),
-        },
-    )
 }
 
 fn apply_wheel_route(
@@ -5892,22 +5173,6 @@ fn apply_wheel_route(
     Ok(())
 }
 
-fn apply_rich_key_route(ctx: &mut InputCtx<'_>, route: InputRoute) -> Result<()> {
-    match route {
-        InputRoute::FocusNav { token, modifiers } => {
-            with_lease(ctx, |ctx| write_focus_key(ctx, token, modifiers))
-        }
-        InputRoute::FocusVt(token) => with_lease(ctx, |ctx| write_focus_key(ctx, &token, 0)),
-        InputRoute::RichScroll { up, x, y } => {
-            with_lease(ctx, |ctx| send_rich_scroll(ctx, up, x, y))
-        }
-        InputRoute::RichPointer { x, y, phase } => {
-            with_lease(ctx, |ctx| send_rich_pointer(ctx, x, y, phase))
-        }
-        _ => Ok(()),
-    }
-}
-
 fn apply_write_pointer_route(
     ctx: &mut InputCtx<'_>,
     route: InputRoute,
@@ -5924,7 +5189,7 @@ fn apply_write_pointer_route(
         InputRoute::ForwardMouse(bytes) | InputRoute::Write(bytes) => {
             queue_utf8(ctx, want_write, &bytes);
         }
-        other => apply_rich_key_route(ctx, other)?,
+        _ => {}
     }
     Ok(InputLoop::Continue)
 }
@@ -5944,8 +5209,6 @@ fn apply_input_route(
         | InputRoute::Arrange
         | InputRoute::Skip
         | InputRoute::ToggleSync
-        | InputRoute::SemanticCopy
-        | InputRoute::RichFocusToggle
         | InputRoute::Ignore
         | InputRoute::StayLive => apply_chrome_route(ctx, route),
         InputRoute::EnterScroll
@@ -5955,7 +5218,6 @@ fn apply_input_route(
         | InputRoute::CancelSearch
         | InputRoute::FeedSearch(_)
         | InputRoute::LeaveScroll
-        | InputRoute::RichFocusEsc
         | InputRoute::SearchCommit
         | InputRoute::SearchBackspace
         | InputRoute::CopySearchStart(_)
@@ -6203,22 +5465,21 @@ mod tests {
         append_attach_toast, apply_arrange, apply_attention_event, apply_chrome_route,
         apply_controller_owner, apply_copy_keys, apply_fit, apply_idle_lone_escape,
         apply_local_winsize, apply_lone_escape, apply_mail_event, apply_observed_winsize,
-        apply_resolved_space, apply_rich_chrome, apply_rich_key_route, apply_scroll_nav_route,
-        apply_search_prompt_route, apply_session_route, apply_wheel_route, attach_identity_line,
-        attach_is_dump_or_write, attach_toast_overlay, attach_toast_text, attach_wants_interactive,
-        attention_osc_bytes, cell_px_from_window, clip_frame_to_terminal, compose_paint,
-        copy_cell_selected, copy_search_rank, copy_selection_text, dirty_line_indices, drain_keys,
-        flush_pending_write, handle_idle_escape, handle_input, host_nested_scrollbar_thumb,
-        host_route_session_after_resolve, idle_forward_escape, idle_revoke_rich_focus,
-        keep_request_ok, mail_letter_cells, mail_letter_overlay_bytes, maybe_idle_release_lease,
-        normalize_winsize, paint_bytes, pane_session_id, parse_focus_border_rgb,
-        refresh_space_identity, request_err_line, resize_needs_send, resolve_space_label,
-        route_attach_key, route_leave_scroll, run_drain_probe, scroll_copy_suffix,
-        send_rich_pointer, send_rich_scroll, should_host_route_cli, space_attach_identity,
+        apply_resolved_space, apply_scroll_nav_route, apply_search_prompt_route,
+        apply_session_route, apply_wheel_route, attach_identity_line, attach_is_dump_or_write,
+        attach_toast_overlay, attach_toast_text, attach_wants_interactive, attention_osc_bytes,
+        cell_px_from_window, clip_frame_to_terminal, compose_paint, copy_cell_selected,
+        copy_search_rank, copy_selection_text, dirty_line_indices, drain_keys, flush_pending_write,
+        handle_idle_escape, handle_input, host_nested_scrollbar_thumb,
+        host_route_session_after_resolve, idle_forward_escape, keep_request_ok, mail_letter_cells,
+        mail_letter_overlay_bytes, maybe_idle_release_lease, normalize_winsize, paint_bytes,
+        pane_session_id, parse_focus_border_rgb, refresh_space_identity, request_err_line,
+        resize_needs_send, resolve_space_label, route_attach_key, route_leave_scroll,
+        run_drain_probe, scroll_copy_suffix, should_host_route_cli, space_attach_identity,
         space_stamp_due, spaces_dir_stamp, target_session_name, try_host_route_after_resolve,
-        viewport_hint, wheel_wants_child_view, with_lease, AttachChrome, AttachKey, Cli, Client,
-        CopyPoint, CopySearch, CopySearchDir, InjectedWinsize, InputCtx, InputLoop, InputRoute,
-        InputView, LocalWinsize, LogPaintWake, NavKey, PaintFrame, ScrollState, SessionSwitch,
+        viewport_hint, wheel_wants_child_view, AttachChrome, AttachKey, Cli, Client, CopyPoint,
+        CopySearch, CopySearchDir, InjectedWinsize, InputCtx, InputLoop, InputRoute, InputView,
+        LocalWinsize, LogPaintWake, NavKey, PaintFrame, ScrollState, SessionSwitch,
         DEFAULT_TOAST_FOCUS_RGB, DETACH_PREFIX, LEASE_IDLE, MAIL_CELL_COLS, MAIL_LETTER_RGB,
         REQUEST_ERRS, SPACE_STAMP_INTERVAL, WHEEL_LINES,
     };
@@ -6560,8 +5821,7 @@ mod tests {
     use prismattyc_mux::{
         spaces_dir, ArrangementWire, ColorWire, ControlError, ControlErrorCode, ControlRequest,
         ControlResponse, ControlResponseBody, ControlResponseData, CursorShapeWire, Event,
-        OverlayKind, PaneContent, PaneOverlay, PaneStyled, RichPointerPhase, StyleRun,
-        WorkspaceInverseRun, WorkspaceStyleRun, PROTOCOL_VERSION,
+        OverlayKind, PaneContent, StyleRun, PROTOCOL_VERSION,
     };
 
     #[test]
@@ -6693,81 +5953,6 @@ mod tests {
         let out = String::from_utf8(paint_bytes(None, &clipped, None)).unwrap();
         assert!(out.contains("\x1b[31m"), "{out:?}");
         assert!(out.contains("\x1b[32m"), "{out:?}");
-    }
-
-    #[test]
-    fn clip_keeps_viewport_overlay_in_viewport_coords() {
-        let mut frame = pane_grid(83, 57, 56, 0);
-        frame.overlays.push(PaneOverlay {
-            id: 1,
-            kind: OverlayKind::Viewport,
-            row: 1,
-            col: 0,
-            rows: 1,
-            cols: 4,
-            text: "hud".into(),
-            runs: Vec::new(),
-        });
-        let clipped = clip_frame_to_terminal(frame, 120, 40);
-        assert_eq!(clipped.overlays[0].kind, OverlayKind::Viewport);
-        assert_eq!(clipped.overlays[0].row, 1);
-        assert_eq!(clipped.overlays[0].col, 0);
-    }
-
-    #[test]
-    fn clip_translates_cell_rect_overlay_into_viewport() {
-        let mut frame = pane_grid(83, 57, 56, 0);
-        frame.overlays.push(PaneOverlay {
-            id: 1,
-            kind: OverlayKind::CellRect,
-            row: 50,
-            col: 10,
-            rows: 1,
-            cols: 4,
-            text: "stat".into(),
-            runs: Vec::new(),
-        });
-        let clipped = clip_frame_to_terminal(frame, 120, 40);
-        assert_eq!(clipped.overlays[0].kind, OverlayKind::CellRect);
-        assert_eq!(clipped.overlays[0].row, 33);
-        assert_eq!(clipped.overlays[0].col, 10);
-    }
-
-    #[test]
-    fn clip_drops_cell_rect_left_of_origin() {
-        let mut frame = pane_grid(83, 57, 56, 82);
-        frame.overlays.push(PaneOverlay {
-            id: 1,
-            kind: OverlayKind::CellRect,
-            row: 50,
-            col: 0,
-            rows: 1,
-            cols: 4,
-            text: "gone".into(),
-            runs: Vec::new(),
-        });
-        let clipped = clip_frame_to_terminal(frame, 60, 20);
-        assert!(clipped.overlays.is_empty());
-    }
-
-    #[test]
-    fn clip_trims_cell_rect_that_straddles_origin() {
-        let mut frame = pane_grid(83, 57, 56, 82);
-        frame.overlays.push(PaneOverlay {
-            id: 1,
-            kind: OverlayKind::CellRect,
-            row: 50,
-            col: 20,
-            rows: 1,
-            cols: 10,
-            text: "0123456789".into(),
-            runs: Vec::new(),
-        });
-        let clipped = clip_frame_to_terminal(frame, 60, 20);
-        assert_eq!(clipped.overlays.len(), 1);
-        assert_eq!(clipped.overlays[0].col, 0);
-        assert_eq!(clipped.overlays[0].cols, 7);
-        assert_eq!(clipped.overlays[0].text, "3456789");
     }
 
     fn frame(revision: u64, lines: &[&str]) -> PaintFrame {
@@ -7193,8 +6378,6 @@ mod tests {
             cols: 12,
             ..Default::default()
         };
-        let mut rich_focus_id = None;
-        let mut structured_focus = false;
         let mut sync_input = false;
         let mut held_notice = None;
         let mut session_switch = None;
@@ -7211,10 +6394,6 @@ mod tests {
             pending_keys: &mut pending_keys,
             pending_utf8: &mut pending_utf8,
             scroll: &mut scroll,
-            experimental_rich: false,
-            rich_focus_id: &mut rich_focus_id,
-            structured_focus: &mut structured_focus,
-            workspace_rows: 0,
             child_pid: None,
             read_only: false,
             held_notice: &mut held_notice,
@@ -7256,8 +6435,6 @@ mod tests {
             cols: 12,
             ..Default::default()
         };
-        let mut rich_focus_id = None;
-        let mut structured_focus = false;
         let mut sync_input = false;
         let mut held_notice = None;
         let mut session_switch = None;
@@ -7274,10 +6451,6 @@ mod tests {
             pending_keys: &mut pending_keys,
             pending_utf8: &mut pending_utf8,
             scroll: &mut scroll,
-            experimental_rich: false,
-            rich_focus_id: &mut rich_focus_id,
-            structured_focus: &mut structured_focus,
-            workspace_rows: 0,
             child_pid: None,
             read_only: false,
             held_notice: &mut held_notice,
@@ -7405,8 +6578,6 @@ mod tests {
             },
             ..Default::default()
         };
-        let mut rich_focus_id = None;
-        let mut structured_focus = false;
         let mut sync_input = false;
         let mut held_notice = None;
         let mut session_switch = None;
@@ -7423,10 +6594,6 @@ mod tests {
             pending_keys: &mut pending_keys,
             pending_utf8: &mut pending_utf8,
             scroll: &mut scroll,
-            experimental_rich: false,
-            rich_focus_id: &mut rich_focus_id,
-            structured_focus: &mut structured_focus,
-            workspace_rows: 0,
             child_pid: None,
             read_only: false,
             held_notice: &mut held_notice,
@@ -7524,8 +6691,6 @@ mod tests {
             cols: 12,
             ..Default::default()
         };
-        let mut rich_focus_id = None;
-        let mut structured_focus = false;
         let mut sync_input = false;
         let mut held_notice = None;
         let mut session_switch = None;
@@ -7542,10 +6707,6 @@ mod tests {
             pending_keys: &mut pending_keys,
             pending_utf8: &mut pending_utf8,
             scroll: &mut scroll,
-            experimental_rich: false,
-            rich_focus_id: &mut rich_focus_id,
-            structured_focus: &mut structured_focus,
-            workspace_rows: 0,
             child_pid: None,
             read_only: false,
             held_notice: &mut held_notice,
@@ -7574,8 +6735,6 @@ mod tests {
         let mut pending_keys = Vec::new();
         let mut pending_utf8 = Vec::new();
         let mut scroll = ScrollState::default();
-        let mut rich_focus_id = None;
-        let mut structured_focus = false;
         let mut sync_input = false;
         let mut held_notice = None;
         let mut session_switch = None;
@@ -7592,10 +6751,6 @@ mod tests {
             pending_keys: &mut pending_keys,
             pending_utf8: &mut pending_utf8,
             scroll: &mut scroll,
-            experimental_rich: false,
-            rich_focus_id: &mut rich_focus_id,
-            structured_focus: &mut structured_focus,
-            workspace_rows: 0,
             child_pid: None,
             read_only: false,
             held_notice: &mut held_notice,
@@ -7622,8 +6777,6 @@ mod tests {
         let mut pending_keys = Vec::new();
         let mut pending_utf8 = Vec::new();
         let mut scroll = ScrollState::default();
-        let mut rich_focus_id = None;
-        let mut structured_focus = false;
         let mut sync_input = false;
         let mut held_notice = None;
         let mut session_switch = None;
@@ -7640,10 +6793,6 @@ mod tests {
             pending_keys: &mut pending_keys,
             pending_utf8: &mut pending_utf8,
             scroll: &mut scroll,
-            experimental_rich: false,
-            rich_focus_id: &mut rich_focus_id,
-            structured_focus: &mut structured_focus,
-            workspace_rows: 0,
             child_pid: None,
             read_only: false,
             held_notice: &mut held_notice,
@@ -7674,8 +6823,6 @@ mod tests {
             max: Some(0),
             ..Default::default()
         };
-        let mut rich_focus_id = None;
-        let mut structured_focus = false;
         let mut sync_input = false;
         let mut held_notice = None;
         let mut session_switch = None;
@@ -7692,10 +6839,6 @@ mod tests {
             pending_keys: &mut pending_keys,
             pending_utf8: &mut pending_utf8,
             scroll: &mut scroll,
-            experimental_rich: false,
-            rich_focus_id: &mut rich_focus_id,
-            structured_focus: &mut structured_focus,
-            workspace_rows: 0,
             child_pid: None,
             read_only: false,
             held_notice: &mut held_notice,
@@ -7727,8 +6870,6 @@ mod tests {
             max: Some(4),
             ..Default::default()
         };
-        let mut rich_focus_id = None;
-        let mut structured_focus = false;
         let mut sync_input = false;
         let mut held_notice = None;
         let mut session_switch = None;
@@ -7745,10 +6886,6 @@ mod tests {
             pending_keys: &mut pending_keys,
             pending_utf8: &mut pending_utf8,
             scroll: &mut scroll,
-            experimental_rich: false,
-            rich_focus_id: &mut rich_focus_id,
-            structured_focus: &mut structured_focus,
-            workspace_rows: 0,
             child_pid: None,
             read_only: false,
             held_notice: &mut held_notice,
@@ -7774,8 +6911,6 @@ mod tests {
         let mut pending_keys = Vec::new();
         let mut pending_utf8 = Vec::new();
         let mut scroll = ScrollState::default();
-        let mut rich_focus_id = None;
-        let mut structured_focus = false;
         let mut sync_input = false;
         let mut held_notice = None;
         let mut session_switch = None;
@@ -7792,10 +6927,6 @@ mod tests {
             pending_keys: &mut pending_keys,
             pending_utf8: &mut pending_utf8,
             scroll: &mut scroll,
-            experimental_rich: false,
-            rich_focus_id: &mut rich_focus_id,
-            structured_focus: &mut structured_focus,
-            workspace_rows: 0,
             child_pid: None,
             read_only: true,
             held_notice: &mut held_notice,
@@ -7831,8 +6962,6 @@ mod tests {
         let mut pending_keys = Vec::new();
         let mut pending_utf8 = Vec::new();
         let mut scroll = ScrollState::default();
-        let mut rich_focus_id = None;
-        let mut structured_focus = false;
         let mut sync_input = false;
         let mut held_notice = None;
         let mut session_switch = None;
@@ -7849,10 +6978,6 @@ mod tests {
             pending_keys: &mut pending_keys,
             pending_utf8: &mut pending_utf8,
             scroll: &mut scroll,
-            experimental_rich: false,
-            rich_focus_id: &mut rich_focus_id,
-            structured_focus: &mut structured_focus,
-            workspace_rows: 0,
             child_pid: None,
             read_only: true,
             held_notice: &mut held_notice,
@@ -7948,8 +7073,6 @@ mod tests {
         let mut pending_keys = Vec::new();
         let mut pending_utf8 = Vec::new();
         let mut scroll = ScrollState::default();
-        let mut rich_focus_id = None;
-        let mut structured_focus = false;
         let mut sync_input = false;
         let mut held_notice = None;
         let mut session_switch = None;
@@ -7966,10 +7089,6 @@ mod tests {
             pending_keys: &mut pending_keys,
             pending_utf8: &mut pending_utf8,
             scroll: &mut scroll,
-            experimental_rich: false,
-            rich_focus_id: &mut rich_focus_id,
-            structured_focus: &mut structured_focus,
-            workspace_rows: 0,
             child_pid: None,
             read_only: false,
             held_notice: &mut held_notice,
@@ -7997,12 +7116,8 @@ mod tests {
             copy_mode: false,
             scroll_active: false,
             search_prompt: false,
-            experimental_rich: false,
-            structured_focus: false,
             history_available: false,
             scroll_supported: false,
-            rich_focus: false,
-            workspace_rows: 0,
             controller: true,
             child_mouse: None,
             alt_active: false,
@@ -8079,44 +7194,6 @@ mod tests {
                 InputRoute::Skip,
             ),
             (
-                "semantic-rich",
-                AttachKey::SemanticCopy {
-                    bytes: b"copy".to_vec(),
-                },
-                InputView {
-                    experimental_rich: true,
-                    ..live_view()
-                },
-                InputRoute::SemanticCopy,
-            ),
-            (
-                "semantic-plain",
-                AttachKey::SemanticCopy {
-                    bytes: b"copy".to_vec(),
-                },
-                live_view(),
-                InputRoute::Skip,
-            ),
-            (
-                "rich-toggle",
-                AttachKey::RichFocusToggle {
-                    bytes: b"g".to_vec(),
-                },
-                InputView {
-                    experimental_rich: true,
-                    ..live_view()
-                },
-                InputRoute::RichFocusToggle,
-            ),
-            (
-                "rich-toggle-write",
-                AttachKey::RichFocusToggle {
-                    bytes: b"g".to_vec(),
-                },
-                live_view(),
-                InputRoute::Write(b"g".to_vec()),
-            ),
-            (
                 "enter-history",
                 AttachKey::EnterScroll,
                 InputView {
@@ -8188,18 +7265,6 @@ mod tests {
                 InputRoute::Write(b"\x1b[A".to_vec()),
             ),
             (
-                "nav-focus",
-                nav(NavKey::Left),
-                InputView {
-                    rich_focus: true,
-                    ..live_view()
-                },
-                InputRoute::FocusNav {
-                    token: "Left",
-                    modifiers: 0,
-                },
-            ),
-            (
                 "nav-write",
                 nav(NavKey::Right),
                 live_view(),
@@ -8239,15 +7304,6 @@ mod tests {
                     ..live_view()
                 },
                 InputRoute::LeaveScroll,
-            ),
-            (
-                "leave-rich-esc",
-                AttachKey::LeaveScroll { bytes: vec![0x1b] },
-                InputView {
-                    rich_focus: true,
-                    ..live_view()
-                },
-                InputRoute::RichFocusEsc,
             ),
             (
                 "leave-write",
@@ -8338,15 +7394,6 @@ mod tests {
                 InputRoute::CopyYank,
             ),
             (
-                "fwd-focus-vt",
-                AttachKey::Forward(b"a".to_vec()),
-                InputView {
-                    rich_focus: true,
-                    ..live_view()
-                },
-                InputRoute::FocusVt("a".into()),
-            ),
-            (
                 "fwd-write",
                 AttachKey::Forward(b"x".to_vec()),
                 live_view(),
@@ -8389,94 +7436,12 @@ mod tests {
             x,
             y,
             primary,
-            phase: RichPointerPhase::Press,
-        }
-    }
-
-    fn rich_view() -> InputView {
-        InputView {
-            structured_focus: true,
-            workspace_rows: 10,
-            ..live_view()
         }
     }
 
     #[test]
     fn route_wheel_and_mouse_table() {
         let cases: &[(&str, AttachKey, InputView, InputRoute)] = &[
-            (
-                "wheel-rich",
-                wheel_at(2, 3, false),
-                rich_view(),
-                InputRoute::RichScroll {
-                    up: true,
-                    x: 2,
-                    y: 3,
-                },
-            ),
-            (
-                "wheel-rich-shift",
-                wheel_at(2, 3, true),
-                rich_view(),
-                InputRoute::Wheel {
-                    up: true,
-                    x: 2,
-                    y: 3,
-                    shift: true,
-                    acquire: false,
-                },
-            ),
-            (
-                "wheel-rich-scroll",
-                wheel_at(2, 3, false),
-                InputView {
-                    scroll_active: true,
-                    ..rich_view()
-                },
-                InputRoute::Wheel {
-                    up: true,
-                    x: 2,
-                    y: 3,
-                    shift: false,
-                    acquire: false,
-                },
-            ),
-            (
-                "wheel-rich-y0",
-                wheel_at(2, 0, false),
-                rich_view(),
-                InputRoute::Wheel {
-                    up: true,
-                    x: 2,
-                    y: 0,
-                    shift: false,
-                    acquire: false,
-                },
-            ),
-            (
-                "wheel-rich-y-past",
-                wheel_at(2, 11, false),
-                rich_view(),
-                InputRoute::Wheel {
-                    up: true,
-                    x: 2,
-                    y: 11,
-                    shift: false,
-                    acquire: false,
-                },
-            ),
-            (
-                "wheel-rich-x0",
-                wheel_at(0, 3, false),
-                rich_view(),
-                InputRoute::Wheel {
-                    up: true,
-                    x: 0,
-                    y: 3,
-                    shift: false,
-                    acquire: false,
-                },
-            ),
             (
                 "wheel-child-acquire",
                 wheel_at(2, 3, false),
@@ -8554,42 +7519,12 @@ mod tests {
                 },
             ),
             (
-                "mouse-rich",
-                mouse_at(2, 3, false, true),
-                rich_view(),
-                InputRoute::RichPointer {
-                    x: 2,
-                    y: 3,
-                    phase: RichPointerPhase::Press,
-                },
-            ),
-            (
-                "mouse-rich-y0",
-                mouse_at(2, 0, false, true),
-                InputView {
-                    controller: true,
-                    child_mouse: Some(true),
-                    ..rich_view()
-                },
-                InputRoute::ForwardMouse(b"\x1b[<0;2;3M".to_vec()),
-            ),
-            (
-                "mouse-rich-x0",
-                mouse_at(0, 3, false, true),
-                InputView {
-                    controller: true,
-                    child_mouse: Some(true),
-                    ..rich_view()
-                },
-                InputRoute::ForwardMouse(b"\x1b[<0;2;3M".to_vec()),
-            ),
-            (
-                "mouse-rich-shift",
+                "mouse-shift",
                 mouse_at(2, 3, true, true),
                 InputView {
                     controller: true,
                     child_mouse: Some(true),
-                    ..rich_view()
+                    ..live_view()
                 },
                 InputRoute::Ignore,
             ),
@@ -8599,7 +7534,7 @@ mod tests {
                 InputView {
                     controller: true,
                     child_mouse: Some(true),
-                    ..rich_view()
+                    ..live_view()
                 },
                 InputRoute::ForwardMouse(b"\x1b[<0;2;3M".to_vec()),
             ),
@@ -8649,8 +7584,6 @@ mod tests {
             max: Some(4),
             ..Default::default()
         };
-        let mut rich_focus_id = None;
-        let mut structured_focus = false;
         let mut sync_input = false;
         let mut held_notice = None;
         let mut session_switch = None;
@@ -8667,10 +7600,6 @@ mod tests {
             pending_keys: &mut pending_keys,
             pending_utf8: &mut pending_utf8,
             scroll: &mut scroll,
-            experimental_rich: false,
-            rich_focus_id: &mut rich_focus_id,
-            structured_focus: &mut structured_focus,
-            workspace_rows: 0,
             child_pid: None,
             read_only: false,
             held_notice: &mut held_notice,
@@ -8699,8 +7628,6 @@ mod tests {
         let mut pending_keys = Vec::new();
         let mut pending_utf8 = Vec::new();
         let mut scroll = ScrollState::default();
-        let mut rich_focus_id = None;
-        let mut structured_focus = false;
         let mut sync_input = false;
         let mut held_notice = None;
         let mut session_switch = None;
@@ -8717,10 +7644,6 @@ mod tests {
             pending_keys: &mut pending_keys,
             pending_utf8: &mut pending_utf8,
             scroll: &mut scroll,
-            experimental_rich: false,
-            rich_focus_id: &mut rich_focus_id,
-            structured_focus: &mut structured_focus,
-            workspace_rows: 0,
             child_pid: None,
             read_only: false,
             held_notice: &mut held_notice,
@@ -8772,8 +7695,6 @@ mod tests {
         let mut pending_keys = Vec::new();
         let mut pending_utf8 = Vec::new();
         let mut scroll = ScrollState::default();
-        let mut rich_focus_id = None;
-        let mut structured_focus = false;
         let mut sync_input = false;
         let mut held_notice = None;
         let mut session_switch = None;
@@ -8790,10 +7711,6 @@ mod tests {
             pending_keys: &mut pending_keys,
             pending_utf8: &mut pending_utf8,
             scroll: &mut scroll,
-            experimental_rich: false,
-            rich_focus_id: &mut rich_focus_id,
-            structured_focus: &mut structured_focus,
-            workspace_rows: 0,
             child_pid: None,
             read_only: false,
             held_notice: &mut held_notice,
@@ -8822,8 +7739,6 @@ mod tests {
             .checked_sub(LEASE_IDLE + Duration::from_millis(20))
             .unwrap_or_else(Instant::now);
         let mut last_typed = Some(old);
-        let mut rich_focus_id = None;
-        let mut structured_focus = false;
         let mut controller = false;
         maybe_idle_release_lease(
             &mut client,
@@ -8833,8 +7748,6 @@ mod tests {
             &mut controller,
             false,
             &[],
-            &mut rich_focus_id,
-            &mut structured_focus,
             &mut last_typed,
         );
         assert_peer_got_no_request(&mut peer);
@@ -8848,8 +7761,6 @@ mod tests {
             &mut controller,
             true,
             &[],
-            &mut rich_focus_id,
-            &mut structured_focus,
             &mut last_typed,
         );
         assert_peer_got_no_request(&mut peer);
@@ -8862,27 +7773,9 @@ mod tests {
             &mut controller,
             false,
             b"x",
-            &mut rich_focus_id,
-            &mut structured_focus,
             &mut last_typed,
         );
         assert_peer_got_no_request(&mut peer);
-
-        rich_focus_id = Some(7);
-        maybe_idle_release_lease(
-            &mut client,
-            1,
-            1,
-            Some("s"),
-            &mut controller,
-            false,
-            &[],
-            &mut rich_focus_id,
-            &mut structured_focus,
-            &mut last_typed,
-        );
-        assert_peer_got_no_request(&mut peer);
-        rich_focus_id = None;
 
         last_typed = Some(Instant::now());
         maybe_idle_release_lease(
@@ -8893,8 +7786,6 @@ mod tests {
             &mut controller,
             false,
             &[],
-            &mut rich_focus_id,
-            &mut structured_focus,
             &mut last_typed,
         );
         assert_peer_got_no_request(&mut peer);
@@ -8910,14 +7801,10 @@ mod tests {
             &mut controller,
             false,
             &[],
-            &mut rich_focus_id,
-            &mut structured_focus,
             &mut last_typed,
         );
         assert!(!controller);
         assert!(last_typed.is_none());
-        assert!(rich_focus_id.is_none());
-        assert!(!structured_focus);
     }
 
     #[test]
@@ -8927,8 +7814,6 @@ mod tests {
             .checked_sub(LEASE_IDLE + Duration::from_millis(20))
             .unwrap_or_else(Instant::now);
         let mut last_typed = Some(old);
-        let mut rich_focus_id = None;
-        let mut structured_focus = false;
         let mut controller = true;
         maybe_idle_release_lease(
             &mut client,
@@ -8938,8 +7823,6 @@ mod tests {
             &mut controller,
             false,
             &[],
-            &mut rich_focus_id,
-            &mut structured_focus,
             &mut last_typed,
         );
         assert!(
@@ -8950,8 +7833,6 @@ mod tests {
             last_typed.is_some(),
             "idle stamp stays until ReleaseLease Ok"
         );
-        assert!(rich_focus_id.is_none());
-        assert!(!structured_focus);
     }
 
     #[test]
@@ -9251,8 +8132,6 @@ mod tests {
         };
         scroll.start_copy_search(CopySearchDir::Forward);
         let mut previous = Some(frame(1, &["hello"]));
-        let mut rich_focus_id = None;
-        let mut structured_focus = false;
         let mut sync_input = false;
         let mut controller = false;
         let mut lease_held = false;
@@ -9270,8 +8149,6 @@ mod tests {
             &mut pending_utf8,
             &mut scroll,
             &mut previous,
-            &mut rich_focus_id,
-            &mut structured_focus,
             &mut sync_input,
             &mut controller,
             &mut lease_held,
@@ -9289,13 +8166,11 @@ mod tests {
     }
 
     #[test]
-    fn idle_forward_and_revoke_are_noops_when_read_only() {
+    fn idle_forward_is_a_noop_when_read_only() {
         let (mut client, mut peer) = dummy_client();
         let mut pending_keys = Vec::new();
         let mut pending_utf8 = Vec::new();
         let mut scroll = ScrollState::default();
-        let mut rich_focus_id = Some(3);
-        let mut structured_focus = true;
         let mut sync_input = false;
         let mut controller = false;
         let mut lease_held = false;
@@ -9315,20 +8190,14 @@ mod tests {
             pending_keys: &mut pending_keys,
             pending_utf8: &mut pending_utf8,
             scroll: &mut scroll,
-            experimental_rich: true,
-            rich_focus_id: &mut rich_focus_id,
-            structured_focus: &mut structured_focus,
-            workspace_rows: 0,
             child_pid: None,
             read_only: true,
             held_notice: &mut held_notice,
             session_switch: &mut session_switch,
         };
-        idle_revoke_rich_focus(&mut ctx).unwrap();
         idle_forward_escape(&mut ctx).unwrap();
         assert!(last_typed.is_none());
         assert!(pending_utf8.is_empty());
-        assert_eq!(rich_focus_id, Some(3));
         assert_peer_got_no_request(&mut peer);
     }
 
@@ -9342,13 +8211,9 @@ mod tests {
         pending_keys: Vec<u8>,
         pending_utf8: Vec<u8>,
         scroll: ScrollState,
-        rich_focus_id: Option<u32>,
-        structured_focus: bool,
         held_notice: Option<String>,
         session_switch: Option<SessionSwitch>,
         read_only: bool,
-        workspace_rows: u32,
-        experimental_rich: bool,
     }
 
     impl AttachBits {
@@ -9372,13 +8237,9 @@ mod tests {
                 pending_keys: Vec::new(),
                 pending_utf8: Vec::new(),
                 scroll: ScrollState::default(),
-                rich_focus_id: None,
-                structured_focus: false,
                 held_notice: None,
                 session_switch: None,
                 read_only: false,
-                workspace_rows: 24,
-                experimental_rich: true,
             }
         }
 
@@ -9396,10 +8257,6 @@ mod tests {
                 pending_keys: &mut self.pending_keys,
                 pending_utf8: &mut self.pending_utf8,
                 scroll: &mut self.scroll,
-                experimental_rich: self.experimental_rich,
-                rich_focus_id: &mut self.rich_focus_id,
-                structured_focus: &mut self.structured_focus,
-                workspace_rows: self.workspace_rows,
                 child_pid: None,
                 read_only: self.read_only,
                 held_notice: &mut self.held_notice,
@@ -9469,50 +8326,17 @@ mod tests {
     }
 
     #[test]
-    fn idle_revoke_and_forward_run_when_controller() {
+    fn idle_forward_runs_when_controller() {
         let mut bits = AttachBits::new();
         bits.controller = true;
-        let rx = reply_ok_and_capture(bits.peer.try_clone().unwrap(), 2);
-        idle_revoke_rich_focus(&mut bits.ctx()).unwrap();
-        assert!(
-            bits.last_typed.is_some(),
-            "idle_revoke must stamp last_typed"
-        );
-        bits.last_typed = None;
+        let rx = reply_ok_and_capture(bits.peer.try_clone().unwrap(), 1);
         idle_forward_escape(&mut bits.ctx()).unwrap();
         assert!(
             bits.last_typed.is_some(),
             "idle_forward must stamp last_typed"
         );
         let first = rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        let second = rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert_eq!(first["type"], "rich_focus_toggle");
-        assert_eq!(second["type"], "write_pane");
-    }
-
-    #[test]
-    fn with_lease_runs_body_only_when_controller() {
-        let mut bits = AttachBits::new();
-        bits.read_only = true;
-        bits.controller = false;
-        let mut ran = false;
-        with_lease(&mut bits.ctx(), |_| {
-            ran = true;
-            Ok(())
-        })
-        .unwrap();
-        assert!(!ran, "not-controller must skip the body");
-        assert!(bits.last_typed.is_none());
-
-        bits.read_only = false;
-        bits.controller = true;
-        with_lease(&mut bits.ctx(), |_| {
-            ran = true;
-            Ok(())
-        })
-        .unwrap();
-        assert!(ran, "controller must run the body");
-        assert!(bits.last_typed.is_some());
+        assert_eq!(first["type"], "write_pane");
     }
 
     #[test]
@@ -9580,19 +8404,6 @@ mod tests {
         assert_eq!(req["fit"], true);
         assert_eq!(req["cols"], 80);
         assert_eq!(req["rows"], 24);
-    }
-
-    #[test]
-    fn apply_chrome_and_rich_chrome_send_requests() {
-        let mut bits = AttachBits::new();
-        bits.controller = true;
-        let rx = reply_ok_and_capture(bits.peer.try_clone().unwrap(), 2);
-        apply_chrome_route(&mut bits.ctx(), InputRoute::SemanticCopy).unwrap();
-        apply_rich_chrome(&mut bits.ctx(), InputRoute::RichFocusToggle).unwrap();
-        let copy = rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        let focus = rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert_eq!(copy["type"], "copy_semantic");
-        assert_eq!(focus["type"], "rich_focus_toggle");
     }
 
     #[test]
@@ -9669,25 +8480,7 @@ mod tests {
     }
 
     #[test]
-    fn send_rich_scroll_and_pointer_subtract_origin() {
-        let mut bits = AttachBits::new();
-        bits.controller = true;
-        let rx = reply_ok_and_capture(bits.peer.try_clone().unwrap(), 2);
-        send_rich_scroll(&mut bits.ctx(), true, 4, 6).unwrap();
-        send_rich_pointer(&mut bits.ctx(), 4, 6, RichPointerPhase::Press).unwrap();
-        let scroll = rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        let pointer = rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert_eq!(scroll["type"], "rich_input");
-        assert_eq!(scroll["input"]["row"], 5);
-        assert_eq!(scroll["input"]["col"], 3);
-        assert_eq!(scroll["input"]["delta"], -(WHEEL_LINES as i16));
-        assert_eq!(pointer["type"], "rich_input");
-        assert_eq!(pointer["input"]["row"], 5);
-        assert_eq!(pointer["input"]["col"], 3);
-    }
-
-    #[test]
-    fn apply_wheel_and_rich_key_routes_execute() {
+    fn apply_wheel_route_host_scrolls() {
         let mut bits = AttachBits::new();
         bits.controller = true;
         bits.scroll.supported = true;
@@ -9701,60 +8494,6 @@ mod tests {
             WHEEL_LINES.min(10),
             "apply_wheel_route must host-scroll"
         );
-
-        let rx = reply_ok_and_capture(bits.peer.try_clone().unwrap(), 3);
-        apply_rich_key_route(
-            &mut bits.ctx(),
-            InputRoute::RichScroll {
-                up: true,
-                x: 2,
-                y: 3,
-            },
-        )
-        .unwrap();
-        apply_rich_key_route(
-            &mut bits.ctx(),
-            InputRoute::RichPointer {
-                x: 2,
-                y: 3,
-                phase: RichPointerPhase::Release,
-            },
-        )
-        .unwrap();
-        assert_eq!(
-            rx.recv_timeout(Duration::from_secs(2)).unwrap()["type"],
-            "rich_input"
-        );
-        assert_eq!(
-            rx.recv_timeout(Duration::from_secs(2)).unwrap()["type"],
-            "rich_input"
-        );
-        bits.structured_focus = true;
-        apply_rich_key_route(&mut bits.ctx(), InputRoute::FocusVt("Enter".into())).unwrap();
-        assert_eq!(
-            rx.recv_timeout(Duration::from_secs(2)).unwrap()["type"],
-            "rich_input"
-        );
-    }
-
-    #[test]
-    fn apply_rich_key_route_focus_nav_writes_rich_input() {
-        let mut bits = AttachBits::new();
-        bits.controller = true;
-        bits.structured_focus = true;
-        let rx = reply_ok_and_capture(bits.peer.try_clone().unwrap(), 1);
-        apply_rich_key_route(
-            &mut bits.ctx(),
-            InputRoute::FocusNav {
-                token: "Left",
-                modifiers: 0,
-            },
-        )
-        .unwrap();
-        let request = rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert_eq!(request["type"], "rich_input");
-        assert_eq!(request["input"]["kind"], "key");
-        assert_eq!(request["input"]["key"], "Left");
     }
 
     #[test]
@@ -9858,93 +8597,6 @@ mod tests {
             "12x4 is not a live ioctl size; a no-op apply_local_winsize misses this"
         );
         assert_peer_got_no_request(&mut peer);
-    }
-
-    #[test]
-    fn styled_workspace_paints_above_guest_and_offsets_cursor() {
-        let styled = PaneStyled {
-            content: PaneContent {
-                pane_id: 1,
-                revision: 1,
-                cols: 8,
-                rows: 2,
-                cursor_row: 1,
-                cursor_col: 2,
-                cursor_visible: true,
-                alt_active: false,
-                child_alive: true,
-                child_pid: None,
-                lines: vec!["guest-a ".into(), "guest-b ".into()],
-                cursor_shape: None,
-            },
-            runs: vec![
-                vec![StyleRun::plain("guest-a ")],
-                vec![StyleRun::plain("guest-b ")],
-            ],
-            workspace: vec!["Runbook ".into(), "> check ".into()],
-            view_offset: Some(0),
-            max_view_scroll: Some(0),
-            child_mouse_tracking: Some(false),
-            child_mouse_sgr: Some(false),
-            overlays: Vec::new(),
-            experimental_rich: true,
-            rich_focus_id: None,
-            structured_focus: false,
-            semantic_clipboard: None,
-            semantic_clipboard_seq: None,
-            workspace_inverse: vec![WorkspaceInverseRun {
-                row: 1,
-                col: 0,
-                cols: 8,
-            }],
-            workspace_styles: vec![WorkspaceStyleRun {
-                row: 0,
-                col: 0,
-                cols: 7,
-                fg: ColorWire::Ansi { n: 2 },
-            }],
-        };
-        let frame = PaintFrame::from_styled(styled);
-        assert_eq!(frame.workspace_rows, 2);
-        assert_eq!(frame.content.rows, 4);
-        assert_eq!(frame.content.cursor_row, 3);
-        assert_eq!(frame.content.lines[0], "Runbook ");
-        assert_eq!(frame.content.lines[2], "guest-a ");
-        assert!(!frame.runs[0][0].inverse);
-        assert_eq!(frame.runs[0][0].fg, ColorWire::Ansi { n: 2 });
-        assert!(
-            frame.runs[1][0].inverse,
-            "selected workspace row is inverse"
-        );
-        let paint = String::from_utf8(paint_bytes(None, &frame, None)).unwrap();
-        assert!(paint.find("Runbook").unwrap() < paint.find("guest-a").unwrap());
-    }
-
-    #[test]
-    fn inverse_runs_use_cell_columns_for_wide_and_combining() {
-        let line = "> 警告 e\u{301} path".to_string();
-        let runs = super::selected_workspace_runs(
-            &[line],
-            &[WorkspaceInverseRun {
-                row: 0,
-                col: 2,
-                cols: 4,
-            }],
-            &[],
-        );
-        let inverse: String = runs[0]
-            .iter()
-            .filter(|run| run.inverse)
-            .map(|run| run.text.as_str())
-            .collect();
-        let plain: String = runs[0]
-            .iter()
-            .filter(|run| !run.inverse)
-            .map(|run| run.text.as_str())
-            .collect();
-        assert_eq!(inverse, "警告");
-        assert!(plain.contains("e\u{301}"), "{plain:?}");
-        assert!(!inverse.contains('e'), "{inverse:?}");
     }
 
     #[test]
@@ -10085,13 +8737,6 @@ mod tests {
             max_view_scroll: Some(0),
             child_mouse_tracking: None,
             child_mouse_sgr: None,
-            overlays: Vec::new(),
-            experimental_rich: false,
-            rich_focus_id: None,
-            structured_focus: false,
-            workspace_rows: 0,
-            semantic_clipboard: None,
-            semantic_clipboard_seq: None,
         }
     }
 
@@ -10127,12 +8772,11 @@ mod tests {
 
     #[test]
     fn outer_mouse_full_requires_controller_and_child_tracking() {
-        assert!(!super::outer_mouse_full(false, Some(true), false));
-        assert!(!super::outer_mouse_full(true, Some(false), false));
-        assert!(!super::outer_mouse_full(true, None, false));
-        assert!(!super::outer_mouse_full(false, None, true));
-        assert!(super::outer_mouse_full(true, Some(true), false));
-        assert!(super::outer_mouse_full(true, Some(false), true));
+        assert!(!super::outer_mouse_full(false, Some(true)));
+        assert!(!super::outer_mouse_full(true, Some(false)));
+        assert!(!super::outer_mouse_full(true, None));
+        assert!(!super::outer_mouse_full(false, None));
+        assert!(super::outer_mouse_full(true, Some(true)));
     }
 
     #[test]
@@ -10499,12 +9143,6 @@ mod tests {
     fn drain_keys_plain_y_is_not_reserved() {
         assert_eq!(drain(b"y").0, vec![AttachKey::Forward(vec![b'y'])]);
         assert_eq!(drain(b"Y").0, vec![AttachKey::Forward(vec![b'Y'])]);
-        assert_eq!(
-            drain(b"\x1b[27;6;99~").0,
-            vec![AttachKey::SemanticCopy {
-                bytes: b"\x1b[27;6;99~".to_vec()
-            }]
-        );
     }
 
     #[test]
@@ -10528,24 +9166,24 @@ mod tests {
     }
 
     #[test]
-    fn drain_keys_recognizes_ctrl_shift_g() {
-        assert_eq!(
-            drain(b"\x1b[27;6;103~").0,
-            vec![AttachKey::RichFocusToggle {
-                bytes: b"\x1b[27;6;103~".to_vec(),
-            }]
-        );
-        assert_eq!(
-            drain(b"\x1b[27;6;71~").0,
-            vec![AttachKey::RichFocusToggle {
-                bytes: b"\x1b[27;6;71~".to_vec(),
-            }]
-        );
-        assert_eq!(
-            drain(b"\x07").0,
-            vec![AttachKey::Forward(vec![0x07])],
-            "Ctrl-G without Shift must not steal"
-        );
+    fn drain_keys_forwards_ctrl_shift_g_and_c_to_the_child() {
+        // These chords used to belong to rich mode. Attach now treats them
+        // like any other key and the live pane writes them to the child.
+        for chord in [
+            &b"\x1b[27;6;103~"[..],
+            b"\x1b[27;6;71~",
+            b"\x1b[103;6u",
+            b"\x1b[27;6;99~",
+            b"\x1b[99;6u",
+        ] {
+            let keys = drain(chord).0;
+            assert_eq!(keys, vec![AttachKey::Forward(chord.to_vec())], "{chord:?}");
+            assert_eq!(
+                route_attach_key(&keys[0], &live_view()),
+                InputRoute::Write(chord.to_vec()),
+                "{chord:?}"
+            );
+        }
     }
 
     #[test]
@@ -10596,7 +9234,6 @@ mod tests {
                 x: 3,
                 y: 4,
                 primary: true,
-                phase: RichPointerPhase::Press,
             }]
         );
         assert_eq!(
@@ -10607,7 +9244,6 @@ mod tests {
                 x: 3,
                 y: 4,
                 primary: true,
-                phase: RichPointerPhase::Release,
             }]
         );
         assert_eq!(
@@ -10618,7 +9254,6 @@ mod tests {
                 x: 3,
                 y: 4,
                 primary: true,
-                phase: RichPointerPhase::Press,
             }]
         );
         assert_eq!(
@@ -10629,7 +9264,6 @@ mod tests {
                 x: 3,
                 y: 4,
                 primary: false,
-                phase: RichPointerPhase::Release,
             }]
         );
         // Two reports in one read.
@@ -11363,19 +9997,6 @@ mod tests {
         );
         assert_eq!(attention_osc_bytes("bad\nmessage"), None);
     }
-    fn overlay_at(kind: OverlayKind, row: i32, col: u16, text: &str) -> PaneOverlay {
-        PaneOverlay {
-            id: 1,
-            kind,
-            row,
-            col,
-            rows: 1,
-            cols: text.chars().count() as u16,
-            text: text.into(),
-            runs: Vec::new(),
-        }
-    }
-
     #[test]
     fn attach_toast_text_names_the_session() {
         assert_eq!(
@@ -11437,7 +10058,6 @@ mod tests {
         let mut next = frame(1, &["hello", "world"]);
         next.content.alt_active = true;
         next.content.cols = 40;
-        next.overlays = vec![overlay_at(OverlayKind::Viewport, 1, 0, "APP")];
         let toast = attach_toast_overlay(&attach_toast_text(Some("work")), 40);
         let scroll = ScrollState::default();
         let bytes = compose_paint(
@@ -11451,7 +10071,6 @@ mod tests {
             AttachChrome::default(),
         );
         let out = String::from_utf8_lossy(&bytes);
-        assert!(!out.contains("APP"), "app HUD must stay off alt: {out:?}");
         assert!(out.contains("pmux: work"), "{out:?}");
         assert!(
             out.contains("48;2;98;168;255"),
@@ -11474,183 +10093,6 @@ mod tests {
             row.contains("session work is attached"),
             "toast missing from alt row: {row:?}"
         );
-    }
-
-    #[test]
-    fn flag_off_empty_overlays_keep_paint_bytes_identical() {
-        let next = frame(1, &["hello", "world"]);
-        assert!(next.overlays.is_empty());
-        let scroll = ScrollState::default();
-        let composed = compose_paint(
-            None,
-            &next,
-            &scroll,
-            0,
-            None,
-            None,
-            None,
-            AttachChrome::default(),
-        );
-        let guest = paint_bytes(None, &next, None);
-        assert!(
-            String::from_utf8_lossy(&composed).contains("hello"),
-            "{composed:?}"
-        );
-        assert_eq!(&composed[..guest.len()], guest.as_slice());
-    }
-
-    #[test]
-    fn cell_rect_overlay_paints_clipped_text() {
-        let mut next = styled_full_width_frame(8, 3, '.');
-        next.overlays = vec![overlay_at(OverlayKind::CellRect, 0, 2, "STAT")];
-        let scroll = ScrollState::default();
-        let mut emu = Emulator::new(8, 3, 0);
-        emu.feed(&compose_paint(
-            None,
-            &next,
-            &scroll,
-            0,
-            None,
-            None,
-            None,
-            AttachChrome::default(),
-        ));
-        let row = emu.screen().row(0).unwrap();
-        assert_eq!(row[2].character, 'S');
-        assert_eq!(row[3].character, 'T');
-        assert_eq!(row[4].character, 'A');
-        assert_eq!(row[5].character, 'T');
-        assert_eq!(row[0].character, '.');
-        assert_eq!(row[7].character, '.');
-    }
-
-    #[test]
-    fn viewport_paints_above_cell_rect() {
-        let mut next = styled_full_width_frame(8, 2, '.');
-        next.overlays = vec![
-            overlay_at(OverlayKind::CellRect, 0, 0, "AAAA"),
-            overlay_at(OverlayKind::Viewport, 0, 0, "HUD"),
-        ];
-        let scroll = ScrollState::default();
-        let mut emu = Emulator::new(8, 2, 0);
-        emu.feed(&compose_paint(
-            None,
-            &next,
-            &scroll,
-            0,
-            None,
-            None,
-            None,
-            AttachChrome::default(),
-        ));
-        let row = emu.screen().row(0).unwrap();
-        assert_eq!(row[0].character, 'H');
-        assert_eq!(row[1].character, 'U');
-        assert_eq!(row[2].character, 'D');
-        assert_eq!(row[3].character, 'A');
-    }
-
-    #[test]
-    fn history_pan_hides_cell_rect_keeps_viewport() {
-        let mut next = styled_full_width_frame(8, 2, '.');
-        next.view_offset = Some(3);
-        next.overlays = vec![
-            overlay_at(OverlayKind::CellRect, 0, 0, "STAT"),
-            overlay_at(OverlayKind::Viewport, 0, 4, "HUD"),
-        ];
-        let scroll = ScrollState::default();
-        let mut emu = Emulator::new(8, 2, 0);
-        emu.feed(&compose_paint(
-            None,
-            &next,
-            &scroll,
-            0,
-            None,
-            None,
-            None,
-            AttachChrome::default(),
-        ));
-        let row = emu.screen().row(0).unwrap();
-        assert_eq!(row[0].character, '.');
-        assert_eq!(row[4].character, 'H');
-        assert_eq!(row[5].character, 'U');
-        assert_eq!(row[6].character, 'D');
-    }
-
-    #[test]
-    fn alt_screen_skips_rich_overlays() {
-        let mut next = styled_full_width_frame(8, 2, '.');
-        next.content.alt_active = true;
-        next.overlays = vec![overlay_at(OverlayKind::CellRect, 0, 0, "STAT")];
-        let scroll = ScrollState::default();
-        let mut emu = Emulator::new(8, 2, 0);
-        emu.feed(&compose_paint(
-            None,
-            &next,
-            &scroll,
-            0,
-            None,
-            None,
-            None,
-            AttachChrome::default(),
-        ));
-        assert_eq!(emu.screen().row(0).unwrap()[0].character, '.');
-    }
-
-    #[test]
-    fn overlay_clips_past_attach_cols() {
-        let mut next = styled_full_width_frame(4, 1, '.');
-        next.overlays = vec![overlay_at(OverlayKind::CellRect, 0, 2, "STAT")];
-        let scroll = ScrollState::default();
-        let mut emu = Emulator::new(4, 1, 0);
-        emu.feed(&compose_paint(
-            None,
-            &next,
-            &scroll,
-            0,
-            None,
-            None,
-            None,
-            AttachChrome::default(),
-        ));
-        let row = emu.screen().row(0).unwrap();
-        assert_eq!(row[2].character, 'S');
-        assert_eq!(row[3].character, 'T');
-        assert_eq!(row.len(), 4);
-    }
-
-    #[test]
-    fn incremental_dirty_row_reapplies_rich_overlay() {
-        let mut prev = styled_full_width_frame(8, 2, '.');
-        prev.overlays = vec![overlay_at(OverlayKind::CellRect, 0, 0, "STAT")];
-        let mut next = styled_full_width_frame(8, 2, 'Z');
-        next.overlays = prev.overlays.clone();
-        let scroll = ScrollState::default();
-        let mut emu = Emulator::new(8, 2, 0);
-        emu.feed(&compose_paint(
-            None,
-            &prev,
-            &scroll,
-            0,
-            None,
-            None,
-            None,
-            AttachChrome::default(),
-        ));
-        emu.feed(&compose_paint(
-            Some(&prev),
-            &next,
-            &scroll,
-            0,
-            Some(0),
-            None,
-            None,
-            AttachChrome::default(),
-        ));
-        let row = emu.screen().row(0).unwrap();
-        assert_eq!(row[0].character, 'S');
-        assert_eq!(row[3].character, 'T');
-        assert_eq!(row[4].character, 'Z');
     }
 
     #[test]

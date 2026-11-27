@@ -3672,8 +3672,6 @@ dependencies = [
  "prismattyc-core",
  "prismattyc-emulator",
  "prismattyc-process",
- "prismattyc-protocol",
- "prismattyc-render",
  "prismattyc-winres",
  "rusqlite",
  "rustix 1.1.6",

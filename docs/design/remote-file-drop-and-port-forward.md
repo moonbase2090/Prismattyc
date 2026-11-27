@@ -91,8 +91,18 @@ remote by scraping tab titles, prompts, or local shell command lines.
      implicit host-side SSH calls to unconfigured hosts).
 2. **`RemoteTransport` seam (future-proofing identity-based remotes):**
    ```rust
+   enum RemoteLoopback {
+       Ipv4, // 127.0.0.1
+       Ipv6, // [::1]
+   }
+
    trait RemoteTransport {
-       fn start_forward(&self, local_port: u16, remote_port: u16) -> Result<ForwardHandle>;
+       fn start_forward(
+           &self,
+           local_port: u16,
+           remote_host: RemoteLoopback,
+           remote_port: u16,
+       ) -> Result<ForwardHandle>;
        fn upload_file(&self, meta: DropRequest, reader: Box<dyn Read + Send>) -> Result<RemotePath>;
    }
    ```
@@ -122,9 +132,12 @@ remote by scraping tab titles, prompts, or local shell command lines.
      - `Host::Ipv6(ip)` where `ip.is_loopback()` (`::1`) or
        `ip.is_unspecified()` (`::`),
    - resolved port (`url.port_or_known_default()`) is in `1..=65535`.
-3. When the host was `0.0.0.0` or `::`, normalize the remote forward target to
-   `127.0.0.1` (or `[::1]` for IPv6 loopback) — never forward to an unspecified
-   address.
+3. Normalize unspecified addresses by address family — never forward to an
+   unspecified address:
+   - `0.0.0.0`, `127.0.0.0/8`, and `localhost` target remote `127.0.0.1`
+     (`RemoteLoopback::Ipv4`).
+   - `::` and `::1` target remote `[::1]` (`RemoteLoopback::Ipv6`) so
+     IPv6-only listeners bound to `::` remain reachable.
 4. For **local panes** (no `RemotePaneBinding`), behavior is unchanged: open
    directly via `open_url(&url)`.
 
@@ -148,9 +161,12 @@ ssh -N -T \
   -o GatewayPorts=no \
   -o ServerAliveInterval=15 \
   -o ServerAliveCountMax=3 \
-  -L 127.0.0.1:<local_port>:127.0.0.1:<remote_port> \
+  -L 127.0.0.1:<local_port>:<remote_loopback>:<remote_port> \
   -- <ssh_alias>
 ```
+
+where `<remote_loopback>` is `127.0.0.1` (`RemoteLoopback::Ipv4`) or `[::1]`
+(`RemoteLoopback::Ipv6`).
 
 Why one `ssh -N` child per forward instead of `ControlMaster` / `ssh -O forward`:
 
@@ -182,13 +198,13 @@ Why one `ssh -N` child per forward instead of `ControlMaster` / `ssh -O forward`
 output is untrusted; neither an OSC escape sequence nor a plain link click may
 silently open a local listening socket.
 
-- **Click on an already-forwarded `(destination, remote_port)`:** no duplicate
+- **Click on an already-forwarded `(destination, remote_loopback, remote_port)`:** no duplicate
   tunnel is started; open the existing local URL directly.
-- **Click on a new `(destination, remote_port)`:** open a host confirmation
+- **Click on a new `(destination, remote_loopback, remote_port)`:** open a host confirmation
   modal (following `restart_modal.rs`) displaying:
   - Remote destination label and SSH alias,
-  - Remote target (`127.0.0.1:<remote_port>`) and local bind
-    (`127.0.0.1:<local_port>`),
+  - Remote target (`127.0.0.1:<remote_port>` or `[::1]:<remote_port>`) and local
+    bind (`127.0.0.1:<local_port>`),
   - Exact local URL that will open in the browser,
   - Explicit warning if an OSC 8 link's visible text does not match its
     parsed host/port,
@@ -210,7 +226,7 @@ silently open a local listening socket.
 
 - **Lifetime:**
   - Active forwards are owned by the host process (`ForwardManager` on `App`,
-    keyed by `(DestinationId, remote_port)`).
+    keyed by `(DestinationId, RemoteLoopback, remote_port)`).
   - A forward stays alive while at least one remote tab to that `DestinationId`
     is open, and is **automatically stopped** when the last tab to that
     destination closes (preventing forgotten background listeners) or when the
@@ -253,18 +269,37 @@ silently open a local listening socket.
 
 Never upload a local file silently on an accidental drag-drop.
 
-**Pre-consent checks (run off the main thread for metadata, fail closed):**
+**Pre-consent handle pinning and validation (run off the main thread, fail closed, TOCTOU-safe):**
 
-1. Require regular files only in v1 (`symlink_metadata` + reject FIFOs,
-   sockets, device nodes, and directories with a clear toast).
-2. Reject symlinks by default (or flag them explicitly and refuse symlinks to
-   non-regular targets) so dropping a symlink cannot silently exfiltrate an
-   unexpected file.
-3. Enforce size caps (default 64 MiB/file, 128 MiB/batch; configurable).
-4. On Windows, reject UNC/network paths (`\\server\share\…`, `\\?\UNC\…`),
-   device paths (`\\.\…`), and `.lnk` shortcuts / reparse points
-   (`FILE_ATTRIBUTE_REPARSE_POINT`) to prevent NTLM credential leaks or SMB
-   hangs.
+To prevent path-swap TOCTOU races between validation, user consent, and upload,
+never validate by path with `symlink_metadata` and later reopen the same path
+after the user clicks Upload. Instead, **open and pin no-follow file handles
+before presenting the consent modal, and stream those exact pinned handles**
+upon approval (bounded by the 10-file batch cap; close all pinned handles
+immediately on Cancel, modal dismissal, or pane close):
+
+1. **Unix (`O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC`):** open each
+   dropped path without following symlinks (and without blocking on FIFOs), then
+   validate the open descriptor with `fstat` — require `S_ISREG` (rejecting
+   symlinks, FIFOs, sockets, device nodes, and directories with a clear toast)
+   and record its approved byte length and `(st_dev, st_ino)`. Clear
+   `O_NONBLOCK` only after `S_ISREG` succeeds, and stream from that exact fd
+   when the user approves.
+2. **Windows (`CreateFileW` + reparse-point check on the pinned `HANDLE`):**
+   reject UNC/network paths (`\\server\share\…`, `\\?\UNC\…`), device paths
+   (`\\.\…`), and `.lnk` shortcuts before opening. Open the target with
+   `CreateFileW` using `FILE_FLAG_OPEN_REPARSE_POINT` (with `FILE_SHARE_READ`
+   so concurrent delete/rename/write replacements are rejected while pinned),
+   verify on the opened `HANDLE` via `GetFileType` (`FILE_TYPE_DISK`) and
+   `GetFileInformationByHandle` / `FileAttributeTagInfo` that
+   `FILE_ATTRIBUTE_DIRECTORY` and `FILE_ATTRIBUTE_REPARSE_POINT` are clear, and
+   record the approved size from that handle. Stream from that exact `HANDLE`
+   after consent.
+3. **Exact-length streaming guard:** enforce size caps (default 64 MiB/file,
+   128 MiB/batch; configurable) against the pinned-handle sizes before consent,
+   and while streaming verify that EOF occurs at the exact approved byte length
+   (aborting the upload if the underlying file shrank or grew after consent so
+   the remote side never receives unapproved bytes).
 
 **Consent modal (following `restart_modal.rs`):**
 
@@ -369,8 +404,11 @@ ssh -T -o BatchMode=yes -o ConnectTimeout=10 -- <ssh_alias> pmux drop-receive
     (`with_drag_and_drop(true)`). The build must verify on a clean Windows VM
     that `winit`'s OLE initialization coexists cleanly with `hyperlink.rs:389`'s
     `CoInitializeEx(COINIT_APARTMENTTHREADED)` call.
-  - Rejects UNC paths (`\\server\share`), device paths (`\\.\`), and
-    reparse points / `.lnk` shortcuts before opening or reading any file.
+  - Rejects UNC paths (`\\server\share`), device paths (`\\.\`), and `.lnk`
+    shortcuts before opening, then opens each dropped file with
+    `FILE_FLAG_OPEN_REPARSE_POINT` and `FILE_SHARE_READ`, verifies
+    `FILE_TYPE_DISK` and no `FILE_ATTRIBUTE_REPARSE_POINT` / directory bit on
+    the pinned `HANDLE` before consent, and streams that same `HANDLE`.
   - Never joins remote paths with local `PathBuf` (remote `pmux drop-receive`
     always returns its native path string).
   - If the remote side itself runs Windows, `pmux drop-receive` creates an
@@ -402,7 +440,7 @@ No SSH assumptions leak into the UI, modal, or remote drop-storage layers.
 | --- | --- | --- |
 | Spoofed OSC 8 link tricks user into forwarding a sensitive remote loopback port (admin API, DB, local agent socket) | Unauthorized local browser access to remote loopback service | Mandatory confirmation modal on every new forward showing parsed destination, remote/local ports, full URL, and an explicit warning when OSC 8 label != target. |
 | `GatewayPorts yes` in user's `~/.ssh/config` exposes forwarded port on LAN | Network exposure of remote loopback service | Always pass `-o GatewayPorts=no` and bind `127.0.0.1` explicitly. |
-| Accidental drag-drop uploads sensitive local file (e.g., `.env`, key file) | Unintended data transfer to remote host | Mandatory consent modal listing filenames, sizes, and highlighting dotfiles; reject symlinks, directories, special files, and Windows UNC/reparse points. |
+| Accidental drag-drop or post-consent path swap uploads sensitive or unapproved local file (e.g., `.env`, key file, symlink swap) | Unintended data transfer to remote host | Mandatory consent modal listing filenames, sizes, and highlighting dotfiles; open and validate no-follow handles before consent (Unix `O_NOFOLLOW` + `fstat`, Windows `FILE_FLAG_OPEN_REPARSE_POINT` + `GetFileInformationByHandle` on pinned `HANDLE`), stream those exact pinned handles with exact-length verification, and reject symlinks, directories, special files, and Windows UNC/reparse points. |
 | Remote shell injection or `/tmp` symlink attack via crafted filename | Remote code execution or file clobbering | Zero shell interpolation (`pmux drop-receive` reads JSON header on stdin), sanitized basename with random hex prefix, `0700` private dir, `O_CREAT \| O_EXCL \| O_NOFOLLOW` `0600` file. |
 | Forgotten background tunnels or orphaned `ssh -N` processes | Stale listening ports | Auto-close forwards when last tab to destination closes; explicit Stop/Stop all in forwards table; kill+reap on host exit; Windows Job Object `KILL_ON_JOB_CLOSE`. |
 | Unbounded remote drop directory fills disk | Disk exhaustion on remote host | 64 MiB/file + 128 MiB/batch cap enforced on both host and remote; 24 h TTL + 512 MiB cap pruned automatically; session-destroy cleanup. |
@@ -419,18 +457,22 @@ explicit budget for clean-VM proofs.
 
 ### Build 1 — Remote localhost port-forward (2 trunk PRs)
 
+Per `REVIEW_POLICY.md` §5, new trunk behavior ships on by default with no
+off-by-default feature flag (each PR ships complete, confirmation-gated
+behavior):
+
 | PR | Scope | Agent-hours | Wall-clock days |
 | --- | --- | ---: | ---: |
-| **PR 1** | `RemotePaneBinding` on `HostState`, `link_click::Gesture::take_due` returning `(PaneId, String)`, localhost URL detection/rewriting, `RemoteTransport` trait + `SshForwardManager` (`ssh -N -L 127.0.0.1:...`, `GatewayPorts=no`, `ExitOnForwardFailure=yes`, Windows Job Object), flag-gated off by default, unit + real-SSH loopback tests | 5–6 h | 1–1.5 d |
-| **PR 2** | Forward confirmation modal (with OSC 8 mismatch warning), palette `Forward Port…` + active `Port Forwards` table overlay, last-tab & shutdown teardown, default-on flip, macOS/Linux/Windows proof | 5–6 h | 1.5 d |
+| **PR 1** | `RemotePaneBinding` on `HostState`, `link_click::Gesture::take_due` returning `(PaneId, String)`, localhost URL detection/rewriting (`127.0.0.1` and `[::1]`), `RemoteTransport` trait + `SshForwardManager` (`ssh -N -L 127.0.0.1:<local>:<remote_loopback>:<remote>`, `GatewayPorts=no`, `ExitOnForwardFailure=yes`, Windows Job Object), forward confirmation modal (with OSC 8 mismatch warning), last-tab & shutdown teardown, unit + real-SSH IPv4/IPv6 loopback tests, macOS/Linux/Windows proof | 6–7 h | 1.5–2 d |
+| **PR 2** | Command palette `Forward Port…`, active `Port Forwards` table overlay (Open / Stop / Stop all, keyboard/pointer/AccessKit) and chrome active-forwards indicator, UI & teardown proof | 4–5 h | 1 d |
 | **Subtotal** | **Slice A (port-forward)** | **10–12 h** | **2.5–3 d** |
 
 ### Build 2 — Remote file drop (2 trunk PRs)
 
 | PR | Scope | Agent-hours | Wall-clock days |
 | --- | --- | ---: | ---: |
-| **PR 1** | `pmux drop-receive` + `pmux drops clean` in `prismattyc-mux` (`0700` private dir, `O_EXCL` `0600` file, JSON stdin header + raw stream, size/TTL/session cleanup), host `SshDropUploader` worker, real-SSH upload + traversal/symlink/oversize tests | 4–5 h | 1–1.5 d |
-| **PR 2** | `winit` `HoveredFile`/`DroppedFile`/`HoveredFileCancelled` wiring in `prismattyc-host`, UNC/reparse-point/size/special-file guards, drop consent modal (paste vs copy vs cancel), `PasteJobs` bracketed-paste insertion, macOS/Linux/Windows VM proof | 4–5 h | 1.5 d |
+| **PR 1** | `pmux drop-receive` + `pmux drops clean` in `prismattyc-mux` (`0700` private dir, `O_EXCL` `0600` file, JSON stdin header + raw stream, size/TTL/session cleanup), host `SshDropUploader` worker streaming pinned handles with exact-length guard, real-SSH upload + traversal/symlink/oversize tests | 4–5 h | 1–1.5 d |
+| **PR 2** | `winit` `HoveredFile`/`DroppedFile`/`HoveredFileCancelled` wiring in `prismattyc-host`, pre-consent no-follow handle pinning (Unix `O_NOFOLLOW`+`fstat`, Windows `FILE_FLAG_OPEN_REPARSE_POINT`+`GetFileInformationByHandle`+UNC/device/`.lnk` guards), drop consent modal (paste vs copy vs cancel), `PasteJobs` bracketed-paste insertion, TOCTOU swap test, macOS/Linux/Windows VM proof | 4–5 h | 1.5 d |
 | **Subtotal** | **Slice B (file drop)** | **8–10 h** | **2.5–3 d** |
 
 ### Recommended build tickets
@@ -444,13 +486,16 @@ explicit budget for clean-VM proofs.
 ## Proof plan for the builds
 
 - **Port-forward (Slice A):**
-  - Real-SSH loopback test (`scripts/remote-ssh-tests.sh` harness): start an
-    HTTP server on a remote loopback port, trigger forward, fetch through the
-    forwarded local `127.0.0.1` port, verify `GatewayPorts=no` and clean
-    teardown when the forward is stopped or the last remote tab closes.
-  - Unit tests for localhost URL classification (`localhost`, `127.x`, `0.0.0.0`,
-    `[::1]`, `[::]`, non-localhost ignored, OSC 8 mismatch flagged, port
-    collision fallback to ephemeral local port, cap enforcement).
+  - Real-SSH loopback test (`scripts/remote-ssh-tests.sh` harness): start HTTP
+    servers on both remote `127.0.0.1` and IPv6-only `::` / `[::1]` loopback
+    ports, trigger forwards (including `http://[::]:<port>` normalizing to
+    `[::1]`), fetch through the forwarded local `127.0.0.1` port, verify
+    `GatewayPorts=no` and clean teardown when the forward is stopped or the
+    last remote tab closes.
+  - Unit tests for localhost URL classification (`localhost`, `127.x`,
+    `0.0.0.0` -> `127.0.0.1`, `[::1]` -> `[::1]`, `[::]` -> `[::1]`,
+    non-localhost ignored, OSC 8 mismatch flagged, port collision fallback to
+    ephemeral local port, cap enforcement).
   - Windows VM proof: verify `ssh.exe -N` runs without console flash, opens the
     local browser via `ShellExecuteW`, and terminates cleanly via Job Object on
     host exit.
@@ -459,9 +504,12 @@ explicit budget for clean-VM proofs.
     and shell metacharacters through `pmux drop-receive`; verify exact SHA-256,
     `0700` dir / `0600` file modes, sanitized path, TTL pruning, and session
     cleanup.
-  - Security rejection tests: reject oversize files, symlinks, directories,
-    traversal names (`../x`), trailing bytes, and Windows UNC / `.lnk` /
-    reparse-point paths.
+  - Security rejection and TOCTOU tests: reject oversize files, symlinks,
+    directories, FIFOs, traversal names (`../x`), trailing bytes, and Windows
+    UNC / `.lnk` / reparse-point paths; verify that replacing a dropped path
+    (with a symlink or another file) after the consent modal opens cannot swap
+    the uploaded bytes (the pinned handle streams the approved content or fails
+    closed on length mismatch).
   - Host UI tests: consent modal cancels cleanly without spawning `ssh`,
     "Upload and paste path" delivers via `PasteJobs` with bracketed paste and
     no newline, and "Upload and copy path" writes clipboard only.

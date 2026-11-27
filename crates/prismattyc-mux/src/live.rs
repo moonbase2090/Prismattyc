@@ -2841,6 +2841,65 @@ mod handoff_tests {
         assert!(text(&new).contains("last-words"));
     }
 
+    /// One pane that cannot be adopted is reported and closed; the others
+    /// are taken over.
+    #[test]
+    fn a_pane_that_cannot_be_adopted_is_reported_and_the_rest_carry_over() {
+        let mut old = LiveRuntime::spawn(
+            &[
+                PaneGeometry {
+                    pane_id: 1,
+                    col: 0,
+                    row: 0,
+                    cols: 60,
+                    rows: 10,
+                },
+                PaneGeometry {
+                    pane_id: 2,
+                    col: 0,
+                    row: 10,
+                    cols: 60,
+                    rows: 10,
+                },
+            ],
+            &HashMap::from([
+                (1u64, sh("echo one; exec sleep 30")),
+                (2u64, sh("echo two; exec sleep 30")),
+            ]),
+            None,
+        )
+        .expect("spawn");
+        wait_for(&mut old, "one");
+        let second = old.child_pid(2).expect("pid");
+        old.quiesce_for_handoff(Duration::from_secs(5))
+            .expect("quiesce");
+        let mut panes = old.export_handoff().expect("export");
+        drop(old);
+        // Damage pane 2's record: no program pid.
+        for (record, _) in &mut panes {
+            if record.pane_id == 2 {
+                record.pid = None;
+            }
+        }
+        let (mut new, failed) = LiveRuntime::adopt_handoff(panes, None, PaneLogWatch::new());
+        assert_eq!(failed.iter().map(|(id, _)| *id).collect::<Vec<_>>(), [2]);
+        assert!(new.has_pane(1) && !new.has_pane(2));
+        assert!(text(&new).contains("one"));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while alive(second) && Instant::now() < deadline {
+            // Its master closed, so the kernel hangs the program up.
+            let _ = new.drain();
+            thread::sleep(Duration::from_millis(10));
+        }
+        let mut status = 0;
+        // SAFETY: reap the hung-up program, which is a child of this test.
+        unsafe { libc::waitpid(second as libc::pid_t, &mut status, 0) };
+        assert!(
+            !alive(second),
+            "the program of a pane that was not adopted kept running"
+        );
+    }
+
     /// A writer stuck on a program that never reads makes the handoff give up
     /// in time, and the server carries on reading the pane.
     #[test]

@@ -53,6 +53,13 @@ pub struct MuxSection {
     pub activity_webhook_secret_file: Option<PathBuf>,
     /// Unsupported by design: present only so inline secrets can be rejected.
     pub activity_webhook_secret: Option<String>,
+    /// Commands a program may ask the pmux server to resume after a restart
+    /// (OSC 7577), matched on the command's file name. `*` trusts every
+    /// command. Unset uses a short list of editors and Git interfaces.
+    pub resume_trusted: Option<Vec<String>>,
+    /// Take program resume reports and resume programs while the pmux server
+    /// runs as root. Default false.
+    pub resume_allow_elevated: Option<bool>,
 }
 
 impl MuxSection {
@@ -294,6 +301,8 @@ pub enum MuxKeyKind {
     String(&'static str),
     CommentedPath(&'static str),
     CommentedString(&'static str),
+    /// A commented-out example written as a TOML value (such as an array).
+    CommentedValue(&'static str),
     Bool(bool),
 }
 
@@ -365,6 +374,18 @@ pub const MUX_KEYS: &[MuxKeySpec] = &[
         range: "braille|block|ascii; default braille",
         kind: MuxKeyKind::String("braille"),
     },
+    MuxKeySpec {
+        name: "resume_trusted",
+        doc: "Commands a program may ask the pmux server to resume after a restart (OSC 7577), by file name; \"*\" trusts all",
+        range: "list of names; default common editors and Git interfaces",
+        kind: MuxKeyKind::CommentedValue("[\"nvim\", \"lazygit\"]"),
+    },
+    MuxKeySpec {
+        name: "resume_allow_elevated",
+        doc: "Take program resume reports and resume programs while the pmux server runs as root",
+        range: "true|false; default false",
+        kind: MuxKeyKind::Bool(false),
+    },
 ];
 
 /// Render the `[mux]` table with comments.
@@ -387,6 +408,9 @@ pub fn render_mux_section() -> String {
             }
             MuxKeyKind::CommentedString(value) => {
                 out.push_str(&format!("# {} = \"{value}\"\n", key.name));
+            }
+            MuxKeyKind::CommentedValue(value) => {
+                out.push_str(&format!("# {} = {value}\n", key.name));
             }
             MuxKeyKind::Bool(value) => {
                 out.push_str(&format!("{} = {value}\n", key.name));
@@ -424,6 +448,14 @@ pub fn merge_mux_section(document: &mut toml_edit::DocumentMut) {
             }
             MuxKeyKind::CommentedString(value) => {
                 insert_commented_path(table, key.name, value);
+            }
+            MuxKeyKind::CommentedValue(value) => {
+                if let Ok(parsed) = value.parse::<toml_edit::Value>() {
+                    table.insert(key.name, toml_edit::Item::Value(parsed));
+                    if let Some(mut key) = table.key_mut(key.name) {
+                        key.leaf_decor_mut().set_prefix("# ");
+                    }
+                }
             }
             MuxKeyKind::Bool(value) => {
                 table.insert(key.name, toml_edit::value(value));
@@ -1085,6 +1117,8 @@ mod tests {
                 activity_webhook_secret_file: None,
                 activity_webhook_secret: None,
                 shell: None,
+                resume_trusted: None,
+                resume_allow_elevated: None,
             };
             let (instance, socket) = resolve_mux_target(Some("other".into()), None, &file).unwrap();
             assert_eq!(instance, "other");
@@ -1121,6 +1155,8 @@ mod tests {
                 activity_webhook_secret_file: None,
                 activity_webhook_secret: None,
                 shell: None,
+                resume_trusted: None,
+                resume_allow_elevated: None,
             };
             let (instance, socket) =
                 resolve_mux_target(Some("cli".into()), Some(cli_socket.clone()), &file).unwrap();
@@ -1145,6 +1181,8 @@ mod tests {
                 activity_webhook_secret_file: None,
                 activity_webhook_secret: None,
                 shell: None,
+                resume_trusted: None,
+                resume_allow_elevated: None,
             };
             let (instance, socket) = resolve_mux_target(None, None, &file).unwrap();
             assert_eq!(instance, "work");
@@ -1169,6 +1207,8 @@ mod tests {
                 activity_webhook_secret_file: None,
                 activity_webhook_secret: None,
                 shell: None,
+                resume_trusted: None,
+                resume_allow_elevated: None,
             };
             let (instance, socket) = resolve_mux_target(None, None, &file).unwrap();
             assert_eq!(instance, "from-env");
@@ -1192,6 +1232,8 @@ mod tests {
                 activity_webhook_secret_file: None,
                 activity_webhook_secret: None,
                 shell: None,
+                resume_trusted: None,
+                resume_allow_elevated: None,
             };
             assert!(resolve_mux_target(None, None, &file).is_err());
         });

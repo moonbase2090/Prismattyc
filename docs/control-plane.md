@@ -121,6 +121,17 @@ binding its accepted mutations to live `prismattyc-host` PTY runtimes is a
 host adapter step. The connection-bound controller extension is documented in
 the connection-bound controller lease.
 
+### Program resume
+
+`Snapshot` panes carry an optional `resume` record: the command a program in
+the pane reported with OSC 7577 (see [Program resume](program-resume.md)).
+`ResumeStart { handoff, pid }` is sent by `pmux resume-run` in a restored
+pane. `handoff` is the one-time id the server typed into that pane, and `pid`
+must be a process inside the pane, running as the server's user; it becomes
+the record's owner. The reply is `ResumeCommand { argv, cwd }`. An id is
+used once. `ResumeFailed { handoff }` reports that the claimed resume could
+not start, and the server drops the record so it is not tried again.
+
 ### Mail attention and gated inject
 
 Mail attention is a **mux-client** verb (`client_id` registered; no pane

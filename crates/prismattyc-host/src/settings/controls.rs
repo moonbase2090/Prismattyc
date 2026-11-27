@@ -154,7 +154,8 @@ fn row(section: Section, key: &str, kind: Kind) -> Control {
             prismattyc_mux::MuxKeyKind::Bool(v) => Some(v.into()),
             prismattyc_mux::MuxKeyKind::String(v) => Some(v.into()),
             prismattyc_mux::MuxKeyKind::CommentedPath(_)
-            | prismattyc_mux::MuxKeyKind::CommentedString(_) => None,
+            | prismattyc_mux::MuxKeyKind::CommentedString(_)
+            | prismattyc_mux::MuxKeyKind::CommentedValue(_) => None,
         })
     });
     let title = key.rsplit('.').next().unwrap_or(key).replace('_', " ");
@@ -200,6 +201,7 @@ fn timing(key: &str) -> &'static str {
             "Live after config reload"
         }
         "mux.shell" => "Next shell selection",
+        "mux.resume_trusted" | "mux.resume_allow_elevated" => "Next pmux server start",
         "window_opacity" | "chrome_opacity" => {
             "Live with alpha support; opaque non-macOS windows may need restart"
         }
@@ -381,6 +383,8 @@ pub(super) fn catalog() -> Vec<Control> {
         ),
         row(Section::Mux, "mux.activity_webhook_url", Kind::Text),
         row(Section::Mux, "mux.activity_webhook_secret_file", Kind::Text),
+        row(Section::Mux, "mux.resume_trusted", Kind::Strings),
+        row(Section::Mux, "mux.resume_allow_elevated", Kind::Bool),
     ];
     for row in &mut rows {
         if matches!(row.kind, Kind::Pair) {

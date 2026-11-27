@@ -1041,6 +1041,21 @@ pub enum ControlRequest {
         pane_id: u64,
         title: String,
     },
+    /// `pmux resume-run`: the one-time handoff the server typed into a
+    /// restored pane asks for the program to resume. `pid` must be a process
+    /// in that pane; it becomes the record's owner.
+    ResumeStart {
+        version: u16,
+        request_id: u64,
+        handoff: String,
+        pid: u32,
+    },
+    /// The resume from `ResumeStart` could not start; drop the record.
+    ResumeFailed {
+        version: u16,
+        request_id: u64,
+        handoff: String,
+    },
 }
 
 impl ControlRequest {
@@ -1246,6 +1261,16 @@ impl ControlRequest {
                 request_id,
                 ..
             }
+            | Self::ResumeStart {
+                version,
+                request_id,
+                ..
+            }
+            | Self::ResumeFailed {
+                version,
+                request_id,
+                ..
+            }
             | Self::ReportFocus {
                 version,
                 request_id,
@@ -1411,6 +1436,8 @@ impl ControlRequest {
             | Self::RenameWindow { .. }
             | Self::ApplyArrangement { .. }
             | Self::SetPaneStatus { .. }
+            | Self::ResumeStart { .. }
+            | Self::ResumeFailed { .. }
             | Self::RenamePane { .. } => None,
         }
     }
@@ -1503,6 +1530,16 @@ pub enum ControlResponseData {
         names: Vec<String>,
     },
     Pong,
+    /// The command a restored pane resumes, for `pmux resume-run`.
+    ResumeCommand {
+        argv: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<PathBuf>,
+        /// The verified executable to run, with `argv[0]` as its name.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        program: Option<PathBuf>,
+    },
+    ResumeDropped,
     Snapshot {
         snapshot: Snapshot,
     },
@@ -1839,6 +1876,10 @@ pub struct PaneSnapshot {
     /// pane in the window. Old clients ignore the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size_owner: Option<SizeOwner>,
+    /// What a program in the pane asked to be resumed as after a restart
+    /// (OSC 7577). Old clients ignore the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume: Option<crate::program_resume::ResumeRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2321,6 +2362,11 @@ pub struct ControlPlane {
     team_attention: HashMap<u64, crate::team_attention::AttentionRequest>,
     /// Guest-set status text keyed by pane.
     pane_status: HashMap<u64, String>,
+    /// One-time program resume handoffs typed into restored panes, not yet
+    /// claimed, keyed by handoff id.
+    resume_handoffs: HashMap<String, (u64, PathBuf)>,
+    /// Claimed handoffs whose program may still report that it failed.
+    resume_claimed: HashMap<String, u64>,
     /// Last applied `queue_rev` per pane. Survives Clear so a delayed older
     /// Set cannot resurrect attention.
     mail_rev: HashMap<u64, u64>,
@@ -2459,6 +2505,8 @@ impl ControlPlane {
             attention: HashMap::new(),
             team_attention: HashMap::new(),
             pane_status: HashMap::new(),
+            resume_handoffs: HashMap::new(),
+            resume_claimed: HashMap::new(),
             mail_rev: HashMap::new(),
             write_ledger: HashMap::new(),
             last_input_at_ms: HashMap::new(),
@@ -4291,6 +4339,10 @@ impl ControlPlane {
                         mail_inject: self.mail_inject_last.get(&pane_id.get()).cloned(),
                         ledger: self.pane_ledger(pane_id.get()),
                         size_owner: self.size_owner_for(window_id.get()),
+                        resume: self
+                            .live
+                            .as_ref()
+                            .and_then(|live| live.resume_record(pane_id.get())),
                     });
                 }
                 windows.push(WindowSnapshot {
@@ -4329,6 +4381,77 @@ impl ControlPlane {
             .ok_or_else(|| anyhow::anyhow!("restore requires a live runtime"))?;
         live.write(pane, format!("{command}\r").into_bytes())
             .map_err(|error| anyhow::anyhow!("resume pane {pane}: {error:?}"))
+    }
+
+    /// Give restored `pane` its saved program resume record. When `resume`
+    /// is set, register a one-time handoff and return the fixed command to
+    /// type into the pane's shell: `pmux resume-run ID`. The record's command
+    /// never becomes shell text; `pmux resume-run` fetches it as data and
+    /// starts it directly. Returns None when no handoff could be made.
+    pub(crate) fn restore_resume(
+        &mut self,
+        pane: u64,
+        record: crate::program_resume::ResumeRecord,
+        verified: Option<PathBuf>,
+        not_resumed: Option<&str>,
+    ) -> Option<String> {
+        let command = verified.and_then(|program| {
+            let pmux = crate::program_resume::pmux_executable()?;
+            let id = crate::program_resume::new_token().ok()?;
+            Some((
+                crate::program_resume::handoff_command(&pmux, &id)?,
+                id,
+                program,
+            ))
+        });
+        let live = self.live.as_mut()?;
+        live.restore_resume_record(pane, record, command.is_some(), not_resumed);
+        let (command, id, program) = command?;
+        self.resume_handoffs.insert(id, (pane, program));
+        Some(command)
+    }
+
+    fn resume_start(
+        &mut self,
+        handoff: &str,
+        pid: u32,
+    ) -> Result<ControlResponseData, ControlError> {
+        let unknown = || {
+            ControlError::new(
+                ControlErrorCode::InvalidRequest,
+                "unknown or already used program resume",
+            )
+        };
+        let (pane, program) = self
+            .resume_handoffs
+            .get(handoff)
+            .cloned()
+            .ok_or_else(unknown)?;
+        let live = self.live.as_mut().ok_or_else(unknown)?;
+        if !live.resume_started(pane, pid) {
+            return Err(ControlError::new(
+                ControlErrorCode::InvalidRequest,
+                "a program resume starts only from its own pane",
+            ));
+        }
+        let record = live.resume_record(pane).ok_or_else(unknown)?;
+        self.resume_handoffs.remove(handoff);
+        self.resume_claimed.insert(handoff.to_string(), pane);
+        Ok(ControlResponseData::ResumeCommand {
+            argv: record.argv,
+            cwd: record.cwd,
+            program: Some(program),
+        })
+    }
+
+    fn resume_failed(&mut self, handoff: &str) -> Result<ControlResponseData, ControlError> {
+        let pane = self.resume_claimed.remove(handoff).ok_or_else(|| {
+            ControlError::new(ControlErrorCode::InvalidRequest, "unknown program resume")
+        })?;
+        if let Some(live) = self.live.as_mut() {
+            live.resume_failed(pane);
+        }
+        Ok(ControlResponseData::ResumeDropped)
     }
 
     pub(crate) fn saved_workspace(&self) -> anyhow::Result<crate::workspace::Workspace> {
@@ -5244,6 +5367,8 @@ impl ControlPlane {
                 self.set_pane_status(pane_id, text)
             }
             ControlRequest::RenamePane { pane_id, title, .. } => self.rename_pane(pane_id, title),
+            ControlRequest::ResumeStart { handoff, pid, .. } => self.resume_start(&handoff, pid),
+            ControlRequest::ResumeFailed { handoff, .. } => self.resume_failed(&handoff),
             ControlRequest::MailHello {
                 client_id: client_raw,
                 agent,
@@ -13118,6 +13243,121 @@ function Read-Exact([int]$Count) {
             Ok(_) => panic!("relative socket must be rejected"),
         };
         assert_eq!(err.code, ControlErrorCode::InvalidRequest);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_restored_record_is_handed_once_to_its_own_pane_and_dropped_on_failure() {
+        let domain = Domain::bootstrap("resume").unwrap();
+        let session = domain.sessions().next().unwrap();
+        let window = session.windows[0];
+        let pane_id = domain.window(window).unwrap().layout.panes()[0].get();
+        let mut plane = ControlPlane::new_live(
+            domain,
+            [WindowBounds {
+                window_id: window.get(),
+                cols: 80,
+                rows: 24,
+            }],
+            Some(32),
+            [(pane_id, env_report_spawn())],
+            None,
+        )
+        .unwrap();
+        let record: crate::program_resume::ResumeRecord =
+            serde_json::from_value(serde_json::json!({
+                "argv": ["nvim", "-S", "$(touch /tmp/x); a b"],
+                "cwd": "/tmp",
+                "reported_at": 1,
+                "uid": crate::program_resume::server_uid().unwrap(),
+            }))
+            .unwrap();
+        crate::program_resume::TEST_PMUX
+            .with(|path| *path.borrow_mut() = Some(PathBuf::from("/opt/pmux it/pmux")));
+        let command = plane
+            .restore_resume(
+                pane_id,
+                record.clone(),
+                Some(PathBuf::from("/opt/bin/nvim")),
+                None,
+            )
+            .expect("a handoff command");
+        let id = command
+            .strip_prefix("'/opt/pmux it/pmux' resume-run ")
+            .expect(&command)
+            .to_string();
+        assert!(
+            !command.contains("nvim"),
+            "the record never becomes shell text"
+        );
+        assert!(
+            plane
+                .live
+                .as_ref()
+                .unwrap()
+                .resume_record(pane_id)
+                .unwrap()
+                .attempted
+        );
+        let start = |plane: &mut ControlPlane, pid: u32| {
+            plane.handle(ControlRequest::ResumeStart {
+                version: PROTOCOL_VERSION,
+                request_id: 9,
+                handoff: id.clone(),
+                pid,
+            })
+        };
+        // pmuxd's own test process is not inside the pane.
+        assert!(matches!(
+            start(&mut plane, std::process::id()).body,
+            ControlResponseBody::Error { .. }
+        ));
+        let child = plane.live.as_ref().unwrap().child_pid(pane_id).unwrap();
+        match start(&mut plane, child).body {
+            ControlResponseBody::Ok {
+                response: ControlResponseData::ResumeCommand { argv, cwd, program },
+            } => {
+                assert_eq!(argv, record.argv);
+                assert_eq!(cwd.as_deref(), Some(Path::new("/tmp")));
+                assert_eq!(program.as_deref(), Some(Path::new("/opt/bin/nvim")));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(
+            matches!(
+                start(&mut plane, child).body,
+                ControlResponseBody::Error { .. }
+            ),
+            "a handoff is used once"
+        );
+        let owner = plane
+            .live
+            .as_ref()
+            .unwrap()
+            .resume_record(pane_id)
+            .unwrap()
+            .owner;
+        assert_eq!(owner.map(|owner| owner.pid), Some(child));
+        let failed = plane.handle(ControlRequest::ResumeFailed {
+            version: PROTOCOL_VERSION,
+            request_id: 10,
+            handoff: id.clone(),
+        });
+        assert!(matches!(failed.body, ControlResponseBody::Ok { .. }));
+        assert!(plane
+            .live
+            .as_ref()
+            .unwrap()
+            .resume_record(pane_id)
+            .is_none());
+        // Not resumed: the record stays for the next restart, with no handoff,
+        // and says why.
+        assert_eq!(
+            plane.restore_resume(pane_id, record, None, Some("not trusted here")),
+            None
+        );
+        let kept = plane.live.as_ref().unwrap().resume_record(pane_id).unwrap();
+        assert_eq!(kept.not_resumed.as_deref(), Some("not trusted here"));
     }
 
     #[test]

@@ -5,7 +5,6 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
-#[cfg(windows)]
 use std::time::{Duration, Instant};
 #[cfg(all(test, windows))]
 use std::{sync::atomic::AtomicU64, sync::Arc};
@@ -106,6 +105,18 @@ pub(crate) fn stamp_prism_guest_env(
     env.remove(PRISMATTYC_SESSION_ID);
 }
 
+/// A fresh program resume token for a pane running `program`, or None when
+/// the server does not take reports or the program reaches another machine
+/// (the token must not leave this one).
+fn resume_token_for(program: &str, policy: &crate::program_resume::ResumePolicy) -> Option<String> {
+    if !policy.enabled() || crate::program_resume::reaches_another_machine(program) {
+        return None;
+    }
+    crate::program_resume::new_token()
+        .inspect_err(|error| eprintln!("pmuxd: {error:#}"))
+        .ok()
+}
+
 #[derive(Debug)]
 pub(crate) enum LiveWriteError {
     UnknownPane,
@@ -187,6 +198,10 @@ struct LivePane {
     watch: std::sync::Arc<PaneLogWatch>,
     /// Copied onto the next logged Resize (PT-202).
     size_owner: Option<crate::remote_size::SizeOwner>,
+    /// OSC 7577 token and record for this pane.
+    resume: crate::program_resume::PaneResume,
+    /// Last time the resume record's owner was checked.
+    resume_checked: Option<Instant>,
 }
 
 #[cfg(windows)]
@@ -269,6 +284,15 @@ impl LivePane {
         let size = pty_size_with_cell_pixels(cols, rows, cell_w, cell_h);
         let mut env = spawn.env.clone();
         stamp_prism_guest_env(&mut env, pane_id, stamp.mux_socket, stamp.agent_id);
+        let resume_token = resume_token_for(&spawn.program, crate::program_resume::policy());
+        match &resume_token {
+            Some(token) => {
+                env.insert(crate::program_resume::TOKEN_ENV.into(), token.clone());
+            }
+            None => {
+                env.remove(crate::program_resume::TOKEN_ENV);
+            }
+        }
         let mut session = PtySession::spawn_config(
             &spawn.program,
             &spawn.argv,
@@ -391,7 +415,29 @@ impl LivePane {
             logged_cwd: None,
             watch,
             size_owner: None,
+            resume: crate::program_resume::PaneResume::new(resume_token, None),
+            resume_checked: None,
         })
+    }
+
+    /// At most once a second: forget a resume record whose owner has exited.
+    fn refresh_resume_owner(&mut self) {
+        if self.resume.record().is_none() {
+            return;
+        }
+        let now = Instant::now();
+        if self
+            .resume_checked
+            .is_some_and(|checked| now.duration_since(checked) < Duration::from_secs(1))
+        {
+            return;
+        }
+        self.resume_checked = Some(now);
+        let lookup = crate::program_resume::SystemLookup {
+            root: self.child_pid,
+        };
+        self.resume
+            .refresh(crate::program_resume::unix_now(), &lookup);
     }
 
     fn record(&mut self, event: PaneEvent) {
@@ -518,6 +564,29 @@ impl LivePane {
             }
         });
         let attention = self.emulator.take_pending_attention();
+        let reports = self.emulator.take_resume_reports();
+        if !reports.is_empty() {
+            let lookup = crate::program_resume::SystemLookup {
+                root: self.child_pid,
+            };
+            let now = crate::program_resume::unix_now();
+            for body in reports {
+                match self.resume.receive(&body, now, &lookup) {
+                    crate::program_resume::Outcome::Rejected(reason) => {
+                        eprintln!("pmuxd: program resume report refused: {reason}");
+                    }
+                    crate::program_resume::Outcome::PaneNotTrusted {
+                        reason,
+                        first: true,
+                    } => {
+                        eprintln!(
+                            "pmuxd: program resume reports from a pane are ignored while {reason}"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
 
         // Move the one admitted allocation into the ordered output frame.
         self.record(PaneEvent::Output { bytes });
@@ -540,6 +609,7 @@ impl LivePane {
         if !self.child_alive() {
             return (None, 0, None);
         }
+        self.refresh_resume_owner();
         let mut died = false;
         let mut nbytes = 0usize;
         let mut attention = None;
@@ -865,6 +935,65 @@ impl LiveRuntime {
             resized.push((pane.pane_id, prior.0, prior.1, prior.2, prior.3));
         }
         Ok(())
+    }
+
+    /// The pane's program resume record, for snapshots and the saved workspace.
+    pub(crate) fn resume_record(
+        &self,
+        pane_id: u64,
+    ) -> Option<crate::program_resume::ResumeRecord> {
+        let pane = self.panes.get(&pane_id)?;
+        pane.resume
+            .current_record(&crate::program_resume::SystemLookup {
+                root: pane.child_pid,
+            })
+    }
+
+    /// Give a restored pane its saved record, marked as being resumed when
+    /// `resuming` so a failure is not retried.
+    pub(crate) fn restore_resume_record(
+        &mut self,
+        pane_id: u64,
+        record: crate::program_resume::ResumeRecord,
+        resuming: bool,
+        not_resumed: Option<&str>,
+    ) {
+        if let Some(pane) = self.panes.get_mut(&pane_id) {
+            pane.resume.restore(record);
+            if resuming {
+                pane.resume.mark_attempted();
+            }
+            if let Some(reason) = not_resumed {
+                pane.resume.note_not_resumed(reason);
+            }
+        }
+    }
+
+    /// The resumed program started as `pid`. Only a process inside the pane
+    /// can claim the record.
+    pub(crate) fn resume_started(&mut self, pane_id: u64, pid: u32) -> bool {
+        let Some(pane) = self.panes.get_mut(&pane_id) else {
+            return false;
+        };
+        let lookup = crate::program_resume::SystemLookup {
+            root: pane.child_pid,
+        };
+        use crate::program_resume::OwnerLookup as _;
+        let Some(identity) = lookup.identity(pid) else {
+            return false;
+        };
+        if !lookup.in_pane(pid) || lookup.server_uid() != Some(identity.uid) {
+            return false;
+        }
+        pane.resume
+            .resumed(pid, crate::program_resume::unix_now(), &lookup)
+    }
+
+    /// The resume could not start; drop the record.
+    pub(crate) fn resume_failed(&mut self, pane_id: u64) {
+        if let Some(pane) = self.panes.get_mut(&pane_id) {
+            pane.resume.resume_failed();
+        }
     }
 
     pub(crate) fn child_pid(&self, pane_id: u64) -> Option<u32> {
@@ -1398,6 +1527,142 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         panic!("never saw {needle:?} in {:?}", pane.content(pane_id).lines);
+    }
+
+    /// A shell script that signs an OSC 7577 report with `$OSC7577_TOKEN`
+    /// (or `key` when set) using the system SHA-256 tool, as a program would.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn resume_report_script(argv: &[&str], cwd: &str, key: Option<&str>) -> String {
+        let argv = argv
+            .iter()
+            .map(|arg| format!("$(printf '%s' '{arg}' | base64)"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let key = key.map_or("$OSC7577_TOKEN".to_string(), |key| key.to_string());
+        format!(
+            "if command -v sha256sum >/dev/null; then h=sha256sum; else h='shasum -a 256'; fi; \
+             msg=\"pid=$$:time=$(date +%s):argv={argv}:cwd=$(printf '%s' '{cwd}' | base64)\"; \
+             mac=$(printf '%s:%s' \"$msg\" \"{key}\" | $h | cut -c1-64); \
+             printf '\\033]7577;%s:mac=%s\\007' \"$msg\" \"$mac\"; "
+        )
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_report_signed_with_the_pane_token_becomes_the_pane_record() {
+        let script = format!(
+            "{} {} printf 'SENT\\n'; exec sleep 30",
+            resume_report_script(&["vim"], "/", Some("not-this-panes-token")),
+            resume_report_script(&["nvim", "-S", "a b"], "/tmp", None),
+        );
+        let spawn = SpawnSpec {
+            program: "/bin/sh".into(),
+            argv: vec!["-c".into(), script],
+            cwd: Some(PathBuf::from("/tmp")),
+            env: BTreeMap::new(),
+        };
+        let mut pane = spawn_test_pane(3, &spawn, None);
+        let text = wait_for_pane_text(&mut pane, 3, "SENT");
+        assert!(!text.contains("7577"), "the report must not paint: {text}");
+        let record = pane.resume.record().expect("the signed report is recorded");
+        assert_eq!(record.argv, ["nvim", "-S", "a b"]);
+        assert_eq!(record.cwd.as_deref(), Some(Path::new("/tmp")));
+        assert_eq!(record.owner.map(|owner| owner.pid), pane.child_pid);
+        assert!(
+            record.owner_exe.is_some(),
+            "the owner's executable is recorded"
+        );
+    }
+
+    /// A process in the pane holds the token, so it can sign a report naming
+    /// any trusted program. The record is kept, but it is bound to what the
+    /// owner really runs, so it is never resumed.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_shell_claiming_a_trusted_editor_is_recorded_but_not_resumed() {
+        let script = format!(
+            "{} printf 'SENT\\n'; exec sleep 30",
+            resume_report_script(&["nvim", "-c", "!touch /tmp/owned"], "/tmp", None),
+        );
+        let spawn = SpawnSpec {
+            program: "/bin/sh".into(),
+            argv: vec!["-c".into(), script],
+            cwd: Some(PathBuf::from("/tmp")),
+            env: BTreeMap::new(),
+        };
+        let mut pane = spawn_test_pane(6, &spawn, None);
+        wait_for_pane_text(&mut pane, 6, "SENT");
+        let lookup = crate::program_resume::SystemLookup {
+            root: pane.child_pid,
+        };
+        pane.resume
+            .refresh(crate::program_resume::unix_now(), &lookup);
+        let record = pane.resume.record().expect("the signed report is recorded");
+        assert_eq!(record.argv[0], "nvim");
+        // A real `nvim` on the resume PATH, so only the binding can refuse it.
+        let bin = std::env::temp_dir().join(format!("resume-bin-{}", std::process::id()));
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("nvim"), "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(
+            bin.join("nvim"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        let path = Some(bin.clone().into_os_string());
+        let decision = crate::program_resume::restore_decision(
+            record,
+            &crate::program_resume::ResumePolicy::default(),
+            true,
+            crate::program_resume::server_uid(),
+            |program| program.canonicalize().ok(),
+            |name| crate::program_resume::resolve_on_path(name, path.as_deref()),
+            |_| true,
+        );
+        assert_eq!(decision, Err(crate::program_resume::UNBOUND));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn each_pane_gets_its_own_token_and_never_the_one_it_was_given() {
+        let mut env = BTreeMap::new();
+        env.insert(
+            crate::program_resume::TOKEN_ENV.into(),
+            "inherited-token-must-not-pass".into(),
+        );
+        let spawn = SpawnSpec {
+            program: "/bin/sh".into(),
+            argv: vec![
+                "-c".into(),
+                "printf 'TOKEN=%s\\n' \"${OSC7577_TOKEN:-none}\"; exec sleep 30".into(),
+            ],
+            cwd: None,
+            env,
+        };
+        let token = |pane_id| {
+            let mut pane = spawn_test_pane(pane_id, &spawn, None);
+            let text = wait_for_pane_text(&mut pane, pane_id, "TOKEN=");
+            text.lines()
+                .find_map(|line| line.trim().strip_prefix("TOKEN="))
+                .unwrap()
+                .to_string()
+        };
+        let (first, second) = (token(4), token(5));
+        assert_ne!(first, "inherited-token-must-not-pass");
+        assert_ne!(first, "none");
+        assert_ne!(first, second);
+        assert_eq!(first.len(), 43);
+    }
+
+    #[test]
+    fn panes_that_reach_another_machine_get_no_token() {
+        let policy = crate::program_resume::ResumePolicy::default();
+        for program in ["ssh", "/usr/bin/ssh", "mosh", "rsh", "SSH.EXE"] {
+            assert_eq!(resume_token_for(program, &policy), None, "{program}");
+        }
+        assert_eq!(
+            resume_token_for("/bin/zsh", &policy).is_some(),
+            policy.enabled()
+        );
     }
 
     #[test]

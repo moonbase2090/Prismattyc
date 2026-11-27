@@ -28,6 +28,10 @@ pub(crate) struct SavedPane {
     pub spawn: SpawnSpec,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_command: Option<String>,
+    /// What the pane's program reported it should be resumed as (OSC 7577).
+    /// Preferred over `resume_command` when it may be resumed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_record: Option<crate::program_resume::ResumeRecord>,
     #[serde(skip)]
     observed_pid: Option<u32>,
 }
@@ -199,6 +203,7 @@ impl Workspace {
                             .as_ref()
                             .filter(|c| run && !c.trim().is_empty())
                             .cloned(),
+                        resume_record: None,
                         observed_pid: None,
                     });
                     LayoutSnapshot::Leaf { pane_id: id }
@@ -395,6 +400,7 @@ impl Workspace {
                                 .spawn
                                 .context("workspace pane has no spawn specification")?,
                             resume_command: None,
+                            resume_record: pane.resume,
                             observed_pid: pane.child_pid,
                         })
                     })
@@ -452,7 +458,7 @@ impl Workspace {
                     .flat_map(move |w| w.panes.iter().map(move |p| (s, p)))
             })
             .collect();
-        let plane = ControlPlane::new_live(
+        let mut plane = ControlPlane::new_live(
             domain,
             bounds,
             None,
@@ -463,10 +469,42 @@ impl Workspace {
         // unchanged across checkpoints, and the shell remains after the job
         // exits. Replacing argv with -c would permanently bake in old jobs.
         let mut commands = Vec::new();
+        let resume_policy = crate::program_resume::policy();
         for (session, pane) in panes {
             let resume = self.resume_commands
                 || policy == crate::SpaceOpenRunsCommands::All
                 || (policy == crate::SpaceOpenRunsCommands::Agents && session.agent_id.is_some());
+            if let Some(record) = pane.resume_record.clone() {
+                // The pane's shell resumes with the PATH it is given here.
+                let path = pane
+                    .spawn
+                    .env
+                    .get("PATH")
+                    .map(std::ffi::OsString::from)
+                    .or_else(|| std::env::var_os("PATH"));
+                let decision = crate::program_resume::restore_decision(
+                    &record,
+                    resume_policy,
+                    resume_policy.enabled(),
+                    crate::program_resume::server_uid(),
+                    |program| program.canonicalize().ok(),
+                    |name| crate::program_resume::resolve_on_path(name, path.as_deref()),
+                    Path::is_dir,
+                );
+                if let (true, Err(reason)) = (resume, &decision) {
+                    eprintln!(
+                        "pmuxd: pane {}: not resuming {}: {reason}",
+                        pane.id,
+                        record.display()
+                    );
+                }
+                let verified = decision.as_ref().ok().filter(|_| resume).cloned();
+                let reason = decision.err().filter(|_| resume);
+                if let Some(command) = plane.restore_resume(pane.id, record, verified, reason) {
+                    commands.push((pane.id, command));
+                    continue;
+                }
+            }
             if let Some(command) = pane.resume_command.as_ref().filter(|_| resume) {
                 commands.push((pane.id, command.clone()));
             }
@@ -648,6 +686,67 @@ impl Drop for Checkpointer {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn an_unbound_record_falls_back_to_the_inspected_command_and_says_why() {
+        let uid = crate::program_resume::server_uid().unwrap();
+        let saved: Workspace = serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "next_ids": {"session": 2, "window": 2, "pane": 2},
+            "sessions": [{
+                "id": 1, "name": "resume", "agent_id": null, "space_id": null,
+                "windows": [{
+                    "id": 1, "title": "w",
+                    "bounds": {"window_id": 1, "cols": 80, "rows": 24},
+                    "layout": {"kind": "leaf", "pane_id": 1},
+                    "sync_input": false,
+                    "panes": [{
+                        "id": 1, "title": "", "title_pinned": false,
+                        "spawn": {"program": "/bin/sh", "argv": ["-c", "exec sleep 30"], "cwd": null, "env": {}},
+                        "resume_command": "echo fallback",
+                        "resume_record": {
+                            "argv": ["nvim", "-c", "!touch /tmp/owned"],
+                            "reported_at": 1,
+                            "uid": uid,
+                            "owner_exe": "/bin/sh"
+                        }
+                    }]
+                }]
+            }],
+            "view": null,
+            "resume_commands": true
+        }))
+        .unwrap();
+        crate::program_resume::TEST_PMUX
+            .with(|path| *path.borrow_mut() = Some(PathBuf::from("/opt/pmux")));
+        // A real `nvim` on the resume PATH, so only the binding can refuse it.
+        let bin = std::env::temp_dir().join(format!("resume-ws-bin-{}", std::process::id()));
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("nvim"), "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(
+            bin.join("nvim"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        let mut saved = saved;
+        saved.sessions[0].windows[0].panes[0]
+            .spawn
+            .env
+            .insert("PATH".into(), format!("{}:/usr/bin:/bin", bin.display()));
+        let socket = std::env::temp_dir().join(format!("rs-{}.sock", std::process::id()));
+        let (plane, commands) = saved.restore_plane(&socket).unwrap();
+        assert_eq!(commands, [(1, "echo fallback".to_string())]);
+        let snapshot = plane.snapshot().unwrap();
+        let record = snapshot.sessions[0].windows[0].panes[0]
+            .resume
+            .clone()
+            .expect("the record stays visible");
+        assert_eq!(
+            record.not_resumed.as_deref(),
+            Some(crate::program_resume::UNBOUND)
+        );
+    }
 
     #[test]
     fn socket_key_survives_runtime_directory_loss_and_symlink_aliases() {

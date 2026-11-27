@@ -132,7 +132,9 @@ recreates missing sessions in their saved directories and relaunches their
 commands, without their scrollback. It leaves existing sessions alone, so
 retrying does not replay a command into a running session.
 
-For a program launched directly in a pane, saving preserves its original
+A program that reports how to resume itself (see
+[Program resume](program-resume.md)) comes back with the command it reported,
+when that command is trusted. For a program launched directly in a pane, saving preserves its original
 command and arguments. For an interactive shell, it captures the current
 foreground command instead. Known agents omit their startup prompt when
 restored. Claude, Codex, and Hermes keep an explicit saved conversation

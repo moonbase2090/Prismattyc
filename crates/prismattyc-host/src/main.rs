@@ -22928,6 +22928,9 @@ fn main() -> Result<()> {
     if prismattyc_mux::plugins::print_bundled_identity()? {
         return Ok(());
     }
+    // This process is a terminal: it gives each pane its own program resume
+    // token and never passes on one it was given (OSC 7577).
+    prismattyc_mux::program_resume::forget_inherited_token();
     #[cfg(windows)]
     let restart_resume = restart::receive()?;
     #[cfg(windows)]

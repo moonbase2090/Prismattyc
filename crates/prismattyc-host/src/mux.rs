@@ -4256,6 +4256,33 @@ impl MuxRuntime {
         }
     }
 
+    /// Drop or rekey the saved overlay after a tab edit.
+    ///
+    /// `prior_slot` is the overlay's window index before the edit. Closing
+    /// an earlier tab leaves the overlay up and moves it to a lower index,
+    /// and the record has to follow. An overlay that is gone is dropped.
+    /// An overlay that still occupies `prior_slot` is left alone.
+    pub(crate) fn sync_float_after_tab_edit(
+        &self,
+        space: &str,
+        records: &mut SavedFloats,
+        prior_slot: u32,
+    ) -> bool {
+        if self.overlay_placed() {
+            match self.floated_window_slot() {
+                // Same index: the record already names this tab.
+                Some(slot) if slot == prior_slot => return false,
+                // The pane is placed, but its tab index is not visible.
+                // Dropping the record here would lose a live overlay.
+                None => return false,
+                Some(_) => {}
+            }
+        }
+        let before = records.floats.clone();
+        self.sync_saved_float_window(space, records, Some(prior_slot));
+        records.floats != before
+    }
+
     /// Float the pane named by this space's record for the active window.
     /// `Ok(false)` when that place was not saved or is not in the window.
     pub(crate) fn restore_space_float(
@@ -9636,11 +9663,11 @@ mod tests {
             None,
             "closing the tab drops the overlay"
         );
-        runtime.sync_saved_float_window("work", &mut records, prior);
         assert!(
-            records.floats.is_empty(),
+            runtime.sync_float_after_tab_edit("work", &mut records, prior.unwrap()),
             "the closed tab's saved overlay is dropped"
         );
+        assert!(records.floats.is_empty());
         assert!(
             !runtime.apply_open_space_float("work", &records).unwrap(),
             "the remaining tab does not restore the closed slot"
@@ -9705,6 +9732,47 @@ mod tests {
             Some(0),
             "the overlay's tab is still known after leaving it"
         );
+    }
+
+    #[test]
+    fn closing_an_earlier_tab_rekeys_the_saved_overlay() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        runtime.new_tab("/bin/sh", &[]).unwrap();
+        let right = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        let overlay = CellRect {
+            col: 10,
+            row: 4,
+            cols: 30,
+            rows: 8,
+        };
+        assert!(runtime.float_pane(right, overlay).unwrap());
+        let mut records = SavedFloats::default();
+        runtime.sync_saved_float("work", &mut records);
+        assert_eq!(records.floats[0].window_slot, 1);
+        let prior = runtime.floated_window_slot().unwrap();
+        assert_eq!(prior, 1);
+        assert!(runtime.close_tab_at(0).unwrap());
+        assert_eq!(runtime.tab_count(), 1);
+        assert_eq!(
+            runtime.floated_window_slot(),
+            Some(0),
+            "closing an earlier tab moves the overlay"
+        );
+        assert!(
+            runtime.sync_float_after_tab_edit("work", &mut records, prior),
+            "the saved overlay follows the tab"
+        );
+        assert_eq!(records.floats.len(), 1);
+        assert_eq!(records.floats[0].window_slot, 0);
+        assert_eq!(records.floats[0].pane_slot, 1);
+        assert!(runtime.dock_float().unwrap());
+        assert!(
+            runtime.apply_open_space_float("work", &records).unwrap(),
+            "the rekeyed record restores the overlay"
+        );
+        assert_eq!(runtime.floated_pane(), Some(right));
     }
 
     #[test]

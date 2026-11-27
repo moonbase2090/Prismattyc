@@ -11183,18 +11183,14 @@ fn restore_open_space_float(host: &mut HostState, space: &str) {
 }
 
 /// A layout edit that docked an overlay must drop the saved record.
-/// `prior_slot` is that overlay's tab before the edit. The record names a
-/// pane by its slot, and clearing the tab selected afterwards can leave the
-/// old tab's record to float a different pane.
+/// `prior_slot` is that overlay's tab before the edit. Closing an earlier
+/// tab moves a surviving overlay to a lower index, and the record follows.
+/// Clearing only the tab selected afterwards can leave the old record to
+/// float a different pane.
 fn persist_docked_float(host: &mut HostState, prior_slot: Option<u32>) {
     let Some(prior_slot) = prior_slot else {
         return;
     };
-    // An overlay on a tab that is not selected is still placed. Dropping
-    // its record here would let a later open float a different pane.
-    if host.mux.overlay_placed() {
-        return;
-    }
     let Some(space) = host.space_rail.current.clone() else {
         return;
     };
@@ -11205,8 +11201,12 @@ fn persist_docked_float(host: &mut HostState, prior_slot: Option<u32>) {
             return;
         }
     };
-    host.mux
-        .sync_saved_float_window(&space, &mut records, Some(prior_slot));
+    if !host
+        .mux
+        .sync_float_after_tab_edit(&space, &mut records, prior_slot)
+    {
+        return;
+    }
     if let Err(error) = prismattyc_mux::save_floats(&spaces_dir(), &records) {
         eprintln!("prismattyc-host: float record was not saved: {error:#}");
     }

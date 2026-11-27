@@ -2827,7 +2827,9 @@ fn measure_border_frame_cost(host: &mut HostState) {
 }
 
 /// Closing the floated tab from the strip, or detaching that view, drops the
-/// saved overlay. A later open must not float whatever pane now sits there.
+/// saved overlay. Closing an earlier tab keeps the overlay and moves its
+/// saved slot with that tab. A later open must not float a pane at the old
+/// index.
 #[test]
 fn strip_close_and_detach_drop_the_saved_overlay() {
     const NAME: &str = "render_window_tests::strip_close_and_detach_drop_the_saved_overlay";
@@ -2878,6 +2880,28 @@ fn strip_close_and_detach_drop_the_saved_overlay() {
                 super::StripClickResult::Handled
             );
             assert_closed_overlay_stays_down(host);
+
+            lift_overlay_on_the_open_tab(host);
+            let before = host
+                .mux
+                .floated_window_slot()
+                .expect("the overlay names its tab");
+            assert!(before > 0, "the overlay starts on a later tab");
+            assert_eq!(
+                super::close_tab_from_strip(host, 0),
+                super::StripClickResult::Handled
+            );
+            let after = host
+                .mux
+                .floated_window_slot()
+                .expect("closing an earlier tab leaves the overlay up");
+            assert!(after < before, "closing an earlier tab moves the overlay");
+            let records = prismattyc_mux::load_floats(&prismattyc_mux::spaces_dir()).unwrap();
+            assert_eq!(records.floats.len(), 1, "the surviving overlay stays saved");
+            assert_eq!(
+                records.floats[0].window_slot, after,
+                "the saved overlay follows the tab"
+            );
 
             self.completed = true;
             self.app.windows.clear();

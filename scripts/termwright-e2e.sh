@@ -84,7 +84,7 @@ PY
   fi
 }
 
-scenarios=(classic-shell classic-color classic-keys classic-reflow a6-nested-marker rich-attach pt-176-key-burst)
+scenarios=(classic-shell classic-color classic-keys classic-reflow a6-nested-marker pt-176-key-burst)
 for s in "${scenarios[@]}"; do
   if [[ -n "$filter" && "$filter" != "$s" && "$filter" != "${s}.yaml" ]]; then
     continue

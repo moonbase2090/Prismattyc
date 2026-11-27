@@ -1,4 +1,3 @@
-use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::io::{self, IsTerminal, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,11 +23,7 @@ use prismattyc_core::{encode_osc52_clipboard, HistoryMatch, Selection};
 
 mod splash;
 use prismattyc_emulator::{Emulator, PtySession};
-use prismattyc_protocol::{
-    decode_body, encode_capability_reply, CapabilityReply, CollectedApc, ControlMessage, Feature,
-    RegionKind, StyledRun, DEFAULT_LIMIT_REGIONS, LIMIT_REGIONS, MAX_CELL_RECT_ATTACHMENTS,
-};
-use prismattyc_render::{AnsiRenderer, CellRectOverlay, OverlayRun};
+use prismattyc_render::AnsiRenderer;
 
 const MAX_SCROLLBACK_LINES: usize = 10_000;
 /// Bounded outstanding writes to the child PTY (stdin bytes + control replies).
@@ -37,7 +32,7 @@ const MAX_SCROLLBACK_LINES: usize = 10_000;
 /// total budget. This prevents ordinary typed bursts from losing bytes while
 /// keeping the event loop bounded when the child is not reading.
 ///
-/// **Capability replies, focus reports, and mouse reports** remain non-blocking
+/// **Focus reports and mouse reports** remain non-blocking
 /// `try_send` operations. They are control traffic and may drop under extreme
 /// flood rather than stall the event loop.
 ///
@@ -103,6 +98,9 @@ fn main() -> Result<()> {
         return prismattyc_mux::run_uninstall(argv.iter().skip(2));
     }
     let cli = Cli::parse(env::args_os().skip(1))?;
+    if cli.removed_rich_flag {
+        eprintln!("prismattyc: rich mode was removed; --experimental-rich is ignored");
+    }
     let vt = prismattyc_mux::platform::enter_console_vt();
     let stdout_is_terminal = io::stdout().is_terminal();
     if splash::should_print_plain(
@@ -137,19 +135,14 @@ fn main() -> Result<()> {
     let mut pty_reader = session.take_reader()?;
     let _terminal_guard = TerminalGuard::enter()?;
 
-    // Single PTY writer thread multiplexes keyboard bytes and capability replies.
-    // Capability grants are applied only after a successful write.
+    // Single PTY writer thread multiplexes keyboard bytes and terminal replies.
     let (to_child_tx, to_child_rx) = mpsc::sync_channel::<ChildWrite>(CHILD_WRITE_QUEUE_CAP);
-    let (grant_tx, grant_rx) = mpsc::sync_channel::<CapabilityGrant>(8);
     thread::spawn(move || {
         while let Ok(msg) = to_child_rx.recv() {
             if child_writer.write_all(&msg.bytes).is_err() {
                 break;
             }
             let _ = child_writer.flush();
-            if let Some(grant) = msg.capability_grant {
-                let _ = grant_tx.try_send(grant);
-            }
         }
     });
 
@@ -182,13 +175,8 @@ fn main() -> Result<()> {
         }
     });
 
-    let mut emulator = if cli.experimental_rich {
-        Emulator::new_experimental(columns.into(), rows.into(), MAX_SCROLLBACK_LINES)
-    } else {
-        Emulator::new(columns.into(), rows.into(), MAX_SCROLLBACK_LINES)
-    };
+    let mut emulator = Emulator::new(columns.into(), rows.into(), MAX_SCROLLBACK_LINES);
     let mut renderer = AnsiRenderer::new(io::stdout().lock());
-    let mut rich = RichSession::default();
     let mut selection = Selection::default();
     // When true, plain arrow keys extend the host selection (set by Ctrl+Space
     // or the first Shift+arrow). Esc clears.
@@ -224,11 +212,6 @@ fn main() -> Result<()> {
             return Ok(());
         }
 
-        // apply capability grants only after the writer thread flushed them.
-        while let Ok(grant) = grant_rx.try_recv() {
-            rich.apply_grant(grant);
-        }
-
         if pending_child_exit.is_none() {
             let mut drained = 0usize;
             loop {
@@ -248,16 +231,11 @@ fn main() -> Result<()> {
                         note_clean_child_exit(&mut pending_child_exit);
                     }
                     Ok(Ok(bytes)) => {
-                        if cli.experimental_rich {
-                            flush_pending_key_bytes(&mut pending_key_bytes, &to_child_tx);
-                            process_rich_chunk(&mut emulator, &mut rich, &to_child_tx, &bytes);
-                        } else {
-                            let _ = emulator.feed(&bytes);
-                            // Preserve key-before-reply ordering when a PTY
-                            // response is ready before the next host event.
-                            flush_pending_key_bytes(&mut pending_key_bytes, &to_child_tx);
-                            drain_emulator_replies(&mut emulator, &to_child_tx);
-                        }
+                        let _ = emulator.feed(&bytes);
+                        // Preserve key-before-reply ordering when a PTY
+                        // response is ready before the next host event.
+                        flush_pending_key_bytes(&mut pending_key_bytes, &to_child_tx);
+                        drain_emulator_replies(&mut emulator, &to_child_tx);
                         // Drop host selection when the grid under it may have changed
                         // (text selection: child output invalidates finished ranges).
                         // Mid-drag (`active` + anchor) is kept so continuous echo
@@ -302,13 +280,11 @@ fn main() -> Result<()> {
             paint(
                 &mut renderer,
                 &emulator,
-                &rich,
                 &selection,
                 view_scroll,
                 history_new_output,
                 scroll_chrome,
                 &find,
-                cli.experimental_rich,
             )?;
             needs_paint = false;
         }
@@ -580,23 +556,20 @@ struct FindMode {
     rank: Option<(usize, usize)>,
 }
 
-#[allow(clippy::too_many_arguments)] // paint is a single composition root call site
 fn paint(
     renderer: &mut AnsiRenderer<io::StdoutLock<'_>>,
     emulator: &Emulator,
-    rich: &RichSession,
     selection: &Selection,
     view_scroll: usize,
     history_new_output: bool,
     scroll_chrome: ScrollChrome,
     find: &FindMode,
-    experimental_rich: bool,
 ) -> Result<()> {
     // Hide host caret for every full-grid paint. enter_host_modes only
     // hides once at enter; after the first Show the outer host caret trails.
     // Re-show after CUP so the child REPL caret is visible at the emulated cell.
     execute!(io::stdout(), Hide).context("hide host caret before paint")?;
-    // Primary-buffer overlays never paint on alt (matrix F4 isolation).
+    // Host selection never paints on the alternate screen.
     let on_alt = emulator.screen().alt_active();
     // History view: paint scrollback window; selection chrome allowed.
     let scroll = if on_alt {
@@ -641,18 +614,7 @@ fn paint(
         sync_host_title(0, emulator.screen().max_view_scroll(), false);
     }
     let sel = if on_alt { None } else { selection.range() };
-    if experimental_rich && !on_alt {
-        let overlays = overlays_from(&rich.attachments, emulator.screen().rows());
-        if overlays.is_empty() && sel.is_none() {
-            renderer
-                .render(emulator.screen())
-                .context("render classic fast path")?;
-        } else {
-            renderer
-                .render_composed(emulator.screen(), &overlays, sel)
-                .context("render with selection/overlays")?;
-        }
-    } else if sel.is_none() {
+    if sel.is_none() {
         renderer
             .render(emulator.screen())
             .context("render classic fast path")?;
@@ -2410,7 +2372,10 @@ fn encode_function_key(n: u8, modifiers: KeyModifiers) -> Option<Vec<u8>> {
 }
 
 struct Cli {
-    experimental_rich: bool,
+    /// `--experimental-rich` or `PRISMATTYC_EXPERIMENTAL_RICH` was given.
+    /// Rich mode is gone; the flag is still accepted for one release so old
+    /// launch lines keep working.
+    removed_rich_flag: bool,
     no_splash: bool,
     /// True when PROGRAM came from argv rather than the $SHELL default.
     explicit_program: bool,
@@ -2431,7 +2396,6 @@ USAGE:
     Use `--` to run a PROGRAM whose name starts with `-`.
 
 OPTIONS:
-    --experimental-rich    Enable the experimental rich client.
     --no-splash            Skip the launch splash screen (PRISMATTYC_NO_SPLASH=1 also works).
     -h, --help             Print this help and exit.
     -V, --version          Print version and exit.",
@@ -2441,7 +2405,7 @@ OPTIONS:
 
 impl Cli {
     fn parse(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Self> {
-        let mut experimental_rich = env_flag_enabled("PRISMATTYC_EXPERIMENTAL_RICH");
+        let mut removed_rich_flag = env_flag_enabled("PRISMATTYC_EXPERIMENTAL_RICH");
         let mut no_splash = env_flag_enabled("PRISMATTYC_NO_SPLASH");
         let mut program = None;
         let mut child_args = Vec::new();
@@ -2459,7 +2423,7 @@ impl Cli {
                     std::process::exit(0);
                 }
                 if arg == "--experimental-rich" {
-                    experimental_rich = true;
+                    removed_rich_flag = true;
                     continue;
                 }
                 if arg == "--no-splash" {
@@ -2490,7 +2454,7 @@ impl Cli {
         let program = program.unwrap_or_else(prismattyc_mux::platform::default_shell);
 
         Ok(Self {
-            experimental_rich,
+            removed_rich_flag,
             no_splash,
             explicit_program,
             program,
@@ -2520,34 +2484,15 @@ fn env_flag_enabled_default_true(name: &str) -> bool {
     }
 }
 
-/// Bytes for the child PTY writer thread (keys, paste, DSR, capability replies).
+/// Bytes for the child PTY writer thread (keys, paste, DSR and other replies).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ChildWrite {
     bytes: Vec<u8>,
-    /// When set, applied to [`RichSession::granted`] only after a successful PTY
-    /// write — not merely after enqueue.
-    capability_grant: Option<CapabilityGrant>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CapabilityGrant {
-    features: BTreeSet<Feature>,
-    region_limit: usize,
 }
 
 impl ChildWrite {
     fn bytes(bytes: Vec<u8>) -> Self {
-        Self {
-            bytes,
-            capability_grant: None,
-        }
-    }
-
-    fn capability(bytes: Vec<u8>, grant: CapabilityGrant) -> Self {
-        Self {
-            bytes,
-            capability_grant: Some(grant),
-        }
+        Self { bytes }
     }
 }
 
@@ -2588,287 +2533,11 @@ impl<const N: usize> PartialEq<&[u8; N]> for ChildWrite {
     }
 }
 
-/// Host-side experimental rich session state (negotiation + attachments).
-#[derive(Debug, Default)]
-struct RichSession {
-    /// Features successfully written to the child as a capability reply.
-    granted: BTreeSet<Feature>,
-    region_limit: usize,
-    attachments: BTreeMap<u32, HostAttachment>,
-    last_scrolled_lines: u64,
-}
-
-impl RichSession {
-    fn apply_grant(&mut self, grant: CapabilityGrant) {
-        self.granted = grant.features;
-        self.region_limit = grant.region_limit;
-    }
-
-    fn can_insert(&self, id: u32) -> bool {
-        self.attachments.contains_key(&id) || self.attachments.len() < self.region_limit
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AttachKind {
-    CellRect,
-    Viewport,
-}
-
-/// Attachment stored with a signed row (cell-rect translates; viewport does not).
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct HostAttachment {
-    kind: AttachKind,
-    row: i32,
-    col: u16,
-    rows: u16,
-    cols: u16,
-    text: String,
-    runs: Vec<StyledRun>,
-}
-
 /// Forward emulator side-channel replies (DSR/CPR) to the child PTY writer queue.
 fn drain_emulator_replies(emulator: &mut Emulator, to_child: &mpsc::SyncSender<ChildWrite>) {
     for reply in emulator.take_pending_replies() {
         let _ = to_child.try_send(ChildWrite::bytes(reply));
     }
-}
-
-/// Feed child output, preserving scroll-vs-APC order inside one PTY chunk.
-///
-/// Plain-text floods (no ESC, collector idle) are fed as a single slice so
-/// `--experimental-rich` cannot stall the event loop. Control-bearing
-/// slices still split on ESC so a completed APC and a grid scroll cannot share
-/// one `feed`.
-fn process_rich_chunk(
-    emulator: &mut Emulator,
-    rich: &mut RichSession,
-    to_child: &mpsc::SyncSender<ChildWrite>,
-    bytes: &[u8],
-) {
-    let mut index = 0;
-    while index < bytes.len() {
-        let end = if emulator.apc_pending() || bytes[index] == 0x1b {
-            index + 1
-        } else {
-            bytes[index..]
-                .iter()
-                .position(|&b| b == 0x1b)
-                .map_or(bytes.len(), |rel| index + rel)
-        };
-        let slice = &bytes[index..end];
-        let before = emulator.screen().scrolled_lines();
-        let events = emulator.feed(slice);
-        drain_emulator_replies(emulator, to_child);
-        let after = emulator.screen().scrolled_lines();
-        if after > before {
-            translate_attachments_for_scroll(rich, after);
-        }
-        if !events.is_empty() {
-            handle_control_events(&events, rich, to_child);
-        }
-        index = end;
-    }
-}
-
-fn handle_control_events(
-    events: &[CollectedApc],
-    rich: &mut RichSession,
-    to_child: &mpsc::SyncSender<ChildWrite>,
-) {
-    for event in events {
-        match event {
-            CollectedApc::Discarded => {}
-            CollectedApc::Body(body) => match decode_body(body) {
-                Ok(ControlMessage::CapabilityQuery(query)) => {
-                    if let Some(reply) = CapabilityReply::for_v1_query(query) {
-                        if let Ok(bytes) = encode_capability_reply(&reply) {
-                            let region_limit = if reply.limits.is_empty() {
-                                MAX_CELL_RECT_ATTACHMENTS
-                            } else {
-                                reply
-                                    .limits
-                                    .get(LIMIT_REGIONS)
-                                    .copied()
-                                    .unwrap_or(DEFAULT_LIMIT_REGIONS)
-                                    as usize
-                            };
-                            let grant = CapabilityGrant {
-                                features: reply.features.clone(),
-                                region_limit,
-                            };
-                            let _ = to_child.try_send(ChildWrite::capability(bytes, grant));
-                        }
-                    }
-                }
-                Ok(ControlMessage::AttachCellRect(attach)) => {
-                    insert_attachment(
-                        rich,
-                        Feature::HybridAttachCellRect,
-                        HostAttachment {
-                            kind: AttachKind::CellRect,
-                            row: i32::from(attach.row),
-                            col: attach.col,
-                            rows: attach.rows,
-                            cols: attach.cols,
-                            text: attach.text,
-                            runs: Vec::new(),
-                        },
-                        attach.id,
-                    );
-                }
-                Ok(ControlMessage::AttachViewport(attach)) => {
-                    insert_attachment(
-                        rich,
-                        Feature::HybridOverlayViewport,
-                        HostAttachment {
-                            kind: AttachKind::Viewport,
-                            row: i32::from(attach.row),
-                            col: attach.col,
-                            rows: attach.rows,
-                            cols: attach.cols,
-                            text: attach.text,
-                            runs: attach.runs,
-                        },
-                        attach.id,
-                    );
-                }
-                Ok(ControlMessage::AttachStyled(attach)) => {
-                    let (kind, feature) = match attach.kind {
-                        RegionKind::CellRect => {
-                            (AttachKind::CellRect, Feature::HybridAttachCellRect)
-                        }
-                        RegionKind::Viewport => {
-                            (AttachKind::Viewport, Feature::HybridOverlayViewport)
-                        }
-                    };
-                    insert_attachment(
-                        rich,
-                        feature,
-                        HostAttachment {
-                            kind,
-                            row: i32::from(attach.row),
-                            col: attach.col,
-                            rows: attach.rows,
-                            cols: attach.cols,
-                            text: String::new(),
-                            runs: attach.runs,
-                        },
-                        attach.id,
-                    );
-                }
-                Ok(ControlMessage::Update(update)) => {
-                    let Some(existing) = rich.attachments.get_mut(&update.id) else {
-                        continue;
-                    };
-                    let feature = match existing.kind {
-                        AttachKind::CellRect => Feature::HybridAttachCellRect,
-                        AttachKind::Viewport => Feature::HybridOverlayViewport,
-                    };
-                    if !rich.granted.contains(&feature) {
-                        continue;
-                    }
-                    existing.text = update.text;
-                    existing.runs = update.runs;
-                }
-                Ok(ControlMessage::Detach { id }) => {
-                    rich.attachments.remove(&id);
-                }
-                Ok(ControlMessage::FocusQuery { .. })
-                | Ok(ControlMessage::FocusReply { .. })
-                | Ok(ControlMessage::FocusKey { .. })
-                | Ok(ControlMessage::InputEvent(_))
-                | Ok(ControlMessage::WorkspaceSnapshot(_))
-                | Ok(ControlMessage::WorkspaceDrop { .. })
-                | Ok(ControlMessage::CollectionSnapshot(_))
-                | Ok(ControlMessage::CollectionPatch(_))
-                | Ok(ControlMessage::CollectionDrop { .. })
-                | Ok(ControlMessage::CollectionAck { .. })
-                | Ok(ControlMessage::CollectionReject { .. })
-                | Ok(ControlMessage::CollectionResnapshot { .. })
-                | Ok(ControlMessage::CapabilityReply(_))
-                | Ok(ControlMessage::SemanticSnapshot(_))
-                | Ok(ControlMessage::SemanticCopy(_))
-                | Ok(ControlMessage::StatusSnapshot(_))
-                | Ok(ControlMessage::StatusDrop { .. })
-                | Err(_) => {}
-            },
-        }
-    }
-}
-
-/// Translate cell-rect attachments with primary-grid scroll; detach when fully
-/// outside the visible viewport (hybrid scroll contract).
-fn translate_attachments_for_scroll(rich: &mut RichSession, scrolled_lines: u64) {
-    if scrolled_lines <= rich.last_scrolled_lines {
-        rich.last_scrolled_lines = scrolled_lines;
-        return;
-    }
-    let delta = scrolled_lines - rich.last_scrolled_lines;
-    rich.last_scrolled_lines = scrolled_lines;
-    let delta_i = i32::try_from(delta).unwrap_or(i32::MAX);
-    rich.attachments.retain(|_, attach| {
-        if attach.kind == AttachKind::Viewport {
-            return true;
-        }
-        attach.row = attach.row.saturating_sub(delta_i);
-        let height = i32::from(attach.rows);
-        attach.row.saturating_add(height) > 0
-    });
-}
-
-fn insert_attachment(rich: &mut RichSession, feature: Feature, attach: HostAttachment, id: u32) {
-    if !rich.granted.contains(&feature) {
-        return;
-    }
-    if !rich.can_insert(id) {
-        return;
-    }
-    rich.attachments.insert(id, attach);
-}
-
-fn overlay_from(attach: &HostAttachment) -> CellRectOverlay {
-    CellRectOverlay {
-        row: attach.row,
-        col: usize::from(attach.col),
-        rows: usize::from(attach.rows).max(1),
-        cols: usize::from(attach.cols).max(1),
-        text: attach.text.clone(),
-        runs: attach
-            .runs
-            .iter()
-            .map(|run| OverlayRun {
-                text: run.text.clone(),
-                fg: run.fg,
-                bg: run.bg,
-                bold: run.bold,
-                italic: run.italic,
-                underline: run.underline,
-                inverse: run.inverse,
-            })
-            .collect(),
-    }
-}
-
-fn overlays_from(
-    attachments: &BTreeMap<u32, HostAttachment>,
-    screen_rows: usize,
-) -> Vec<CellRectOverlay> {
-    let screen_rows_i = i32::try_from(screen_rows).unwrap_or(i32::MAX);
-    let mut cell_rect = Vec::new();
-    let mut viewport = Vec::new();
-    for attach in attachments.values() {
-        if attach.row >= screen_rows_i {
-            continue;
-        }
-        let overlay = overlay_from(attach);
-        match attach.kind {
-            AttachKind::CellRect => cell_rect.push(overlay),
-            AttachKind::Viewport => viewport.push(overlay),
-        }
-    }
-    cell_rect.extend(viewport);
-    cell_rect
 }
 
 fn usable_terminal_size((columns, rows): (u16, u16)) -> (u16, u16) {
@@ -3084,25 +2753,9 @@ mod tests {
     use super::*;
     use prismattyc_core::test_time_budget;
     use prismattyc_protocol::{
-        encode_attach_cell_rect, encode_attach_viewport, encode_capability_query,
-        encode_capability_reply, encode_detach, encode_semantic_copy, encode_semantic_snapshot,
-        encode_update, AttachCellRect, AttachViewport, CapabilityQuery, ProtocolVersion, RequestId,
-        SemanticCopy, SemanticDocument, SemanticRange, SemanticRole, SemanticSpan,
-        UpdateAttachment,
+        encode_capability_query, CapabilityQuery, ProtocolVersion, RequestId,
     };
     use prismattyc_render::PlainTextRenderer;
-
-    /// tests have no writer thread — apply grants from queued messages.
-    fn test_apply_queued_capability_grants(
-        rx: &mpsc::Receiver<ChildWrite>,
-        rich: &mut RichSession,
-    ) {
-        while let Ok(msg) = rx.try_recv() {
-            if let Some(grant) = msg.capability_grant {
-                rich.apply_grant(grant);
-            }
-        }
-    }
 
     #[test]
     fn encode_key_arrow_up_is_csi() {
@@ -5595,44 +5248,6 @@ mod tests {
         assert_eq!(n, FROM_PTY_QUEUE_CAP);
     }
 
-    /// Primary rich overlays must not be composed while the child is on alt.
-    #[test]
-    fn paint_policy_skips_primary_overlays_on_alt() {
-        let mut emulator = Emulator::new_experimental(12, 2, 0);
-        let mut rich = RichSession::default();
-        let (tx, rx) = mpsc::sync_channel::<ChildWrite>(CHILD_WRITE_QUEUE_CAP);
-        let query = encode_capability_query(CapabilityQuery {
-            request_id: RequestId::new(1).unwrap(),
-            max_version: ProtocolVersion::new(0, 1),
-        })
-        .unwrap();
-        process_rich_chunk(&mut emulator, &mut rich, &tx, &query);
-        test_apply_queued_capability_grants(&rx, &mut rich);
-        let attach = encode_attach_cell_rect(&AttachCellRect {
-            id: 1,
-            row: 0,
-            col: 0,
-            rows: 1,
-            cols: 4,
-            text: "STAT".into(),
-        })
-        .unwrap();
-        process_rich_chunk(&mut emulator, &mut rich, &tx, &attach);
-        assert_eq!(rich.attachments.len(), 1);
-        let _ = emulator.feed(b"\x1b[?1049h");
-        assert!(emulator.screen().alt_active());
-        // Host paint policy: on alt, overlays_from is not used for composition.
-        let on_alt = emulator.screen().alt_active();
-        let overlays = if on_alt {
-            Vec::new()
-        } else {
-            overlays_from(&rich.attachments, emulator.screen().rows())
-        };
-        assert!(overlays.is_empty());
-        // Primary still holds the attachment for resume after leave.
-        assert_eq!(rich.attachments.len(), 1);
-    }
-
     /// F2 / ownership swap is single-winner so Drop + signal path cannot
     /// double-restore (second call is a pure no-op).
     #[test]
@@ -5935,48 +5550,6 @@ mod tests {
         assert_eq!(emulator.screen().rows(), 12);
     }
 
-    /// F4: primary overlay absent on alt; resumes after leave alt.
-    #[test]
-    fn paint_policy_primary_overlay_absent_on_alt_then_resumes() {
-        let mut emulator = Emulator::new_experimental(12, 2, 0);
-        let mut rich = RichSession::default();
-        let (tx, rx) = mpsc::sync_channel::<ChildWrite>(CHILD_WRITE_QUEUE_CAP);
-        let query = encode_capability_query(CapabilityQuery {
-            request_id: RequestId::new(1).unwrap(),
-            max_version: ProtocolVersion::new(0, 1),
-        })
-        .unwrap();
-        process_rich_chunk(&mut emulator, &mut rich, &tx, &query);
-        test_apply_queued_capability_grants(&rx, &mut rich);
-        let attach = encode_attach_cell_rect(&AttachCellRect {
-            id: 1,
-            row: 0,
-            col: 0,
-            rows: 1,
-            cols: 4,
-            text: "STAT".into(),
-        })
-        .unwrap();
-        process_rich_chunk(&mut emulator, &mut rich, &tx, &attach);
-        assert_eq!(rich.attachments.len(), 1);
-
-        let paint_overlays = |emulator: &Emulator, rich: &RichSession| {
-            if emulator.screen().alt_active() {
-                Vec::new()
-            } else {
-                overlays_from(&rich.attachments, emulator.screen().rows())
-            }
-        };
-
-        assert!(!paint_overlays(&emulator, &rich).is_empty());
-        let _ = emulator.feed(b"\x1b[?1049h");
-        assert!(paint_overlays(&emulator, &rich).is_empty());
-        let _ = emulator.feed(b"\x1b[?1049l");
-        let resumed = paint_overlays(&emulator, &rich);
-        assert_eq!(resumed.len(), 1);
-        assert_eq!(resumed[0].text, "STAT");
-    }
-
     /// F8: child→host bounded queue applies backpressure (blocking send waits).
     #[test]
     fn from_pty_backpressure_blocks_sender_until_drained() {
@@ -6066,12 +5639,12 @@ mod tests {
     }
 
     #[test]
-    fn experimental_flag_defaults_off_without_env() {
+    fn removed_rich_flag_defaults_off_without_env() {
         let key = "PRISMATTYC_EXPERIMENTAL_RICH";
         let previous = env::var_os(key);
         env::remove_var(key);
         let cli = Cli::parse(vec![std::ffi::OsString::from("/bin/sh")]).unwrap();
-        assert!(!cli.experimental_rich);
+        assert!(!cli.removed_rich_flag);
         match previous {
             Some(value) => env::set_var(key, value),
             None => env::remove_var(key),
@@ -6109,11 +5682,11 @@ mod tests {
             cli.child_args,
             vec![std::ffi::OsString::from("HELLO_PHASE1")]
         );
-        assert!(!cli.experimental_rich);
+        assert!(!cli.removed_rich_flag);
     }
 
     #[test]
-    fn experimental_cli_flag_enables_rich() {
+    fn the_removed_rich_flag_is_still_accepted_and_not_taken_as_the_program() {
         let key = "PRISMATTYC_EXPERIMENTAL_RICH";
         let previous = env::var_os(key);
         env::remove_var(key);
@@ -6122,7 +5695,9 @@ mod tests {
             std::ffi::OsString::from("/bin/sh"),
         ])
         .unwrap();
-        assert!(cli.experimental_rich);
+        assert!(cli.removed_rich_flag);
+        assert_eq!(cli.program, "/bin/sh");
+        assert!(cli.child_args.is_empty());
         match previous {
             Some(value) => env::set_var(key, value),
             None => env::remove_var(key),
@@ -6130,7 +5705,7 @@ mod tests {
     }
 
     #[test]
-    fn classic_status_task_works_without_experimental_path() {
+    fn classic_status_task_paints_plain_output() {
         let mut emulator = Emulator::new(20, 2, 10);
         assert!(!emulator.collects_apc());
         let events = emulator.feed(b"status:ok\r\n");
@@ -6140,7 +5715,7 @@ mod tests {
     }
 
     #[test]
-    fn experimental_off_ignores_capability_queries() {
+    fn classic_host_ignores_capability_queries() {
         let mut emulator = Emulator::new(40, 2, 10);
         let query = encode_capability_query(CapabilityQuery {
             request_id: RequestId::new(1).unwrap(),
@@ -6152,519 +5727,11 @@ mod tests {
     }
 
     #[test]
-    fn classic_prism_drops_semantic_snapshot_and_copy() {
-        let mut emulator = Emulator::new_experimental(40, 4, 10);
-        let mut rich = RichSession::default();
-        let (tx, _rx) = mpsc::sync_channel::<ChildWrite>(CHILD_WRITE_QUEUE_CAP);
-        let snapshot = encode_semantic_snapshot(&SemanticDocument {
-            surface_generation: 1,
-            document_id: "diag".into(),
-            rev: 2,
-            text: "error crates/foo.rs:10:1".into(),
-            spans: vec![SemanticSpan {
-                start: 6,
-                end: 24,
-                role: SemanticRole::Location,
-            }],
-            selection: Some(SemanticRange {
-                rev: 2,
-                start: 6,
-                end: 24,
-            }),
-        })
-        .unwrap();
-        let copy = encode_semantic_copy(&SemanticCopy {
-            surface_generation: 1,
-            document_id: "diag".into(),
-            rev: 2,
-            start: 6,
-            end: 24,
-        })
-        .unwrap();
-        let events = emulator.feed(&snapshot);
-        handle_control_events(&events, &mut rich, &tx);
-        let events = emulator.feed(&copy);
-        handle_control_events(&events, &mut rich, &tx);
-        assert!(rich.attachments.is_empty());
-        assert!(rich.granted.is_empty());
-    }
-
-    #[test]
-    fn attach_before_query_is_ignored() {
-        let mut emulator = Emulator::new_experimental(20, 2, 10);
-        let mut rich = RichSession::default();
-        let (tx, _rx) = mpsc::sync_channel::<ChildWrite>(CHILD_WRITE_QUEUE_CAP);
-        let attach = encode_attach_cell_rect(&AttachCellRect {
-            id: 1,
-            row: 0,
-            col: 0,
-            rows: 1,
-            cols: 12,
-            text: "status:ok".into(),
-        })
-        .unwrap();
-        let events = emulator.feed(&attach);
-        handle_control_events(&events, &mut rich, &tx);
-        assert!(rich.attachments.is_empty());
-        assert!(rich.granted.is_empty());
-    }
-
-    #[test]
-    fn incompatible_major_does_not_grant_features() {
-        let mut emulator = Emulator::new_experimental(20, 2, 10);
-        let mut rich = RichSession::default();
-        let (tx, rx) = mpsc::sync_channel::<ChildWrite>(CHILD_WRITE_QUEUE_CAP);
-        let query = encode_capability_query(CapabilityQuery {
-            request_id: RequestId::new(1).unwrap(),
-            max_version: ProtocolVersion::new(1, 0),
-        })
-        .unwrap();
-        let events = emulator.feed(&query);
-        handle_control_events(&events, &mut rich, &tx);
-        assert!(rx.try_recv().is_err());
-        assert!(rich.granted.is_empty());
-    }
-
-    #[test]
-    fn version_zero_query_does_not_grant_cell_rect() {
-        let mut emulator = Emulator::new_experimental(20, 2, 10);
-        let mut rich = RichSession::default();
-        let (tx, rx) = mpsc::sync_channel::<ChildWrite>(CHILD_WRITE_QUEUE_CAP);
-        let query = encode_capability_query(CapabilityQuery {
-            request_id: RequestId::new(1).unwrap(),
-            max_version: ProtocolVersion::new(0, 0),
-        })
-        .unwrap();
-        let events = emulator.feed(&query);
-        handle_control_events(&events, &mut rich, &tx);
-        let reply_bytes = rx.recv().expect("empty-feature reply still sent");
-        let body = std::str::from_utf8(&reply_bytes[2..reply_bytes.len() - 2]).unwrap();
-        match decode_body(body).unwrap() {
-            ControlMessage::CapabilityReply(reply) => {
-                assert!(reply.features.is_empty());
-            }
-            other => panic!("unexpected {other:?}"),
-        }
-        assert!(!rich.granted.contains(&Feature::HybridAttachCellRect));
-
-        let attach = encode_attach_cell_rect(&AttachCellRect {
-            id: 1,
-            row: 0,
-            col: 0,
-            rows: 1,
-            cols: 12,
-            text: "status:ok".into(),
-        })
-        .unwrap();
-        let events = emulator.feed(&attach);
-        handle_control_events(&events, &mut rich, &tx);
-        assert!(rich.attachments.is_empty());
-    }
-
-    #[test]
-    fn experimental_on_replies_and_attaches_cell_rect() {
-        let mut emulator = Emulator::new_experimental(20, 2, 10);
-        let mut rich = RichSession::default();
-        let (tx, rx) = mpsc::sync_channel::<ChildWrite>(CHILD_WRITE_QUEUE_CAP);
-
-        let query = encode_capability_query(CapabilityQuery {
-            request_id: RequestId::new(7).unwrap(),
-            max_version: ProtocolVersion::new(0, 1),
-        })
-        .unwrap();
-        let events = emulator.feed(&query);
-        handle_control_events(&events, &mut rich, &tx);
-        let msg = rx.recv().expect("capability reply");
-        let reply_bytes = &msg.bytes;
-        let body = std::str::from_utf8(&reply_bytes[2..reply_bytes.len() - 2]).unwrap();
-        match decode_body(body).unwrap() {
-            ControlMessage::CapabilityReply(reply) => {
-                assert_eq!(reply.request_id.get(), 7);
-                assert!(reply.supports(Feature::HybridAttachCellRect));
-            }
-            other => panic!("unexpected {other:?}"),
-        }
-        // Simulate writer-thread grant after successful PTY write.
-        if let Some(grant) = msg.capability_grant {
-            rich.apply_grant(grant);
-        }
-        assert!(rich.granted.contains(&Feature::HybridAttachCellRect));
-
-        let attach = encode_attach_cell_rect(&AttachCellRect {
-            id: 1,
-            row: 0,
-            col: 0,
-            rows: 1,
-            cols: 12,
-            text: "status:ok".into(),
-        })
-        .unwrap();
-        // Classic fallback text also printed.
-        let mut chunk = b"underneath\r\n".to_vec();
-        chunk.extend_from_slice(&attach);
-        let events = emulator.feed(&chunk);
-        handle_control_events(&events, &mut rich, &tx);
-        assert_eq!(rich.attachments.len(), 1);
-
-        let overlays = overlays_from(&rich.attachments, emulator.screen().rows());
-        let composed = PlainTextRenderer::render_with_overlays(emulator.screen(), &overlays);
-        assert!(composed.contains("status:ok"));
-        // Classic grid still has the printed line.
-        let classic = PlainTextRenderer::render(emulator.screen());
-        assert!(classic.contains("underneath"));
-
-        let detach = encode_detach(1).unwrap();
-        let events = emulator.feed(&detach);
-        handle_control_events(&events, &mut rich, &tx);
-        assert!(rich.attachments.is_empty());
-    }
-
-    #[test]
-    fn scroll_translates_and_detaches_cell_rect() {
-        let mut emulator = Emulator::new_experimental(8, 2, 10);
-        let mut rich = RichSession::default();
-        let (tx, rx) = mpsc::sync_channel::<ChildWrite>(CHILD_WRITE_QUEUE_CAP);
-        let query = encode_capability_query(CapabilityQuery {
-            request_id: RequestId::new(1).unwrap(),
-            max_version: ProtocolVersion::new(0, 1),
-        })
-        .unwrap();
-        process_rich_chunk(&mut emulator, &mut rich, &tx, &query);
-        test_apply_queued_capability_grants(&rx, &mut rich);
-
-        let attach = encode_attach_cell_rect(&AttachCellRect {
-            id: 1,
-            row: 0,
-            col: 0,
-            rows: 1,
-            cols: 4,
-            text: "STAT".into(),
-        })
-        .unwrap();
-        process_rich_chunk(&mut emulator, &mut rich, &tx, &attach);
-        assert_eq!(rich.attachments[&1].row, 0);
-
-        // Fill both rows then scroll once: attachment moves to row -1 → fully outside → detach.
-        process_rich_chunk(&mut emulator, &mut rich, &tx, b"aaaaaaaa\r\nbbbbbbbb\r\n");
-        assert!(
-            rich.attachments.is_empty(),
-            "attachment should detach once fully scrolled off"
-        );
-    }
-
-    #[test]
-    fn scroll_keeps_partially_visible_attachment() {
-        let mut emulator = Emulator::new_experimental(4, 3, 10);
-        let mut rich = RichSession::default();
-        let (tx, rx) = mpsc::sync_channel::<ChildWrite>(CHILD_WRITE_QUEUE_CAP);
-        let query = encode_capability_query(CapabilityQuery {
-            request_id: RequestId::new(1).unwrap(),
-            max_version: ProtocolVersion::new(0, 1),
-        })
-        .unwrap();
-        process_rich_chunk(&mut emulator, &mut rich, &tx, &query);
-        test_apply_queued_capability_grants(&rx, &mut rich);
-
-        let attach = encode_attach_cell_rect(&AttachCellRect {
-            id: 1,
-            row: 1,
-            col: 0,
-            rows: 2,
-            cols: 4,
-            text: "ABCD1234".into(),
-        })
-        .unwrap();
-        process_rich_chunk(&mut emulator, &mut rich, &tx, &attach);
-
-        // Scroll once: row 1 → 0; still partially/fully visible.
-        process_rich_chunk(&mut emulator, &mut rich, &tx, b"xxxx\r\nyyyy\r\nzzzz\r\n");
-        let attach = rich.attachments.get(&1).expect("still attached");
-        assert!(attach.row < 1, "row should translate upward with scroll");
-        let overlays = overlays_from(&rich.attachments, emulator.screen().rows());
-        assert!(!overlays.is_empty());
-    }
-
-    #[test]
-    fn scroll_before_attach_does_not_translate_new_attachment() {
-        // Scroll first, then negotiate (grant after write), then attach at row 0.
-        // New attach must stay at row 0 (must not inherit pre-attach scroll delta).
-        // grant is not live until capability reply is written.
-        let mut emulator = Emulator::new_experimental(8, 2, 10);
-        let mut rich = RichSession::default();
-        let (tx, rx) = mpsc::sync_channel::<ChildWrite>(CHILD_WRITE_QUEUE_CAP);
-
-        for line in [
-            "aaaaaaaa\r\n",
-            "bbbbbbbb\r\n",
-            "cccccccc\r\n",
-            "dddddddd\r\n",
-        ] {
-            process_rich_chunk(&mut emulator, &mut rich, &tx, line.as_bytes());
-        }
-
-        let query = encode_capability_query(CapabilityQuery {
-            request_id: RequestId::new(1).unwrap(),
-            max_version: ProtocolVersion::new(0, 1),
-        })
-        .unwrap();
-        process_rich_chunk(&mut emulator, &mut rich, &tx, &query);
-        test_apply_queued_capability_grants(&rx, &mut rich);
-        assert!(rich.granted.contains(&Feature::HybridAttachCellRect));
-
-        let attach = encode_attach_cell_rect(&AttachCellRect {
-            id: 1,
-            row: 0,
-            col: 0,
-            rows: 1,
-            cols: 4,
-            text: "STAT".into(),
-        })
-        .unwrap();
-        process_rich_chunk(&mut emulator, &mut rich, &tx, &attach);
-
-        let attach = rich
-            .attachments
-            .get(&1)
-            .expect("STAT attach after scroll must stay attached at row 0");
-        assert_eq!(attach.row, 0, "must not inherit pre-attach scroll delta");
-        assert_eq!(attach.text, "STAT");
-    }
-
-    #[test]
-    fn attach_before_scroll_in_one_feed_translates_existing_attachment() {
-        let mut emulator = Emulator::new_experimental(8, 2, 10);
-        let mut rich = RichSession::default();
-        let (tx, rx) = mpsc::sync_channel::<ChildWrite>(CHILD_WRITE_QUEUE_CAP);
-
-        let query = encode_capability_query(CapabilityQuery {
-            request_id: RequestId::new(1).unwrap(),
-            max_version: ProtocolVersion::new(0, 1),
-        })
-        .unwrap();
-        let attach = encode_attach_cell_rect(&AttachCellRect {
-            id: 1,
-            row: 0,
-            col: 0,
-            rows: 1,
-            cols: 4,
-            text: "STAT".into(),
-        })
-        .unwrap();
-
-        let mut chunk = Vec::new();
-        chunk.extend_from_slice(&query);
-        chunk.extend_from_slice(&attach);
-        // After attach: fill + scroll so the row-0 attachment leaves the viewport.
-        chunk.extend_from_slice(b"aaaaaaaa\r\nbbbbbbbb\r\n");
-
-        process_rich_chunk(&mut emulator, &mut rich, &tx, &chunk);
-        let _ = rx.try_recv();
-
-        assert!(
-            rich.attachments.is_empty(),
-            "attachment present before scroll in the same feed must translate/detach"
-        );
-    }
-
-    #[test]
-    fn process_rich_chunk_flood_stays_responsive() {
-        let mut emulator = Emulator::new_experimental(80, 24, 1000);
-        let mut rich = RichSession::default();
-        let (tx, _rx) = mpsc::sync_channel(CHILD_WRITE_QUEUE_CAP);
-        let flood = "y\n".repeat(32 * 1024);
-        let start = Instant::now();
-        process_rich_chunk(&mut emulator, &mut rich, &tx, flood.as_bytes());
-        let elapsed = start.elapsed();
-        assert!(
-            elapsed < test_time_budget(Duration::from_secs(1)),
-            "plain flood under experimental-rich stalled ({elapsed:?})"
-        );
-        assert!(rich.attachments.is_empty());
-        let text = emulator
-            .screen()
-            .viewport_range()
-            .map(|range| emulator.screen().extract_text(range))
-            .unwrap_or_default();
-        assert!(
-            text.contains('y'),
-            "flood must still paint the classic grid"
-        );
-    }
-
-    #[test]
-    fn v1_negotiate_grants_viewport_and_limits() {
-        let mut emulator = Emulator::new_experimental(12, 2, 0);
-        let mut rich = RichSession::default();
-        let (tx, rx) = mpsc::sync_channel(CHILD_WRITE_QUEUE_CAP);
-        let query = encode_capability_query(CapabilityQuery {
-            request_id: RequestId::new(1).unwrap(),
-            max_version: ProtocolVersion::new(0, 2),
-        })
-        .unwrap();
-        process_rich_chunk(&mut emulator, &mut rich, &tx, &query);
-        test_apply_queued_capability_grants(&rx, &mut rich);
-        assert!(rich.granted.contains(&Feature::HybridAttachCellRect));
-        assert!(rich.granted.contains(&Feature::HybridOverlayViewport));
-        assert!(rich.granted.contains(&Feature::InputRichFocus));
-        assert_eq!(rich.region_limit, DEFAULT_LIMIT_REGIONS as usize);
-    }
-
-    #[test]
-    fn v01_query_reply_is_byte_identical_to_spike() {
-        let query = CapabilityQuery {
-            request_id: RequestId::new(3).unwrap(),
-            max_version: ProtocolVersion::new(0, 1),
-        };
-        let spike = CapabilityReply::for_spike_query(query).unwrap();
-        let v1 = CapabilityReply::for_v1_query(query).unwrap();
-        assert_eq!(spike, v1);
-        assert_eq!(
-            encode_capability_reply(&spike).unwrap(),
-            encode_capability_reply(&v1).unwrap()
-        );
-    }
-
-    #[test]
-    fn update_mutates_text_without_geometry() {
-        let mut emulator = Emulator::new_experimental(12, 2, 0);
-        let mut rich = RichSession::default();
-        let (tx, rx) = mpsc::sync_channel(CHILD_WRITE_QUEUE_CAP);
-        let query = encode_capability_query(CapabilityQuery {
-            request_id: RequestId::new(1).unwrap(),
-            max_version: ProtocolVersion::new(0, 2),
-        })
-        .unwrap();
-        process_rich_chunk(&mut emulator, &mut rich, &tx, &query);
-        test_apply_queued_capability_grants(&rx, &mut rich);
-        let attach = encode_attach_cell_rect(&AttachCellRect {
-            id: 1,
-            row: 0,
-            col: 0,
-            rows: 1,
-            cols: 4,
-            text: "STAT".into(),
-        })
-        .unwrap();
-        process_rich_chunk(&mut emulator, &mut rich, &tx, &attach);
-        let update = encode_update(&UpdateAttachment {
-            id: 1,
-            text: "NEXT".into(),
-            runs: Vec::new(),
-        })
-        .unwrap();
-        process_rich_chunk(&mut emulator, &mut rich, &tx, &update);
-        let got = rich.attachments.get(&1).unwrap();
-        assert_eq!(got.text, "NEXT");
-        assert_eq!(got.row, 0);
-        assert_eq!(got.cols, 4);
-    }
-
-    #[test]
-    fn viewport_stays_pinned_while_cell_rect_translates() {
-        let mut emulator = Emulator::new_experimental(8, 2, 10);
-        let mut rich = RichSession::default();
-        let (tx, rx) = mpsc::sync_channel(CHILD_WRITE_QUEUE_CAP);
-        let query = encode_capability_query(CapabilityQuery {
-            request_id: RequestId::new(1).unwrap(),
-            max_version: ProtocolVersion::new(0, 2),
-        })
-        .unwrap();
-        process_rich_chunk(&mut emulator, &mut rich, &tx, &query);
-        test_apply_queued_capability_grants(&rx, &mut rich);
-        let attach = encode_attach_cell_rect(&AttachCellRect {
-            id: 1,
-            row: 0,
-            col: 0,
-            rows: 1,
-            cols: 4,
-            text: "STAT".into(),
-        })
-        .unwrap();
-        process_rich_chunk(&mut emulator, &mut rich, &tx, &attach);
-        let viewport = encode_attach_viewport(&AttachViewport {
-            id: 2,
-            row: 0,
-            col: 0,
-            rows: 1,
-            cols: 3,
-            text: "HUD".into(),
-            runs: Vec::new(),
-        })
-        .unwrap();
-        process_rich_chunk(&mut emulator, &mut rich, &tx, &viewport);
-        process_rich_chunk(&mut emulator, &mut rich, &tx, b"aaaaaaaa\r\nbbbbbbbb\r\n");
-        assert!(!rich.attachments.contains_key(&1));
-        let hud = rich.attachments.get(&2).unwrap();
-        assert_eq!(hud.kind, AttachKind::Viewport);
-        assert_eq!(hud.row, 0);
-        assert_eq!(hud.text, "HUD");
-        let overlays = overlays_from(&rich.attachments, emulator.screen().rows());
-        assert_eq!(overlays.len(), 1);
-        assert_eq!(overlays[0].text, "HUD");
-    }
-
-    #[test]
-    fn limit_regions_enforced_for_v1() {
-        let mut emulator = Emulator::new_experimental(20, 4, 0);
-        let mut rich = RichSession::default();
-        rich.apply_grant(CapabilityGrant {
-            features: Feature::V1.into_iter().collect(),
-            region_limit: 2,
-        });
-        let (tx, _rx) = mpsc::sync_channel(CHILD_WRITE_QUEUE_CAP);
-        for id in 1..=3 {
-            let attach = encode_attach_cell_rect(&AttachCellRect {
-                id,
-                row: 0,
-                col: 0,
-                rows: 1,
-                cols: 1,
-                text: "X".into(),
-            })
-            .unwrap();
-            process_rich_chunk(&mut emulator, &mut rich, &tx, &attach);
-        }
-        assert_eq!(rich.attachments.len(), 2);
-        assert!(rich.attachments.contains_key(&1));
-        assert!(rich.attachments.contains_key(&2));
-        assert!(!rich.attachments.contains_key(&3));
-    }
-
-    #[test]
-    fn child_write_queue_is_bounded_under_query_flood() {
-        let mut emulator = Emulator::new_experimental(40, 2, 10);
-        let mut rich = RichSession::default();
-        // Capacity 1: first reply may queue; subsequent try_sends drop.
-        let (tx, rx) = mpsc::sync_channel(1);
-        let query = encode_capability_query(CapabilityQuery {
-            request_id: RequestId::new(1).unwrap(),
-            max_version: ProtocolVersion::new(0, 1),
-        })
-        .unwrap();
-        // Do not drain rx — simulate a blocked/slow PTY writer consumer.
-        for _ in 0..64 {
-            let events = emulator.feed(&query);
-            handle_control_events(&events, &mut rich, &tx);
-        }
-        // At most one message retained; rest dropped via try_send failure.
-        let mut count = 0;
-        while rx.try_recv().is_ok() {
-            count += 1;
-        }
-        assert!(count <= 1, "queue retained {count} messages, expected <= 1");
-        // Memory bound: attachments and grant state remain finite regardless of flood.
-        assert!(rich.attachments.len() <= MAX_CELL_RECT_ATTACHMENTS);
-    }
-
-    #[test]
     fn malformed_control_does_not_corrupt_grid() {
-        let mut emulator = Emulator::new_experimental(16, 1, 0);
+        let mut emulator = Emulator::new(16, 1, 0);
         let events = emulator.feed(b"ok\x1b_Prismattyc;cap;q;id=0;max=0.1\x1b\\!");
-        let mut rich = RichSession::default();
-        let (tx, rx) = mpsc::sync_channel::<ChildWrite>(CHILD_WRITE_QUEUE_CAP);
-        handle_control_events(&events, &mut rich, &tx);
-        assert!(rx.try_recv().is_err());
-        assert!(rich.attachments.is_empty());
+        assert!(events.is_empty());
+        assert!(emulator.take_pending_replies().is_empty());
         let text = PlainTextRenderer::render(emulator.screen());
         assert!(text.starts_with("ok!"));
     }

@@ -5,6 +5,11 @@
 ### Changed
 
 - Experimental native terminal sessions and images have their own switch, `--experimental-native` or `PRISMATTYC_EXPERIMENTAL_NATIVE=1`, and no longer need rich overlays turned on. `--experimental-rich` still turns native sessions on too for this release; after that it turns on only rich overlays. Both stay off by default.
+- **Restart now** on the Plug-ins page, and the update notice, list the running sessions and confirm **Save and restart** in that same step. **Restart when idle** waits until the last session ends, then restarts the pmux server so a pending official plug-in can apply. It remembers the release and the pending official plug-ins that were confirmed, restarts only if those are still waiting, and is withdrawn by **Cancel** or by a completed restart. When a release will be installed, the dialog names that version. **Update and restart all components** in the command palette still opens the full review. The server program is still named `pmuxd`.
+
+### Removed
+
+- The classic terminal host (`prismattyc`) no longer has the experimental rich mode: it does not answer capability queries or paint overlays that an app sends. `--experimental-rich` and `PRISMATTYC_EXPERIMENTAL_RICH` are still accepted for one release and only print a notice that they are ignored. Output from such apps is unchanged: their capability messages never reached the screen before and still don't.
 
 ### Removed
 

@@ -12,11 +12,27 @@ use update_meter::Meter;
 /// How often a step without a fraction moves its bar.
 const TICK: std::time::Duration = std::time::Duration::from_millis(150);
 
+/// Which confirmation Restart now and the update notice use.
+/// The command palette keeps the full review.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum ConfirmStyle {
+    /// Three choices, with the session list folded.
+    #[default]
+    Review,
+    /// The session list is shown, and Save and restart is the one confirm.
+    OneConfirm,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Action {
+    /// Command palette: open the full review.
     Start,
+    /// Restart now, or the post-update prompt: one confirm.
+    StartOneConfirm,
     SaveAndContinue,
     Continue,
+    /// Restart the pmux server after the last session ends.
+    RestartWhenIdle,
     Cancel,
     Restore,
     KeepSaved,
@@ -198,24 +214,91 @@ fn refresh_meter(app: &mut App, change: impl FnOnce(&mut Meter) -> bool) {
     restart_modal::show_progress(app, &meter);
 }
 
+fn check_again(app: &App) -> Action {
+    match app.update_confirm {
+        ConfirmStyle::OneConfirm => Action::StartOneConfirm,
+        ConfirmStyle::Review => Action::Start,
+    }
+}
+
+/// Check the release, then open the confirmation for `app.update_confirm`.
+fn start_prepare(app: &mut App) {
+    // Check again after a failed update closes its dialog first.
+    restart_modal::close(app);
+    app.full_update = Flow::Busy;
+    let text = if app.idle_restart_commit {
+        "The last session ended. Checking the pmux server before it restarts."
+    } else if app.update_confirm == ConfirmStyle::OneConfirm {
+        "Checking the pmux server. Your sessions are still running."
+    } else {
+        "Checking for updates. Your sessions are still running."
+    };
+    show(app, text, &[]);
+    let proxy = app.event_proxy.clone();
+    std::thread::spawn(move || {
+        let result = prepare().map_err(|e| format!("{e:#}"));
+        let _ = proxy.send_event(UserAction::FullUpdate(Event::Prepared(result)));
+    });
+}
+
 pub(super) fn action(app: &mut App, action: Action) {
-    match action {
-        Action::Start if !matches!(app.full_update, Flow::Busy) => {
-            // Check again after a failed update closes its dialog first.
+    // No session is running, so waiting would only delay the restart.
+    let idle_sessions = match (&action, &app.full_update) {
+        (Action::RestartWhenIdle, Flow::Confirm(plan)) => {
+            Some((plan.sessions.is_empty(), plan.clone()))
+        }
+        (Action::RestartWhenIdle, _) => return,
+        _ => None,
+    };
+    let action = if let Some((empty, plan)) = idle_sessions {
+        if empty {
+            Action::SaveAndContinue
+        } else {
+            let consent = match idle_consent_for(&plan) {
+                Ok(consent) => consent,
+                Err(error) => {
+                    show(
+                        app,
+                        &format!("The pmux server was not set to restart later.\n{error:#}"),
+                        &[("Check again", check_again(app))],
+                    );
+                    return;
+                }
+            };
+            if let Err(error) = remember_idle_restart(&idle_restart_file(), &consent) {
+                show(
+                    app,
+                    &format!("The pmux server was not set to restart later.\n{error}"),
+                    &[("Check again", check_again(app))],
+                );
+                return;
+            }
             restart_modal::close(app);
-            app.full_update = Flow::Busy;
+            app.full_update = Flow::Idle;
             show(
                 app,
-                "Checking for updates. Your sessions are still running.",
+                "The pmux server will restart after the last session ends. Nothing stops now.",
                 &[],
             );
-            let proxy = app.event_proxy.clone();
-            std::thread::spawn(move || {
-                let result = prepare().map_err(|e| format!("{e:#}"));
-                let _ = proxy.send_event(UserAction::FullUpdate(Event::Prepared(result)));
-            });
+            ensure_idle_watch(app);
+            return;
+        }
+    } else {
+        action
+    };
+    match action {
+        Action::Start | Action::StartOneConfirm if !matches!(app.full_update, Flow::Busy) => {
+            app.idle_restart_commit = false;
+            app.update_confirm = if matches!(action, Action::StartOneConfirm) {
+                ConfirmStyle::OneConfirm
+            } else {
+                ConfirmStyle::Review
+            };
+            start_prepare(app);
         }
         Action::SaveAndContinue | Action::Continue => {
+            clear_idle_restart(&idle_restart_file());
+            app.idle_restart_commit = false;
             let Flow::Confirm(plan) = &app.full_update else {
                 return;
             };
@@ -239,7 +322,7 @@ pub(super) fn action(app: &mut App, action: Action) {
                         show(
                             app,
                             &format!("The update did not start: a window could not be saved ({error:#}). Your sessions are still running."),
-                            &[("Check again", Action::Start)],
+                            &[("Check again", check_again(app))],
                         );
                         return;
                     }
@@ -297,7 +380,9 @@ pub(super) fn action(app: &mut App, action: Action) {
                 let _ = proxy.send_event(UserAction::FullUpdate(Event::Restored(result)));
             });
         }
+        Action::RestartWhenIdle => {}
         Action::Cancel => {
+            withdraw_idle_restart();
             restart_modal::close(app);
             app.full_update = Flow::Idle;
             show(
@@ -314,19 +399,69 @@ pub(super) fn action(app: &mut App, action: Action) {
                 &[],
             );
         }
-        Action::Start => {}
+        Action::Start | Action::StartOneConfirm => {}
     }
 }
 
 pub(super) fn event(app: &mut App, event: Event) {
     match event {
         Event::Prepared(Ok(plan)) => {
+            if std::mem::take(&mut app.idle_restart_commit) {
+                if !plan.sessions.is_empty() {
+                    app.full_update = Flow::Idle;
+                    show(
+                        app,
+                        "A session is still running. The pmux server restarts when the last session ends.",
+                        &[],
+                    );
+                    ensure_idle_watch(app);
+                    return;
+                }
+                let saved = idle_restart_consent(&idle_restart_file());
+                let fresh = idle_consent_for(&plan).ok();
+                if idle_restart_matches(saved.as_ref(), fresh.as_ref()) {
+                    let installed = plan.installed.clone();
+                    let available = plan.update_available.then(|| plan.available.clone());
+                    clear_idle_restart(&idle_restart_file());
+                    restart_modal::open(
+                        app,
+                        &installed,
+                        available.as_deref(),
+                        &[],
+                        ConfirmStyle::OneConfirm,
+                    );
+                    app.full_update = Flow::Confirm(plan);
+                    action(app, Action::SaveAndContinue);
+                } else {
+                    withdraw_idle_restart();
+                    let installed = plan.installed.clone();
+                    let available = plan.update_available.then(|| plan.available.clone());
+                    let names: Vec<String> =
+                        plan.sessions.iter().map(|(_, name)| name.clone()).collect();
+                    restart_modal::open(
+                        app,
+                        &installed,
+                        available.as_deref(),
+                        &names,
+                        ConfirmStyle::OneConfirm,
+                    );
+                    app.full_update = Flow::Confirm(plan);
+                    show(
+                            app,
+                            "The release or the pending plug-ins changed, so that restart was withdrawn. Review this one.",
+                            &[],
+                        );
+                }
+                return;
+            }
             let names: Vec<String> = plan.sessions.iter().map(|(_, name)| name.clone()).collect();
+            let style = app.update_confirm;
             restart_modal::open(
                 app,
                 &plan.installed,
                 plan.update_available.then_some(plan.available.as_str()),
                 &names,
+                style,
             );
             app.full_update = Flow::Confirm(plan);
         }
@@ -341,7 +476,8 @@ pub(super) fn event(app: &mut App, event: Event) {
         Event::Tick => refresh_meter(app, Meter::tick),
         Event::Installed(Err(error)) => {
             let text = format!("The operation could not finish.\n{error}");
-            let actions = [("Check again", Action::Start)];
+            let again = check_again(app);
+            let actions = [("Check again", again)];
             match std::mem::take(&mut app.full_update) {
                 Flow::Installing(mut meter, stop) => {
                     stop.store(true, Ordering::Relaxed);
@@ -374,12 +510,16 @@ pub(super) fn event(app: &mut App, event: Event) {
             show(app, &format!("{text}\nSession restoration finished. Open a saved Space or select a session to view it."), &[]);
         }
         Event::Prepared(Err(error)) | Event::Restored(Err(error)) => {
+            let idle = std::mem::take(&mut app.idle_restart_commit);
             app.full_update = Flow::Idle;
             show(
                 app,
                 &format!("The operation could not finish.\n{error}"),
-                &[("Check again", Action::Start)],
+                &[("Check again", check_again(app))],
             );
+            if idle {
+                ensure_idle_watch(app);
+            }
         }
     }
 }
@@ -987,6 +1127,207 @@ pub(super) fn resume(app: &mut App, unopened: &[String]) {
     }
 }
 
+/// A bare waiting file from before the consent was recorded. It is withdrawn.
+const STALE_IDLE_MARK: &[u8] = b"waiting\n";
+/// How often the idle watcher asks the daemon whether any session is left.
+/// The request can sit for days, so this is not once a second.
+const IDLE_POLL: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// The release and official plug-ins the user agreed would apply at idle.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct IdleConsent {
+    /// The release to install. None means restart without installing a release.
+    release: Option<String>,
+    /// Sorted `id`, previous version, and next version for each pending plug-in.
+    plugins: Vec<String>,
+}
+
+/// Where a restart-when-idle choice is remembered, next to this server's spaces.
+fn idle_restart_file() -> PathBuf {
+    prismattyc_mux::spaces_dir().join("restart-when-idle")
+}
+
+fn idle_consent_for(plan: &Plan) -> Result<IdleConsent> {
+    Ok(IdleConsent {
+        release: plan.update_available.then(|| plan.available.clone()),
+        plugins: pending_plugins(&find_mux_bin())?,
+    })
+}
+
+fn pending_plugins(pmux: &Path) -> Result<Vec<String>> {
+    let value: Value = serde_json::from_str(&run(pmux, &["plugin", "pending"])?)
+        .context("the pending official plug-ins were not readable")?;
+    if let Some(reason) = value["unchecked"].as_str() {
+        anyhow::bail!("the pending official plug-ins could not be checked: {reason}");
+    }
+    anyhow::ensure!(
+        value["result"] == "restart_pending",
+        "the pending official plug-ins were not listed"
+    );
+    let mut plugins = Vec::new();
+    for plugin in value["plugins"]
+        .as_array()
+        .context("the pending official plug-ins were not listed")?
+    {
+        let id = plugin["id"]
+            .as_str()
+            .context("a pending plug-in omitted its id")?;
+        let from = plugin["from"].as_str().unwrap_or("");
+        let to = plugin["to"]
+            .as_str()
+            .context("a pending plug-in omitted its version")?;
+        anyhow::ensure!(
+            !id.contains(['\t', '\n', '\r'])
+                && !from.contains(['\t', '\n', '\r'])
+                && !to.contains(['\t', '\n', '\r']),
+            "a pending plug-in id or version is not a single line"
+        );
+        plugins.push(format!("{id}\t{from}\t{to}"));
+    }
+    plugins.sort();
+    plugins.dedup();
+    Ok(plugins)
+}
+
+fn encode_idle_consent(consent: &IdleConsent) -> String {
+    let mut text = format!("v1\nrelease={}\n", consent.release.as_deref().unwrap_or(""));
+    for plugin in &consent.plugins {
+        text.push_str("plugin=");
+        text.push_str(plugin);
+        text.push('\n');
+    }
+    text
+}
+
+fn decode_idle_consent(bytes: &[u8]) -> Option<IdleConsent> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let mut lines = text.lines();
+    if lines.next()? != "v1" {
+        return None;
+    }
+    let release = lines.next()?.strip_prefix("release=")?;
+    let release = if release.is_empty() {
+        None
+    } else {
+        Some(release.to_string())
+    };
+    let mut plugins = Vec::new();
+    for line in lines {
+        let record = line.strip_prefix("plugin=")?;
+        if record.split('\t').count() != 3 {
+            return None;
+        }
+        plugins.push(record.to_string());
+    }
+    Some(IdleConsent { release, plugins })
+}
+
+/// Remember the release and plug-ins the user agreed to, until no session is running.
+pub(super) fn remember_idle_restart(path: &Path, consent: &IdleConsent) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        prismattyc_mux::private_fs::create_dir(parent)?;
+    }
+    prismattyc_mux::private_fs::write(path, encode_idle_consent(consent).as_bytes())
+}
+
+/// Whether an idle restart may continue. A missing record, a failed fresh
+/// check, or any difference withdraws it.
+pub(super) fn idle_restart_matches(
+    saved: Option<&IdleConsent>,
+    fresh: Option<&IdleConsent>,
+) -> bool {
+    matches!((saved, fresh), (Some(saved), Some(fresh)) if saved == fresh)
+}
+
+/// The consent stored at `path`, if it is one this build understands.
+pub(super) fn idle_restart_consent(path: &Path) -> Option<IdleConsent> {
+    let mut file =
+        match prismattyc_mux::private_fs::open(path, std::fs::OpenOptions::new().read(true)) {
+            Ok(file) => file,
+            Err(_) => return None,
+        };
+    let mut buf = Vec::new();
+    if file.read_to_end(&mut buf).is_err() {
+        return None;
+    }
+    if buf == STALE_IDLE_MARK {
+        clear_idle_restart(path);
+        return None;
+    }
+    decode_idle_consent(&buf)
+}
+
+/// Whether `path` is a restart-when-idle request. Anything else is ignored.
+pub(super) fn idle_restart_waiting(path: &Path) -> bool {
+    idle_restart_consent(path).is_some()
+}
+
+pub(super) fn clear_idle_restart(path: &Path) {
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            eprintln!("prismattyc-host: could not clear the idle restart: {error}")
+        }
+    }
+}
+
+/// Withdraw a pending idle restart, including one left by an older build.
+pub(super) fn withdraw_idle_restart() {
+    clear_idle_restart(&idle_restart_file());
+}
+
+/// A waiting restart runs only after the last session has ended.
+/// A session that starts later still waits.
+pub(super) fn idle_restart_ready(waiting: bool, running_sessions: usize) -> bool {
+    waiting && running_sessions == 0
+}
+
+/// Start the watcher when a request is waiting. The thread leaves the UI
+/// thread alone and sends one event when a snapshot has no sessions.
+pub(super) fn ensure_idle_watch(app: &App) {
+    if !idle_restart_waiting(&idle_restart_file()) {
+        return;
+    }
+    if app.idle_watch.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let proxy = app.event_proxy.clone();
+    let flag = Arc::clone(&app.idle_watch);
+    let _ = std::thread::Builder::new()
+        .name("idle-restart".into())
+        .spawn(move || loop {
+            std::thread::sleep(IDLE_POLL);
+            if !idle_restart_waiting(&idle_restart_file()) {
+                flag.store(false, Ordering::Relaxed);
+                return;
+            }
+            let Some(running) =
+                crate::attach_log::live_snapshot().map(|snapshot| snapshot.sessions.len())
+            else {
+                continue;
+            };
+            if idle_restart_ready(idle_restart_waiting(&idle_restart_file()), running) {
+                flag.store(false, Ordering::Relaxed);
+                let _ = proxy.send_event(UserAction::IdleRestartReady);
+                return;
+            }
+        });
+}
+
+/// The watcher saw no sessions. Prepare again, and restart only if that is still true.
+pub(super) fn begin_idle_restart(app: &mut App) {
+    if !idle_restart_waiting(&idle_restart_file()) {
+        return;
+    }
+    if app.idle_restart_commit || matches!(app.full_update, Flow::Busy | Flow::Installing(..)) {
+        return;
+    }
+    app.update_confirm = ConfirmStyle::OneConfirm;
+    app.idle_restart_commit = true;
+    start_prepare(app);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1011,6 +1352,112 @@ mod tests {
         let path = dir.join("pmux");
         crate::test_support::write_script(&path, &format!("#!/bin/sh\n{body}\n"), "755");
         path
+    }
+
+    #[test]
+    fn an_idle_restart_waits_while_a_session_remains_and_runs_when_none_do() {
+        let dir = std::env::temp_dir().join(format!(
+            "idle-restart-{}-{}",
+            std::process::id(),
+            prismattyc_mux::host_render_status::unix_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("restart-when-idle");
+        assert!(!idle_restart_waiting(&file));
+        assert!(
+            !idle_restart_ready(false, 0),
+            "nothing was requested, so an empty server does not restart"
+        );
+        let consent = IdleConsent {
+            release: Some("0.3.78".into()),
+            plugins: vec!["monitor\t1.0.0\t1.1.0".into()],
+        };
+        remember_idle_restart(&file, &consent).expect("remember");
+        assert_eq!(idle_restart_consent(&file), Some(consent));
+        assert!(idle_restart_waiting(&file));
+        assert!(
+            !idle_restart_ready(true, 2),
+            "sessions that are still running must keep the pmux server up"
+        );
+        assert!(idle_restart_ready(true, 0));
+        std::fs::write(&file, b"no\n").unwrap();
+        assert!(
+            !idle_restart_waiting(&file),
+            "a different file is not a request"
+        );
+        let again = IdleConsent {
+            release: None,
+            plugins: Vec::new(),
+        };
+        remember_idle_restart(&file, &again).unwrap();
+        clear_idle_restart(&file);
+        assert!(!idle_restart_waiting(&file));
+        assert!(!file.exists());
+        std::fs::write(&file, STALE_IDLE_MARK).unwrap();
+        assert!(
+            idle_restart_consent(&file).is_none(),
+            "a bare waiting file is not consent"
+        );
+        assert!(!file.exists(), "a bare waiting file is withdrawn");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_idle_restart_runs_only_for_the_release_and_plug_ins_that_were_confirmed() {
+        let consent = IdleConsent {
+            release: Some("0.3.78".into()),
+            plugins: vec!["monitor\t1.0.0\t1.1.0".into()],
+        };
+        let same = decode_idle_consent(encode_idle_consent(&consent).as_bytes()).unwrap();
+        assert_eq!(same, consent);
+        let newer = IdleConsent {
+            release: Some("0.3.79".into()),
+            plugins: consent.plugins.clone(),
+        };
+        assert_ne!(newer, consent, "a later release was not confirmed");
+        let extra = IdleConsent {
+            release: consent.release.clone(),
+            plugins: vec!["monitor\t1.0.0\t1.1.0".into(), "other\t\t1.0.0".into()],
+        };
+        assert_ne!(extra, consent, "a new plug-in was not confirmed");
+        let none = IdleConsent {
+            release: None,
+            plugins: Vec::new(),
+        };
+        assert_ne!(
+            IdleConsent {
+                release: Some("0.3.78".into()),
+                plugins: Vec::new(),
+            },
+            none,
+            "a release that appeared later was not confirmed"
+        );
+        assert!(decode_idle_consent(b"waiting\n").is_none());
+        assert!(decode_idle_consent(b"v1\nrelease=0.3.78\nplugin=broken\n").is_none());
+        assert!(
+            idle_restart_matches(Some(&consent), Some(&consent)),
+            "the same release and plug-ins may restart"
+        );
+        assert!(
+            !idle_restart_matches(Some(&consent), Some(&newer)),
+            "a later release must not restart"
+        );
+        assert!(
+            !idle_restart_matches(Some(&consent), Some(&extra)),
+            "a new plug-in must not restart"
+        );
+        assert!(
+            !idle_restart_matches(Some(&none), Some(&consent)),
+            "a release that was not confirmed must not restart"
+        );
+        assert!(
+            !idle_restart_matches(None, Some(&consent)),
+            "a missing record must not restart"
+        );
+        assert!(
+            !idle_restart_matches(Some(&consent), None),
+            "a failed fresh check must not restart"
+        );
     }
 
     #[cfg(unix)]

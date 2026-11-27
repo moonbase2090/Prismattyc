@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
-//! The Update and restart confirmation: a modal with the version change, the
-//! three choices, and the running sessions folded behind Show and Hide.
+//! The Update and restart confirmation. The full review has three choices and
+//! folds the running sessions behind Show and Hide. Restart now and the
+//! post-update prompt use one confirm: the sessions are listed, Save and
+//! restart applies the pmux server, and Restart when idle waits.
 use super::*;
 use graphite::{Face, Rect};
 
@@ -18,11 +20,26 @@ const OPTIONS: [(&str, &str, update_flow::Action); 3] = [
     ),
     ("Cancel", "Nothing changes now", update_flow::Action::Cancel),
 ];
+/// Restart now and the post-update prompt. The session list is already open.
+const ONE_CONFIRM: [(&str, &str, update_flow::Action); 3] = [
+    (
+        "Save and restart",
+        "Restart the pmux server and bring sessions back",
+        update_flow::Action::SaveAndContinue,
+    ),
+    (
+        "Restart when idle",
+        "Restart the pmux server after the last session ends",
+        update_flow::Action::RestartWhenIdle,
+    ),
+    ("Cancel", "Nothing changes now", update_flow::Action::Cancel),
+];
 /// Selection index of the Show and Hide toggle, after the three choices.
 const TOGGLE: usize = OPTIONS.len();
 /// The link to the new release's notes, on the title line.
 const NOTES_LINK: &str = "Release notes";
 const EXPLANATION: &str = "Save the session configuration to recreate your sessions after restart. Unsaved work inside programs is not saved.";
+const ONE_EXPLANATION: &str = "Save and restart applies the pmux server now and brings these sessions back. Restart when idle waits until the last session ends. Unsaved work inside programs is not saved.";
 const SAVED: &str = "names, directories, launch commands, pane layouts";
 const KEYS: &str = "Enter select · Esc close · ↑↓ move";
 /// The choices after an update fails.
@@ -46,6 +63,7 @@ pub(super) struct RestartModal {
     installed: String,
     available: Option<String>,
     sessions: Vec<String>,
+    style: update_flow::ConfirmStyle,
     expanded: bool,
     selected: usize,
     chosen: Option<update_flow::Action>,
@@ -66,17 +84,62 @@ struct Hits {
 
 impl RestartModal {
     pub(super) fn new(installed: &str, available: Option<&str>, sessions: Vec<String>) -> Self {
+        Self::with_style(
+            installed,
+            available,
+            sessions,
+            update_flow::ConfirmStyle::Review,
+        )
+    }
+
+    pub(super) fn with_style(
+        installed: &str,
+        available: Option<&str>,
+        sessions: Vec<String>,
+        style: update_flow::ConfirmStyle,
+    ) -> Self {
+        let expanded = style == update_flow::ConfirmStyle::OneConfirm && !sessions.is_empty();
         RestartModal {
             installed: installed.into(),
             available: available.map(Into::into),
             sessions,
-            expanded: false,
+            style,
+            expanded,
             selected: 0,
             chosen: None,
             hits: Hits::default(),
             running: None,
             dismissed: false,
             open_notes: false,
+        }
+    }
+
+    fn choices(
+        style: update_flow::ConfirmStyle,
+    ) -> &'static [(&'static str, &'static str, update_flow::Action)] {
+        match style {
+            update_flow::ConfirmStyle::Review => &OPTIONS,
+            update_flow::ConfirmStyle::OneConfirm => &ONE_CONFIRM,
+        }
+    }
+
+    fn explanation(&self) -> String {
+        match self.style {
+            update_flow::ConfirmStyle::OneConfirm => match &self.available {
+                Some(available) => format!(
+                    "Save and restart installs {available} and restarts the pmux server, then brings these sessions back. Restart when idle waits until the last session ends and applies only this release. Unsaved work inside programs is not saved."
+                ),
+                None => ONE_EXPLANATION.to_string(),
+            },
+            update_flow::ConfirmStyle::Review => EXPLANATION.to_string(),
+        }
+    }
+
+    /// Check again stays on the same confirmation the user already opened.
+    fn again(&self) -> update_flow::Action {
+        match self.style {
+            update_flow::ConfirmStyle::OneConfirm => update_flow::Action::StartOneConfirm,
+            update_flow::ConfirmStyle::Review => update_flow::Action::Start,
         }
     }
 
@@ -104,10 +167,15 @@ impl RestartModal {
                 }
             }
             Some(_) if self.available.is_some() => return "Updating",
+            Some(_) if self.style == update_flow::ConfirmStyle::OneConfirm => {
+                return "Restarting the pmux server"
+            }
             Some(_) => return "Restarting components",
             None => {}
         }
-        if self.available.is_some() {
+        if self.style == update_flow::ConfirmStyle::OneConfirm {
+            "Restart the pmux server"
+        } else if self.available.is_some() {
             "Restart to update"
         } else {
             "Restart components"
@@ -161,7 +229,7 @@ impl RestartModal {
             // Only the choices after a failure or the finished update's
             // Close act; a running update has none.
             match (self.failure().is_some(), index) {
-                (true, 0) => self.chosen = Some(update_flow::Action::Start),
+                (true, 0) => self.chosen = Some(self.again()),
                 (true, 1) => self.dismissed = true,
                 (false, 0) if self.finished() => self.dismissed = true,
                 _ => {}
@@ -172,7 +240,7 @@ impl RestartModal {
             self.open_notes = true;
         } else if index == TOGGLE {
             self.expanded = !self.expanded;
-        } else if let Some((_, _, action)) = OPTIONS.get(index) {
+        } else if let Some((_, _, action)) = Self::choices(self.style).get(index) {
             self.chosen = Some(*action);
         }
     }
@@ -276,12 +344,15 @@ impl RestartModal {
             }
             return rows;
         }
-        let mut rows: Vec<String> = OPTIONS
+        let mut rows: Vec<String> = Self::choices(self.style)
             .iter()
             .map(|(label, hint, _)| format!("{label}: {hint}"))
             .collect();
         if let Some(toggle) = self.toggle_label() {
             rows.push(format!("{toggle}: {}", self.summary()));
+        }
+        if self.style == update_flow::ConfirmStyle::OneConfirm && self.expanded {
+            rows.extend(self.sessions.iter().cloned());
         }
         if let Some(available) = &self.available {
             rows.push(format!("{NOTES_LINK}: What's new in {available}"));
@@ -346,11 +417,22 @@ impl RestartModal {
 }
 
 /// Open the modal in every window once the update check has a plan.
-pub(super) fn open(app: &mut App, installed: &str, available: Option<&str>, sessions: &[String]) {
+pub(super) fn open(
+    app: &mut App,
+    installed: &str,
+    available: Option<&str>,
+    sessions: &[String],
+    style: update_flow::ConfirmStyle,
+) {
     for host in app.windows.values_mut() {
         host.space_panel = None;
         host.context_menu = None;
-        host.restart_modal = Some(RestartModal::new(installed, available, sessions.to_vec()));
+        host.restart_modal = Some(RestartModal::with_style(
+            installed,
+            available,
+            sessions.to_vec(),
+            style,
+        ));
         host.dirty = true;
         host.window.request_redraw();
     }
@@ -594,7 +676,8 @@ pub(super) fn paint(host: &mut HostState, buffer: &mut [u32], width: usize, heig
     let content_w = panel_w.saturating_sub(2 * pad);
     let line_h = s(22.0);
     let row_h = s(40.0);
-    let explanation = wrap(Face::Regular, body_px, EXPLANATION, content_w as f32);
+    let explanation_text = modal.explanation();
+    let explanation = wrap(Face::Regular, body_px, &explanation_text, content_w as f32);
     let names = if modal.expanded {
         flow(
             Face::Mono,
@@ -608,7 +691,7 @@ pub(super) fn paint(host: &mut HostState, buffer: &mut [u32], width: usize, heig
     };
     // Title, explanation, divider, options, divider, footer, names, key hints.
     let top_h = pad + s(26.0) + s(8.0) + explanation.len() * line_h + pad;
-    let options_h = s(8.0) + OPTIONS.len() * (row_h + s(2.0)) + s(8.0);
+    let options_h = s(8.0) + RestartModal::choices(modal.style).len() * (row_h + s(2.0)) + s(8.0);
     let mut footer_h = pad + line_h;
     if !names.is_empty() {
         footer_h += s(8.0) + names.len() * line_h;
@@ -712,7 +795,7 @@ pub(super) fn paint(host: &mut HostState, buffer: &mut [u32], width: usize, heig
         255,
     );
     ry += s(8.0);
-    for (index, (label, hint, _)) in OPTIONS.iter().enumerate() {
+    for (index, (label, hint, _)) in RestartModal::choices(modal.style).iter().enumerate() {
         let row = Rect::new(x + s(8.0), ry, panel_w.saturating_sub(s(16.0)), row_h);
         if ry + row_h > bottom {
             break;
@@ -1265,6 +1348,81 @@ mod tests {
         );
         m.key(&Key::Named(NamedKey::Space));
         assert!(!m.expanded);
+    }
+
+    fn one_confirm(sessions: &[&str]) -> RestartModal {
+        RestartModal::with_style(
+            "0.3.77",
+            Some("0.3.78"),
+            sessions.iter().map(|name| (*name).to_string()).collect(),
+            update_flow::ConfirmStyle::OneConfirm,
+        )
+    }
+
+    #[test]
+    fn one_confirm_lists_the_sessions_and_saves_in_one_step() {
+        assert_eq!(
+            ONE_CONFIRM.len(),
+            OPTIONS.len(),
+            "the toggle stays after the choices"
+        );
+        let mut m = one_confirm(&["alpha", "beta"]);
+        assert_eq!(m.title(), "Restart the pmux server");
+        assert!(
+            m.explanation().contains("installs 0.3.78"),
+            "the confirm names the release it will install"
+        );
+        assert!(m.expanded, "the session list is open without a second step");
+        assert_eq!(m.status()["sessions_shown"], 2);
+        let rows = m.rows();
+        assert_eq!(
+            rows[0],
+            "Save and restart: Restart the pmux server and bring sessions back"
+        );
+        assert!(rows.iter().any(|row| row == "alpha"));
+        assert!(rows.iter().any(|row| row == "beta"));
+        assert!(rows.iter().any(|row| row.starts_with("Restart when idle")));
+        assert!(
+            !rows
+                .iter()
+                .any(|row| row.starts_with("Restart without saving")),
+            "the full review's discard choice is not this dialog"
+        );
+        assert!(
+            !rows.iter().any(|row| row.starts_with("Show:")),
+            "the list is not folded behind Show"
+        );
+        m.key(&Key::Named(NamedKey::Enter));
+        assert!(matches!(
+            m.chosen,
+            Some(update_flow::Action::SaveAndContinue)
+        ));
+    }
+
+    #[test]
+    fn one_confirm_can_wait_until_the_last_session_ends() {
+        let mut m = one_confirm(&["alpha"]);
+        m.key(&Key::Named(NamedKey::ArrowDown));
+        m.key(&Key::Named(NamedKey::Enter));
+        assert!(matches!(
+            m.chosen,
+            Some(update_flow::Action::RestartWhenIdle)
+        ));
+        let quiet = one_confirm(&[]);
+        assert_eq!(quiet.title(), "Restart the pmux server");
+        assert_eq!(quiet.status()["sessions_shown"], 0);
+        assert!(!quiet.expanded);
+    }
+
+    #[test]
+    fn a_failed_one_confirm_checks_again_the_same_way() {
+        let mut m = one_confirm(&["alpha"]);
+        running(&mut m, Some("the pmux server did not restart"));
+        m.key(&Key::Named(NamedKey::Enter));
+        assert!(matches!(
+            m.chosen,
+            Some(update_flow::Action::StartOneConfirm)
+        ));
     }
 
     #[test]

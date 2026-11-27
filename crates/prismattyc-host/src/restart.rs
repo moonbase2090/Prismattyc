@@ -71,6 +71,7 @@ pub(super) fn poll(app: &mut App) {
         return;
     }
     app.last_component_poll = Some(now);
+    update_flow::ensure_idle_watch(app);
     let Some(socket) = host_mux_socket() else {
         return;
     };

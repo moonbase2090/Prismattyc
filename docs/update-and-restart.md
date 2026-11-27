@@ -7,20 +7,39 @@ enabled, which is the default. Turn it off in the app menu or set
 available either way.
 When a release is available, Prismattyc shows its version, up to three
 highlights, and **Release Notes**, which opens the full notes in the browser.
-Choose **Review Update** to review the sessions that will stop. The same
-flow is available from **Update and restart** in the command palette on
+Choose **Review Update** to open one dialog. It lists the running sessions,
+and **Save and restart** confirms the pmux server restart in that step.
+**Update and restart** in the command palette still opens the full review on
 all platforms. **Roll Back Last Update…** restores the previous verified app.
 The command-line update path remains available on all platforms.
 
 On Linux and Windows the app runs the same check (`pmux update --check --json`)
 on launch and daily while `automatic_update_checks` is on. When a newer release
 exists it shows one notice naming the version and its top change, then stays
-quiet about that version until the app restarts. Click the notice to open **Restart to update**,
-the same review as **Update and restart** in the command palette. Its
-**Release notes** link opens the full notes. The notice
+quiet about that version until the app restarts. Click the notice to list the
+running sessions and confirm **Save and restart** in that same step. **Restart
+when idle** is the other choice: nothing stops now, and the pmux server
+restarts after the last session ends. **Update and restart all components**
+in the command palette still opens the full review below. The notice's
+**Release notes** link is on that dialog and opens the full notes. The notice
 itself does not install anything and never stops a session; nothing changes
-until you choose an action in the review. It is kept in Recent messages and is
+until you choose an action. It is kept in Recent messages and is
 hidden only by `toasts = "off"`.
+
+## Restart now
+
+On the Plug-ins page, **Restart now** opens the same one-step dialog when
+official plug-ins are waiting for the pmux server. The running sessions are
+listed immediately. **Save and restart** saves them and restarts the pmux
+server in that step, then brings them back. **Restart when idle** leaves them
+running and restarts the pmux server after the last one ends, so a pending
+official plug-in can apply. That choice remembers the release and the pending
+official plug-ins that were shown. It restarts only if those are still the
+ones waiting when the last session ends. A newer release, or a different
+plug-in set, drops the request and shows the dialog again. **Cancel** (or Esc)
+withdraws a pending idle restart, and so does any completed restart. Deleting
+the `restart-when-idle` file next to this server's saved spaces withdraws it
+while sessions are still running. The server program is still named `pmuxd`.
 
 ## Restart without stopping sessions
 

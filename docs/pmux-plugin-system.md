@@ -54,11 +54,15 @@ manifest's required ones are pre-selected the first time), **Update to** and
 **plugins_check** (check for plug-in updates) and **plugins_update** (update
 plug-ins: enabled ones move to the new version, ones you turned off stay off);
 both open the page and show the result there. They are on by
-default and bound to no key. When official plug-ins wait for a daemon restart,
-the page lists them and offers **Restart now**, which opens **Update and
-restart** with **Update and restart all components** selected. Enter lists the
-running sessions and asks before saving them and restarting the daemon. The
-plain **Restart** rows postpone the daemon while sessions run, so they do not
+default and bound to no key. When official plug-ins wait for the pmux server
+to restart, the page lists them and offers **Restart now**. That lists the
+running sessions and confirms **Save and restart** in the same step, which
+restarts the pmux server and brings the sessions back. **Restart when idle**
+waits until the last session ends, then restarts the pmux server so the
+pending plug-ins apply. It restarts only if the same release and the same
+pending plug-ins are still waiting, and Cancel or a completed restart
+withdraws it. The server program is still named `pmuxd`. The plain
+**Restart** rows postpone that restart while sessions run, so they do not
 finish the plug-in update.
 
 The official Activity Monitor and activity connector start enabled. On startup,

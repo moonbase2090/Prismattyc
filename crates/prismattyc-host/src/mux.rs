@@ -19,10 +19,12 @@ use anyhow::{Context, Result};
 use portable_pty::PtySize;
 use prismattyc_core::{Cursor, GridDamage, Selection};
 use prismattyc_emulator::{CursorShape, Emulator, PlacedImage, PtySession};
+#[cfg(test)]
+use prismattyc_mux::SavedFloat;
 use prismattyc_mux::{
     apply_arrangement, even_horizontal_row, even_two_row_grid, even_vertical_column,
-    layout_to_rects, Arrangement, Axis, CellRect, ClientView, Domain, PaneId, PaneLayout,
-    SessionId, SizeOwner, WindowId, DEFAULT_MIN_COLS, DEFAULT_MIN_ROWS,
+    layout_to_rects, rects_with_float, Arrangement, Axis, CellRect, ClientView, Domain, PaneId,
+    PaneLayout, SessionId, SizeOwner, WindowId, DEFAULT_MIN_COLS, DEFAULT_MIN_ROWS,
 };
 use prismattyc_protocol::{InputModifiers, PointerPhase, ViewerId};
 
@@ -2943,6 +2945,13 @@ pub(crate) fn tab_close_left_with_inset(
     Some(x0 + width - need)
 }
 
+/// One client-local overlay. The server tree stays tiled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FloatPlacement {
+    pane: PaneId,
+    rect: CellRect,
+}
+
 /// Domain topology plus one live runtime per pane leaf.
 pub(crate) struct MuxRuntime {
     /// Unique per runtime in this process. Pane ids restart at 1 in every
@@ -2988,6 +2997,9 @@ pub(crate) struct MuxRuntime {
     /// mutation). While set, the pane takes the whole window of the tab that
     /// owns it and its siblings keep their PTY sizes untouched in the tree.
     zoomed: Option<PaneId>,
+    /// Client-local overlay for one pane. The server tree stays tiled.
+    /// Siblings reflow, and this pane is drawn at `rect`.
+    floated: Option<FloatPlacement>,
 }
 
 impl MuxRuntime {
@@ -3074,7 +3086,7 @@ impl MuxRuntime {
         let async_connect = attach_log::async_connect_requested();
         let client = domain.mint_client()?;
         let view = ClientView::attach_session(&domain, client, session);
-        let rects = rects_for(&domain, window, cols, rows, geom, None)?;
+        let rects = rects_for(&domain, window, cols, rows, geom, None, None)?;
         let root_rect = rects
             .iter()
             .find_map(|(id, rect)| (*id == pane).then_some(*rect))
@@ -3123,6 +3135,7 @@ impl MuxRuntime {
             last_window: None,
             fixed_tab_names: HashMap::new(),
             zoomed: None,
+            floated: None,
         })
     }
 
@@ -3895,9 +3908,13 @@ impl MuxRuntime {
     /// view projection: the split tree stays as it is, the focused pane
     /// takes the whole tab, and hidden siblings keep their PTY geometry.
     /// Returns `Ok(false)` when the tab has a single pane.
+    /// Zooming the floated pane docks it. The two views do not stack.
     pub(crate) fn toggle_zoom(&mut self) -> Result<bool> {
         if self.zoomed_here().is_some() {
             return self.set_zoom(None);
+        }
+        if self.floated_here() == Some(self.focused_id()) {
+            return self.dock_float();
         }
         if self.active_pane_count() < 2 {
             return Ok(false);
@@ -3977,26 +3994,151 @@ impl MuxRuntime {
     }
 
     fn set_zoom(&mut self, zoomed: Option<PaneId>) -> Result<bool> {
-        let prior = self.zoomed;
+        let prior_zoom = self.zoomed;
+        let prior_float = self.floated;
         self.zoomed = zoomed;
+        if zoomed.is_some() {
+            self.floated = None;
+        }
         let applied = self
             .window_rects(self.active_window())
             .and_then(|rects| self.apply_rects(rects, self.geom));
         if let Err(error) = applied {
-            self.zoomed = prior;
+            self.zoomed = prior_zoom;
+            self.floated = prior_float;
             return Err(error);
         }
         Ok(true)
     }
 
+    /// Lift `pane` into a client overlay at `rect` and reflow the tile.
+    /// Clears zoom. `Ok(false)` when `pane` is not on the active tab.
+    /// The placement is rolled back when the rectangles cannot be applied.
+    #[cfg(test)]
+    pub(crate) fn float_pane(&mut self, pane: PaneId, rect: CellRect) -> Result<bool> {
+        let on_tab = self
+            .domain
+            .window(self.active_window())
+            .is_some_and(|window| window.layout.contains_pane(pane));
+        if !on_tab || !self.panes.contains_key(&pane) {
+            return Ok(false);
+        }
+        let prior_zoom = self.zoomed;
+        let prior_float = self.floated;
+        self.zoomed = None;
+        self.floated = Some(FloatPlacement { pane, rect });
+        let applied = self
+            .window_rects(self.active_window())
+            .and_then(|rects| self.apply_rects(rects, self.geom));
+        if let Err(error) = applied {
+            self.zoomed = prior_zoom;
+            self.floated = prior_float;
+            return Err(error);
+        }
+        Ok(true)
+    }
+
+    /// Put the floated pane back in the tile. `Ok(false)` when nothing is floating.
+    pub(crate) fn dock_float(&mut self) -> Result<bool> {
+        let Some(prior) = self.floated.take() else {
+            return Ok(false);
+        };
+        let applied = self
+            .window_rects(self.active_window())
+            .and_then(|rects| self.apply_rects(rects, self.geom));
+        if let Err(error) = applied {
+            self.floated = Some(prior);
+            return Err(error);
+        }
+        Ok(true)
+    }
+
+    /// The active overlay as a record keyed by session and place.
+    #[cfg(test)]
+    pub(crate) fn float_record(&self, space: &str) -> Option<SavedFloat> {
+        let placement = self.floated?;
+        let session = self.pane_session_name(placement.pane)?;
+        let window = self.domain.pane_owner(placement.pane)?;
+        let window_slot = self.window_ids().iter().position(|id| *id == window)?;
+        let pane_slot = self
+            .domain
+            .window(window)?
+            .layout
+            .panes()
+            .iter()
+            .position(|id| *id == placement.pane)?;
+        Some(SavedFloat {
+            space: space.to_string(),
+            session,
+            window_slot: u32::try_from(window_slot).ok()?,
+            pane_slot: u32::try_from(pane_slot).ok()?,
+            col: u32::try_from(placement.rect.col).ok()?,
+            row: u32::try_from(placement.rect.row).ok()?,
+            cols: u32::try_from(placement.rect.cols).ok()?,
+            rows: u32::try_from(placement.rect.rows).ok()?,
+        })
+    }
+
+    /// Float the pane named by `saved` when it is on the active session and tab.
+    #[cfg(test)]
+    pub(crate) fn restore_float(&mut self, saved: &SavedFloat) -> Result<bool> {
+        let session = self
+            .domain
+            .session(self.session_id())
+            .map(|session| session.name.clone());
+        if session.as_deref() != Some(saved.session.as_str()) {
+            return Ok(false);
+        }
+        let Some(&window) = self.window_ids().get(saved.window_slot as usize) else {
+            return Ok(false);
+        };
+        if window != self.active_window() {
+            return Ok(false);
+        }
+        let Some(pane) = self
+            .domain
+            .window(window)
+            .and_then(|window| window.layout.panes().get(saved.pane_slot as usize).copied())
+        else {
+            return Ok(false);
+        };
+        self.float_pane(
+            pane,
+            CellRect {
+                col: saved.col as usize,
+                row: saved.row as usize,
+                cols: saved.cols as usize,
+                rows: saved.rows as usize,
+            },
+        )
+    }
+
     /// Leave zoom before a topology edit (split, retile, move); tmux does
-    /// the same so the new pane is visible. Clears zoom even when it
-    /// lives on an inactive tab.
+    /// the same so the new pane is visible. Also docks a float. Clears zoom
+    /// even when it lives on an inactive tab.
     pub(crate) fn unzoom(&mut self) -> Result<()> {
+        if self.floated.is_some() {
+            self.dock_float()?;
+        }
         if self.zoomed.is_some() {
             self.set_zoom(None)?;
         }
         Ok(())
+    }
+
+    fn floated_rect(&self) -> Option<(PaneId, CellRect)> {
+        self.floated
+            .map(|placement| (placement.pane, placement.rect))
+    }
+
+    /// The floated pane when it lives in the active tab.
+    fn floated_here(&self) -> Option<PaneId> {
+        self.floated.and_then(|placement| {
+            self.domain
+                .window(self.active_window())
+                .is_some_and(|window| window.layout.contains_pane(placement.pane))
+                .then_some(placement.pane)
+        })
     }
 
     fn window_rects(&self, window: WindowId) -> Result<Vec<(PaneId, CellRect)>> {
@@ -4007,6 +4149,7 @@ impl MuxRuntime {
             self.rows,
             self.geom,
             self.zoomed,
+            self.floated_rect(),
         )
     }
 
@@ -4028,6 +4171,7 @@ impl MuxRuntime {
             rows,
             geom,
             self.zoomed,
+            self.floated_rect(),
         )?;
         self.apply_rects(rects, geom)?;
         self.cols = cols;
@@ -4074,8 +4218,12 @@ impl MuxRuntime {
         let prior_view = self.view.clone();
         let prior_rects = self.rects.clone();
         let prior_zoom = self.zoomed;
+        let prior_float = self.floated;
         if prior_zoom == Some(pane) {
             self.zoomed = None;
+        }
+        if prior_float.is_some_and(|placement| placement.pane == pane) {
+            self.floated = None;
         }
         let prior_focus = self.view.focused_pane(window).unwrap_or(pane);
         let next_focus = self
@@ -4092,6 +4240,7 @@ impl MuxRuntime {
                     self.domain = prior_domain;
                     self.view = prior_view;
                     self.zoomed = prior_zoom;
+                    self.floated = prior_float;
                     return Err(error);
                 }
             };
@@ -4100,6 +4249,7 @@ impl MuxRuntime {
                 self.view = prior_view;
                 self.rects = prior_rects;
                 self.zoomed = prior_zoom;
+                self.floated = prior_float;
                 return Err(error);
             }
             if let Some(runtime) = self.panes.get_mut(&next_focus) {
@@ -5236,6 +5386,12 @@ impl MuxRuntime {
         {
             self.zoomed = None;
         }
+        if self
+            .floated
+            .is_some_and(|placement| !self.panes.contains_key(&placement.pane))
+        {
+            self.floated = None;
+        }
         // The closed tab cannot be returned to; the tab we land on is the
         // sensible "last" only if it was already the previous one.
         if self.last_window == Some(window) {
@@ -5458,7 +5614,7 @@ impl MuxRuntime {
     /// Every split of the active window as a draggable divider, in
     /// depth-first order. Empty when zoomed or single-pane.
     pub(crate) fn dividers(&self) -> Vec<Divider> {
-        if self.zoomed.is_some() {
+        if self.zoomed.is_some() || self.floated_here().is_some() {
             return Vec::new();
         }
         let Some(window) = self.domain.window(self.active_window()) else {
@@ -6028,21 +6184,30 @@ fn rects_for(
     rows: usize,
     geom: HostGeom,
     zoomed: Option<PaneId>,
+    floated: Option<(PaneId, CellRect)>,
 ) -> Result<Vec<(PaneId, CellRect)>> {
     let layout = &domain.window(window).context("mux window missing")?.layout;
-    let zoomed_leaf = zoomed
-        .filter(|pane| layout.contains_pane(*pane))
-        .map(PaneLayout::leaf);
-    Ok(layout_to_rects(
-        zoomed_leaf.as_ref().unwrap_or(layout),
-        CellRect {
-            col: 0,
-            row: 0,
-            cols,
-            rows,
-        },
+    let bounds = CellRect {
+        col: 0,
+        row: 0,
+        cols,
+        rows,
+    };
+    if let Some(pane) = zoomed.filter(|pane| layout.contains_pane(*pane)) {
+        return Ok(layout_to_rects(
+            &PaneLayout::leaf(pane),
+            bounds,
+            geom.min_cols(),
+            geom.min_rows(),
+        )?);
+    }
+    let floated = floated.filter(|(pane, _)| layout.contains_pane(*pane));
+    Ok(rects_with_float(
+        layout,
+        bounds,
         geom.min_cols(),
         geom.min_rows(),
+        floated,
     )?)
 }
 
@@ -8751,6 +8916,85 @@ mod tests {
         assert_eq!(runtime.zoomed_pane(), None);
         assert_eq!(runtime.rects().collect::<Vec<_>>(), split_rects);
         assert!(!runtime.tab_infos()[0].zoomed);
+    }
+
+    #[test]
+    fn float_lifts_one_pane_over_the_reflowed_sibling_and_dock_restores_the_tile() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let left = runtime.focused_id();
+        let gone = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        let overlay = CellRect {
+            col: 10,
+            row: 4,
+            cols: 30,
+            rows: 8,
+        };
+        assert!(runtime.close_focused().unwrap());
+        assert!(
+            !runtime.float_pane(gone, overlay).unwrap(),
+            "a pane that has left the tile cannot float"
+        );
+        let right = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        let tiled = runtime.rects().collect::<Vec<_>>();
+        assert_eq!(runtime.dividers().len(), 1);
+
+        assert!(runtime.float_pane(right, overlay).unwrap());
+        assert_eq!(runtime.zoomed_pane(), None);
+        assert_eq!(runtime.active_pane_count(), 2, "the tree stays tiled");
+        let floated = runtime.rects().collect::<Vec<_>>();
+        assert_eq!(floated, vec![(left, full_rect(&runtime)), (right, overlay)]);
+        assert!(runtime.dividers().is_empty());
+        let (cols, rows) = runtime.geom().content_cells(overlay);
+        assert_eq!(
+            (runtime.panes[&right].cols, runtime.panes[&right].rows),
+            (cols, rows)
+        );
+        runtime.resize(90, 28).unwrap();
+        assert_eq!(
+            runtime.rects().collect::<Vec<_>>(),
+            vec![(left, full_rect(&runtime)), (right, overlay)],
+            "a resize keeps the overlay and reflows the sibling"
+        );
+        runtime.resize(80, 24).unwrap();
+
+        let record = runtime.float_record("work").unwrap();
+        assert_eq!(record.space, "work");
+        assert_eq!(record.session, "default");
+        assert_eq!(record.window_slot, 0);
+        assert_eq!(record.pane_slot, 1);
+        assert_eq!(
+            (record.col, record.row, record.cols, record.rows),
+            (10, 4, 30, 8)
+        );
+
+        assert!(runtime.dock_float().unwrap());
+        assert!(!runtime.dock_float().unwrap());
+        assert!(runtime.float_record("work").is_none());
+        assert_eq!(runtime.rects().collect::<Vec<_>>(), tiled);
+        assert_eq!(runtime.dividers().len(), 1);
+
+        let mut other = record.clone();
+        other.session = "elsewhere".to_string();
+        assert!(!runtime.restore_float(&other).unwrap());
+        assert_eq!(runtime.rects().collect::<Vec<_>>(), tiled);
+        assert!(runtime.restore_float(&record).unwrap());
+        assert_eq!(runtime.rects().collect::<Vec<_>>(), floated);
+
+        assert!(runtime.focus(left));
+        assert!(runtime.toggle_zoom().unwrap());
+        assert_eq!(runtime.zoomed_pane(), Some(left));
+        assert!(runtime.float_record("work").is_none());
+        assert_eq!(
+            runtime.rects().collect::<Vec<_>>(),
+            vec![(left, full_rect(&runtime))]
+        );
+        assert!(runtime.float_pane(right, overlay).unwrap());
+        assert_eq!(runtime.zoomed_pane(), None);
+        assert_eq!(runtime.rects().collect::<Vec<_>>(), floated);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Integer-cell layout geometry (PRD §2.8.6).
 
 use crate::ids::PaneId;
-use crate::layout::{Axis, PaneLayout, Split};
+use crate::layout::{Axis, PaneHidden, PaneLayout, Split};
 
 /// Inclusive cell rectangle in window-local coordinates (origin top-left).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,6 +115,58 @@ pub fn layout_to_rects(
     let mut out = Vec::with_capacity(layout.pane_count());
     assign(layout, bounds, min_cols, min_rows, &mut out)?;
     Ok(out)
+}
+
+/// Tile `layout`, then place one pane in an overlay.
+///
+/// The overlay is a client view. The tree is not changed. Siblings reflow
+/// across `bounds` because the floated pane is left out of the tile. Its
+/// rectangle is clamped so it stays inside `bounds` at least `min_cols` by
+/// `min_rows`, and it is appended last. `None`, or a pane that is not in
+/// the layout, tiles the whole tree.
+pub fn rects_with_float(
+    layout: &PaneLayout,
+    bounds: CellRect,
+    min_cols: usize,
+    min_rows: usize,
+    floated: Option<(PaneId, CellRect)>,
+) -> Result<Vec<(PaneId, CellRect)>, GeometryError> {
+    let Some((pane, requested)) = floated.filter(|(pane, _)| layout.contains_pane(*pane)) else {
+        return layout_to_rects(layout, bounds, min_cols, min_rows);
+    };
+    let overlay = clamp_float(bounds, requested, min_cols, min_rows)?;
+    let mut tiles = match layout.hiding(pane) {
+        PaneHidden::Missing => layout_to_rects(layout, bounds, min_cols, min_rows)?,
+        PaneHidden::Empty => Vec::new(),
+        PaneHidden::Tree(rest) => layout_to_rects(&rest, bounds, min_cols, min_rows)?,
+    };
+    tiles.push((pane, overlay));
+    Ok(tiles)
+}
+
+/// Keep `requested` inside `bounds`. A size past the edge shifts inward
+/// before it shrinks, and a size under the minimum grows up to the bounds.
+fn clamp_float(
+    bounds: CellRect,
+    requested: CellRect,
+    min_cols: usize,
+    min_rows: usize,
+) -> Result<CellRect, GeometryError> {
+    checked_extent(bounds.col, bounds.cols)?;
+    checked_extent(bounds.row, bounds.rows)?;
+    if min_cols == 0 || min_rows == 0 || bounds.cols < min_cols || bounds.rows < min_rows {
+        return Err(GeometryError::TooSmall);
+    }
+    let cols = requested.cols.clamp(min_cols, bounds.cols);
+    let rows = requested.rows.clamp(min_rows, bounds.rows);
+    let max_col = bounds.col + (bounds.cols - cols);
+    let max_row = bounds.row + (bounds.rows - rows);
+    Ok(CellRect {
+        col: requested.col.clamp(bounds.col, max_col),
+        row: requested.row.clamp(bounds.row, max_row),
+        cols,
+        rows,
+    })
 }
 
 fn assign(
@@ -1006,6 +1058,115 @@ mod tests {
         assert_eq!(
             layout_to_rects(&layout_v, bounds_v, 1, 1),
             Err(GeometryError::Overflow)
+        );
+    }
+
+    fn pair() -> PaneLayout {
+        PaneLayout::Split(Split {
+            axis: Axis::Horizontal,
+            ratio: 0.5,
+            first: Box::new(PaneLayout::leaf(p(1))),
+            second: Box::new(PaneLayout::leaf(p(2))),
+        })
+    }
+
+    fn bounds() -> CellRect {
+        CellRect {
+            col: 0,
+            row: 0,
+            cols: 80,
+            rows: 24,
+        }
+    }
+
+    #[test]
+    fn float_lifts_the_pane_out_and_clamps_the_overlay() {
+        let layout = pair();
+        let area = bounds();
+        let tiled = layout_to_rects(&layout, area, 2, 1).unwrap();
+        assert_eq!(
+            rects_with_float(&layout, area, 2, 1, None).unwrap(),
+            tiled,
+            "no overlay is the tiled layout"
+        );
+        let hanging = CellRect {
+            col: 70,
+            row: 20,
+            cols: 30,
+            rows: 10,
+        };
+        assert_eq!(
+            rects_with_float(&layout, area, 2, 1, Some((p(9), hanging))).unwrap(),
+            tiled,
+            "an unknown pane does not change the tile"
+        );
+
+        let overlay = CellRect {
+            col: 10,
+            row: 4,
+            cols: 30,
+            rows: 8,
+        };
+        let floated = rects_with_float(&layout, area, 2, 1, Some((p(2), overlay))).unwrap();
+        assert_eq!(floated, vec![(p(1), area), (p(2), overlay)]);
+        assert_eq!(layout.panes(), vec![p(1), p(2)], "the tree stays tiled");
+
+        let clamped = rects_with_float(&layout, area, 2, 1, Some((p(2), hanging))).unwrap();
+        assert_eq!(
+            clamped.last().copied(),
+            Some((
+                p(2),
+                CellRect {
+                    col: 50,
+                    row: 14,
+                    cols: 30,
+                    rows: 10,
+                }
+            )),
+            "a rectangle past the edge shifts inside without shrinking"
+        );
+        let tiny = CellRect {
+            col: 1,
+            row: 1,
+            cols: 1,
+            rows: 1,
+        };
+        assert_eq!(
+            rects_with_float(&layout, area, 2, 1, Some((p(1), tiny)))
+                .unwrap()
+                .last()
+                .copied(),
+            Some((
+                p(1),
+                CellRect {
+                    col: 1,
+                    row: 1,
+                    cols: 2,
+                    rows: 1,
+                }
+            )),
+            "the overlay keeps the minimum size"
+        );
+
+        let only = PaneLayout::leaf(p(1));
+        assert_eq!(
+            rects_with_float(&only, area, 2, 1, Some((p(1), overlay))).unwrap(),
+            vec![(p(1), overlay)]
+        );
+        assert_eq!(
+            rects_with_float(
+                &layout,
+                CellRect {
+                    col: 0,
+                    row: 0,
+                    cols: 1,
+                    rows: 24,
+                },
+                2,
+                1,
+                Some((p(2), overlay)),
+            ),
+            Err(GeometryError::TooSmall)
         );
     }
 }

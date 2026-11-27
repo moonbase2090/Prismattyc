@@ -2123,7 +2123,6 @@ pub struct PtySession {
     child: Box<dyn Child + Send + Sync>,
     /// Output reader; `None` after [`take_reader`] (one-shot).
     reader: Option<Box<dyn Read + Send>>,
-    writer: Option<Box<dyn Write + Send>>,
     /// True after a successful `wait` / `try_wait` / kill+wait so Drop must not
     /// signal a recycled PID (dual-sign).
     reaped: bool,
@@ -2331,13 +2330,11 @@ impl PtySession {
         let child = pair.slave.spawn_command(command)?;
         drop(pair.slave);
         let reader = pair.master.try_clone_reader()?;
-        let writer = pair.master.take_writer()?;
 
         Ok(Self {
             master: pair.master,
             child,
             reader: Some(reader),
-            writer: Some(writer),
             reaped: false,
         })
     }
@@ -2354,12 +2351,10 @@ impl PtySession {
     pub fn adopt(master: std::os::fd::OwnedFd, pid: u32, exited: bool) -> Result<Self> {
         let master = portable_pty::unix::adopt_master(master)?;
         let reader = master.try_clone_reader()?;
-        let writer = master.take_writer()?;
         Ok(Self {
             master,
             child: Box::new(AdoptedChild::new(pid)),
             reader: Some(reader),
-            writer: Some(writer),
             reaped: exited,
         })
     }
@@ -2398,9 +2393,6 @@ impl PtySession {
     /// duplicates exist.
     pub fn abandon(mut self) -> Option<u32> {
         let pid = self.child.process_id();
-        if let Some(writer) = self.writer.take() {
-            release_writer(writer);
-        }
         // The program lives on in the next owner: Drop must not end it.
         self.reaped = true;
         pid
@@ -2436,10 +2428,15 @@ impl PtySession {
             .ok_or_else(|| anyhow!("PTY output reader was already taken"))
     }
 
+    /// The PTY's input writer, made on the first call. Dropping it writes the
+    /// program end of file. A session never made one unless asked, so a pane
+    /// that writes through its own duplicate of the master
+    /// ([`PtySession::dup_master`]) can be released without that end of file
+    /// and without leaking a descriptor.
     pub fn take_input_writer(&mut self) -> Result<Box<dyn Write + Send>> {
-        self.writer
-            .take()
-            .ok_or_else(|| anyhow!("PTY input writer was already taken"))
+        self.master
+            .take_writer()
+            .map_err(|_| anyhow!("PTY input writer was already taken"))
     }
 
     pub fn resize(&self, size: PtySize) -> Result<()> {

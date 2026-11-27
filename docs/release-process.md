@@ -6,8 +6,11 @@ and a signed universal macOS app distributed as a DMG and a zip.
 
 ## Prepare a release
 
-1. Open the release PR on a `release/vX.Y.Z-rc.N-changelog` branch. Set
-   the version in all four files: the `[workspace.package]` version in
+1. Open the release PR on a `release/X.Y.Z` branch. This is the usual
+   final-only flow: the release goes straight to `X.Y.Z` with no
+   release candidate. To ship a release candidate first, use a
+   `release/vX.Y.Z-rc.N-changelog` branch instead (see the end of this
+   step). Set the version in all four files: the `[workspace.package]` version in
    `Cargo.toml`, then `cargo update --workspace` to refresh only the
    workspace entries in `Cargo.lock`. Also update the standalone activity
    monitor lockfile with
@@ -20,10 +23,15 @@ and a signed universal macOS app distributed as a DMG and a zip.
    `cargo metadata --locked --manifest-path <fixture>/Cargo.toml` succeeds.
    `scripts/check-workspace-version.sh` fails when any tracked `Cargo.lock`
    pins a workspace crate at a version other than the workspace version.
-   Then update the README and fidelity-matrix sentences. Add the
-   `## [X.Y.Z]` and `## [X.Y.Z-rc.N]` CHANGELOG sections,
-   and run `scripts/check-workspace-version.sh`. The tag version must match
-   the binaries. For a prerelease tag such as `v0.2.21-rc.1`, binaries may
+   Then update the README and fidelity-matrix sentences. Move the
+   `## [Unreleased]` entries into a new `## [X.Y.Z] - YYYY-MM-DD` CHANGELOG
+   section, leaving `## [Unreleased]` empty above it, and run
+   `scripts/check-workspace-version.sh`. The tag version must match the
+   binaries.
+
+   Release candidates are optional. On a `release/vX.Y.Z-rc.N-changelog`
+   branch, add both the `## [X.Y.Z]` and `## [X.Y.Z-rc.N]` CHANGELOG
+   sections. For a prerelease tag such as `v0.2.21-rc.1`, binaries may
    report the base version `0.2.21`. A later rc or the final release that
    keeps the same base version changes only the CHANGELOG, not the version.
 2. Merge the release source into `main` and complete the release gates in

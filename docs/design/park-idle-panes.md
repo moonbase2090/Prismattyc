@@ -2,8 +2,7 @@
 
 Status: **proposal from a time-boxed spike, not accepted direction.** Nothing
 here changes shipped behavior. It depends on the two-part pane snapshot format
-in `docs/design/pane-snapshot-format.md`, which is being written alongside this
-note.
+in [pane-snapshot-format.md](pane-snapshot-format.md).
 
 Base: `origin/main` `05458628`. Line references are to that commit.
 

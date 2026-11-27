@@ -111,6 +111,8 @@ activity_webhook_url = "https://example.invalid/activity"
 activity_webhook_secret_file = "/tmp/settings-example.key"
 experimental_activity = true
 activity_graph_style = "ascii"
+resume_trusted = ["nvim", "lazygit"]
+resume_allow_elevated = true
 
 [[remote]]
 id = "sample-box"

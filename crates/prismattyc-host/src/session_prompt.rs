@@ -305,17 +305,20 @@ fn apply(host: &mut HostState, target: &Target, name: &str) -> Result<()> {
         Target::Pane { axis } => {
             // A split docks an overlay first. Drop the saved slot even when
             // the spawn fails afterwards, or a later open floats another pane.
-            let had_float = axis.is_some() && host.mux.floated_pane().is_some();
+            let prior_slot = axis
+                .is_some()
+                .then(|| host.mux.floated_window_slot())
+                .flatten();
             let spawned = if host.space_rail.current.is_some() {
                 spawn_owned_space_pane(host, *axis, Some(name))
             } else {
                 spawn_standalone(host, *axis, name)
             };
-            super::persist_docked_float(host, had_float);
+            super::persist_docked_float(host, prior_slot);
             spawned?;
         }
         Target::Layout { count, quadrants } => {
-            let had_float = host.mux.floated_pane().is_some();
+            let prior_slot = host.mux.floated_window_slot();
             let tiled = (|| -> Result<()> {
                 let axis = Some(prismattyc_mux::Axis::Horizontal);
                 if host.space_rail.current.is_some() {
@@ -332,7 +335,7 @@ fn apply(host: &mut HostState, target: &Target, name: &str) -> Result<()> {
                 }
                 Ok(())
             })();
-            super::persist_docked_float(host, had_float);
+            super::persist_docked_float(host, prior_slot);
             tiled?;
         }
         Target::Add { space } => {
@@ -416,7 +419,10 @@ fn apply_blank(host: &mut HostState, target: &Target) -> Result<()> {
         Target::Layout { .. } => Some(prismattyc_mux::Axis::Horizontal),
         _ => bail!("blank terminals are available for new panes and tabs"),
     };
-    let had_float = axis.is_some() && host.mux.floated_pane().is_some();
+    let prior_slot = axis
+        .is_some()
+        .then(|| host.mux.floated_window_slot())
+        .flatten();
     let command = prismattyc_mux::platform::default_shell_command();
     let shell = command[0].clone();
     let args = command[1..].to_vec();
@@ -441,7 +447,7 @@ fn apply_blank(host: &mut HostState, target: &Target) -> Result<()> {
         }
         Ok(())
     })();
-    super::persist_docked_float(host, had_float);
+    super::persist_docked_float(host, prior_slot);
     spawned?;
     finish_arrangement(host);
     Ok(())

@@ -4180,6 +4180,15 @@ impl MuxRuntime {
         Ok(true)
     }
 
+    /// Window slot of the active overlay, before a later edit moves that tab.
+    pub(crate) fn floated_window_slot(&self) -> Option<u32> {
+        self.floated_pane()?;
+        let placement = self.floated?;
+        let window = self.domain.pane_owner(placement.pane)?;
+        let slot = self.window_ids().iter().position(|id| *id == window)?;
+        u32::try_from(slot).ok()
+    }
+
     /// The active overlay as a record keyed by session and place.
     pub(crate) fn float_record(&self, space: &str) -> Option<SavedFloat> {
         let placement = self.floated?;
@@ -4208,6 +4217,19 @@ impl MuxRuntime {
     /// Replace this window's saved overlay with the live one, or drop it
     /// when the window is tiled.
     pub(crate) fn sync_saved_float(&self, space: &str, records: &mut SavedFloats) {
+        self.sync_saved_float_window(space, records, None);
+    }
+
+    /// Like `sync_saved_float`, but `prior_window` is the overlay's tab
+    /// before an edit that moves or closes that tab. The selected tab
+    /// afterwards can be a different window, and clearing only that index
+    /// leaves the old record to float another pane.
+    pub(crate) fn sync_saved_float_window(
+        &self,
+        space: &str,
+        records: &mut SavedFloats,
+        prior_window: Option<u32>,
+    ) {
         let Some(session) = self
             .floated
             .and_then(|placement| self.pane_session_name(placement.pane))
@@ -4215,7 +4237,10 @@ impl MuxRuntime {
         else {
             return;
         };
-        let Ok(window_slot) = u32::try_from(self.selected_tab_index()) else {
+        let Ok(window_slot) = prior_window
+            .map(Ok)
+            .unwrap_or_else(|| u32::try_from(self.selected_tab_index()))
+        else {
             return;
         };
         records.floats.retain(|saved| {
@@ -9534,6 +9559,118 @@ mod tests {
         );
         assert_eq!(runtime.floated_pane(), None);
         assert!(runtime.rects().all(|(_, rect)| rect != overlay));
+    }
+
+    #[test]
+    fn reorder_after_a_float_drops_the_saved_window() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let overlay = CellRect {
+            col: 10,
+            row: 4,
+            cols: 30,
+            rows: 8,
+        };
+        let right = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        runtime.new_tab("/bin/sh", &[]).unwrap();
+        runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        runtime.select_tab(0).unwrap();
+        assert!(runtime.float_pane(right, overlay).unwrap());
+        let mut records = SavedFloats::default();
+        runtime.sync_saved_float("work", &mut records);
+        assert_eq!(records.floats[0].window_slot, 0);
+        assert_eq!(records.floats[0].pane_slot, 1);
+
+        let prior = runtime.floated_window_slot();
+        assert_eq!(prior, Some(0));
+        assert!(runtime.reorder_tab(0, 1).unwrap());
+        assert_eq!(runtime.floated_pane(), None, "a reorder docks the overlay");
+        assert_eq!(runtime.selected_tab_index(), 1);
+        runtime.sync_saved_float_window("work", &mut records, prior);
+        assert!(records.floats.is_empty(), "the old window slot is cleared");
+        runtime.select_tab(0).unwrap();
+        assert!(
+            !runtime.apply_open_space_float("work", &records).unwrap(),
+            "the tab that slid into the old slot does not float"
+        );
+        runtime.select_tab(1).unwrap();
+        assert!(!runtime.apply_open_space_float("work", &records).unwrap());
+        assert_eq!(runtime.floated_pane(), None);
+    }
+
+    #[test]
+    fn close_after_a_float_drops_the_saved_window() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let overlay = CellRect {
+            col: 10,
+            row: 4,
+            cols: 30,
+            rows: 8,
+        };
+        runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        runtime.new_tab("/bin/sh", &[]).unwrap();
+        let right = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        assert!(runtime.float_pane(right, overlay).unwrap());
+        let mut records = SavedFloats::default();
+        runtime.sync_saved_float("work", &mut records);
+        assert_eq!(records.floats[0].window_slot, 1);
+
+        let prior = runtime.floated_window_slot();
+        assert_eq!(prior, Some(1));
+        assert!(runtime.close_tab().unwrap());
+        assert_eq!(runtime.tab_count(), 1);
+        assert_eq!(
+            runtime.floated_pane(),
+            None,
+            "closing the tab drops the overlay"
+        );
+        runtime.sync_saved_float_window("work", &mut records, prior);
+        assert!(
+            records.floats.is_empty(),
+            "the closed tab's saved overlay is dropped"
+        );
+        assert!(
+            !runtime.apply_open_space_float("work", &records).unwrap(),
+            "the remaining tab does not restore the closed slot"
+        );
+        assert_eq!(runtime.floated_pane(), None);
+    }
+
+    #[test]
+    fn close_of_the_floated_pane_drops_the_saved_slot() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let left = runtime.focused_id();
+        let right = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        let overlay = CellRect {
+            col: 10,
+            row: 4,
+            cols: 30,
+            rows: 8,
+        };
+        assert!(runtime.float_pane(right, overlay).unwrap());
+        let mut records = SavedFloats::default();
+        runtime.sync_saved_float("work", &mut records);
+        assert_eq!(records.floats[0].pane_slot, 1);
+        runtime.focus(right);
+        assert!(runtime.close_focused().unwrap());
+        assert_eq!(runtime.floated_pane(), None);
+        assert_eq!(runtime.focused_id(), left);
+        runtime.sync_saved_float("work", &mut records);
+        assert!(
+            records.floats.is_empty(),
+            "closing the floated pane drops its saved slot"
+        );
+        assert!(!runtime.apply_open_space_float("work", &records).unwrap());
+        assert_eq!(runtime.floated_pane(), None);
     }
 
     #[test]

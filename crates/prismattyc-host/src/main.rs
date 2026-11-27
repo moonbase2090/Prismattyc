@@ -11183,11 +11183,30 @@ fn restore_open_space_float(host: &mut HostState, space: &str) {
 }
 
 /// A layout edit that docked an overlay must drop the saved record.
-/// The record names a pane by its slot, and the edit can put a different
-/// pane in that slot.
-fn persist_docked_float(host: &mut HostState, had_float: bool) {
-    if had_float && host.mux.floated_pane().is_none() {
-        store_current_float(host);
+/// `prior_slot` is that overlay's tab before the edit. The record names a
+/// pane by its slot, and clearing the tab selected afterwards can leave the
+/// old tab's record to float a different pane.
+fn persist_docked_float(host: &mut HostState, prior_slot: Option<u32>) {
+    let Some(prior_slot) = prior_slot else {
+        return;
+    };
+    if host.mux.floated_pane().is_some() {
+        return;
+    }
+    let Some(space) = host.space_rail.current.clone() else {
+        return;
+    };
+    let mut records = match prismattyc_mux::load_floats(&spaces_dir()) {
+        Ok(records) => records,
+        Err(error) => {
+            eprintln!("prismattyc-host: float record was not read: {error:#}");
+            return;
+        }
+    };
+    host.mux
+        .sync_saved_float_window(&space, &mut records, Some(prior_slot));
+    if let Err(error) = prismattyc_mux::save_floats(&spaces_dir(), &records) {
+        eprintln!("prismattyc-host: float record was not saved: {error:#}");
     }
 }
 
@@ -15916,7 +15935,7 @@ fn finish_strip_drag(host: &mut HostState) -> bool {
         }
         return true;
     }
-    let had_float = host.mux.floated_pane().is_some();
+    let prior_slot = host.mux.floated_window_slot();
     let stride = host.window.inner_size().width as usize;
     let hit = host.mux.tab_strip_hit(x as usize, y as usize, stride, true);
     let swap = match drag.kind {
@@ -15959,7 +15978,7 @@ fn finish_strip_drag(host: &mut HostState) -> bool {
             .set_title(&window_title(&host.mux, show_tab_strip(host)));
         host.dirty = true;
     }
-    persist_docked_float(host, had_float);
+    persist_docked_float(host, prior_slot);
     App::refit_geom(host, host.window.inner_size(), Some("tab drag"));
     true
 }
@@ -18233,7 +18252,7 @@ fn apply_arrange_command(
     program: &str,
     child_args: &[String],
 ) -> bool {
-    let had_float = host.mux.floated_pane().is_some();
+    let prior_slot = host.mux.floated_window_slot();
     if host.space_rail.current.is_some() {
         while host.mux.active_pane_count() < target.capacity() {
             if let Err(error) =
@@ -18243,7 +18262,7 @@ fn apply_arrange_command(
                 host.window.set_title(&format!("Prismattyc — {error}"));
                 host.dirty = true;
                 observe_host_action(host, action, false);
-                persist_docked_float(host, had_float);
+                persist_docked_float(host, prior_slot);
                 return false;
             }
         }
@@ -18285,7 +18304,7 @@ fn apply_arrange_command(
             observe_host_action(host, action, false);
         }
     }
-    persist_docked_float(host, had_float);
+    persist_docked_float(host, prior_slot);
     false
 }
 
@@ -18295,14 +18314,16 @@ fn apply_mux_layout_command(
     program: &str,
     child_args: &[String],
 ) -> Result<MuxApplyResult> {
-    let had_float = matches!(
+    let prior_slot = matches!(
         command,
         MuxLayoutCommand::Split(_)
             | MuxLayoutCommand::EvenColumns(_)
             | MuxLayoutCommand::EvenQuadrants
-    ) && host.mux.floated_pane().is_some();
+    )
+    .then(|| host.mux.floated_window_slot())
+    .flatten();
     let result = apply_mux_layout_command_body(host, command, program, child_args);
-    persist_docked_float(host, had_float);
+    persist_docked_float(host, prior_slot);
     result
 }
 
@@ -18383,15 +18404,15 @@ fn apply_mux_navigation_command(
     let changed = match command {
         MuxNavigationCommand::Focus(direction) => host.mux.focus_neighbor(direction),
         MuxNavigationCommand::SwapPane(delta) => {
-            let had_float = host.mux.floated_pane().is_some();
+            let prior_slot = host.mux.floated_window_slot();
             let result = host.mux.swap_focused(delta).map(MuxApplyResult::Changed);
-            persist_docked_float(host, had_float);
+            persist_docked_float(host, prior_slot);
             return result;
         }
         MuxNavigationCommand::RotatePanes(delta) => {
-            let had_float = host.mux.floated_pane().is_some();
+            let prior_slot = host.mux.floated_window_slot();
             let result = host.mux.rotate_panes(delta).map(MuxApplyResult::Changed);
-            persist_docked_float(host, had_float);
+            persist_docked_float(host, prior_slot);
             return result;
         }
         MuxNavigationCommand::FocusLastPane => host.mux.focus_last_pane(),
@@ -18408,9 +18429,9 @@ fn apply_mux_tab_command(
     program: &str,
     child_args: &[String],
 ) -> Result<MuxApplyResult> {
-    let had_float = host.mux.floated_pane().is_some();
+    let prior_slot = host.mux.floated_window_slot();
     let result = apply_mux_tab_command_body(host, command, program, child_args);
-    persist_docked_float(host, had_float);
+    persist_docked_float(host, prior_slot);
     result
 }
 
@@ -18548,10 +18569,10 @@ fn handle_mux_command(
         }
     }
     if let MuxCommandPlan::Preset(preset) = plan {
-        let had_float = host.mux.floated_pane().is_some();
+        let prior_slot = host.mux.floated_window_slot();
         match host.mux.apply_preset(preset) {
             Ok(mux::PresetOutcome::Applied) => {
-                persist_docked_float(host, had_float);
+                persist_docked_float(host, prior_slot);
                 mark_layout_dirty(host);
                 App::refit_geom(host, host.window.inner_size(), Some("mux change"));
                 host.app_mouse_button = None;
@@ -18571,7 +18592,7 @@ fn handle_mux_command(
                 host.window.set_title(&format!("Prismattyc — {error}"));
                 host.dirty = true;
                 observe_host_action(host, action, false);
-                persist_docked_float(host, had_float);
+                persist_docked_float(host, prior_slot);
             }
         }
         return false;

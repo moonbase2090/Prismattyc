@@ -266,7 +266,7 @@ impl MuxRuntime {
             }
         }
         let window = view.window.context("restored view has no tabs")?;
-        let rects = rects_for(&domain, window, self.cols, self.rows, self.geom, None)?;
+        let rects = rects_for(&domain, window, self.cols, self.rows, self.geom, None, None)?;
         let mut panes = HashMap::new();
         for (id, source, runtime) in staged {
             panes.insert(

@@ -20,6 +20,7 @@ pub mod daemon_lock;
 pub mod default_space;
 mod domain;
 pub mod executable;
+mod float_record;
 mod geometry;
 pub mod host_register;
 pub mod host_render_status;
@@ -91,11 +92,12 @@ pub use config::{
     ConfigCommit, MuxKeyKind, MuxKeySpec, MuxSection, SpaceOpenRunsCommands, MUX_KEYS,
 };
 pub use domain::{ClientView, Domain, DomainError, Pane, Session, Window};
+pub use float_record::{float_panes_path, load_floats, save_floats, SavedFloat, SavedFloats};
 pub use geometry::{
     apply_arrangement, even_horizontal_row, even_two_row_grid, even_vertical_column,
-    layout_to_rects, main_horizontal, main_vertical, subtree_min_cols, subtree_min_rows,
-    suggested_focus_after_close, try_subtree_min_cols, try_subtree_min_rows, Arrangement, CellRect,
-    GeometryError, DEFAULT_MIN_COLS, DEFAULT_MIN_ROWS,
+    layout_to_rects, main_horizontal, main_vertical, rects_with_float, subtree_min_cols,
+    subtree_min_rows, suggested_focus_after_close, try_subtree_min_cols, try_subtree_min_rows,
+    Arrangement, CellRect, GeometryError, DEFAULT_MIN_COLS, DEFAULT_MIN_ROWS,
 };
 pub use host_register::{
     attach_pty_fallback, host_ack_path_from_socket, host_pane_nested, host_pid_path_from_socket,

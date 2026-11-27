@@ -11182,6 +11182,15 @@ fn restore_open_space_float(host: &mut HostState, space: &str) {
     }
 }
 
+/// A layout edit that docked an overlay must drop the saved record.
+/// The record names a pane by its slot, and the edit can put a different
+/// pane in that slot.
+fn persist_docked_float(host: &mut HostState, had_float: bool) {
+    if had_float && host.mux.floated_pane().is_none() {
+        store_current_float(host);
+    }
+}
+
 /// Write this window's overlay beside the spaces directory.
 /// A window with no current space does not touch the file.
 fn store_current_float(host: &mut HostState) {
@@ -15907,6 +15916,7 @@ fn finish_strip_drag(host: &mut HostState) -> bool {
         }
         return true;
     }
+    let had_float = host.mux.floated_pane().is_some();
     let stride = host.window.inner_size().width as usize;
     let hit = host.mux.tab_strip_hit(x as usize, y as usize, stride, true);
     let swap = match drag.kind {
@@ -15949,6 +15959,7 @@ fn finish_strip_drag(host: &mut HostState) -> bool {
             .set_title(&window_title(&host.mux, show_tab_strip(host)));
         host.dirty = true;
     }
+    persist_docked_float(host, had_float);
     App::refit_geom(host, host.window.inner_size(), Some("tab drag"));
     true
 }
@@ -18222,6 +18233,7 @@ fn apply_arrange_command(
     program: &str,
     child_args: &[String],
 ) -> bool {
+    let had_float = host.mux.floated_pane().is_some();
     if host.space_rail.current.is_some() {
         while host.mux.active_pane_count() < target.capacity() {
             if let Err(error) =
@@ -18231,6 +18243,7 @@ fn apply_arrange_command(
                 host.window.set_title(&format!("Prismattyc — {error}"));
                 host.dirty = true;
                 observe_host_action(host, action, false);
+                persist_docked_float(host, had_float);
                 return false;
             }
         }
@@ -18272,10 +18285,28 @@ fn apply_arrange_command(
             observe_host_action(host, action, false);
         }
     }
+    persist_docked_float(host, had_float);
     false
 }
 
 fn apply_mux_layout_command(
+    host: &mut HostState,
+    command: MuxLayoutCommand,
+    program: &str,
+    child_args: &[String],
+) -> Result<MuxApplyResult> {
+    let had_float = matches!(
+        command,
+        MuxLayoutCommand::Split(_)
+            | MuxLayoutCommand::EvenColumns(_)
+            | MuxLayoutCommand::EvenQuadrants
+    ) && host.mux.floated_pane().is_some();
+    let result = apply_mux_layout_command_body(host, command, program, child_args);
+    persist_docked_float(host, had_float);
+    result
+}
+
+fn apply_mux_layout_command_body(
     host: &mut HostState,
     command: MuxLayoutCommand,
     program: &str,
@@ -18352,10 +18383,16 @@ fn apply_mux_navigation_command(
     let changed = match command {
         MuxNavigationCommand::Focus(direction) => host.mux.focus_neighbor(direction),
         MuxNavigationCommand::SwapPane(delta) => {
-            return host.mux.swap_focused(delta).map(MuxApplyResult::Changed)
+            let had_float = host.mux.floated_pane().is_some();
+            let result = host.mux.swap_focused(delta).map(MuxApplyResult::Changed);
+            persist_docked_float(host, had_float);
+            return result;
         }
         MuxNavigationCommand::RotatePanes(delta) => {
-            return host.mux.rotate_panes(delta).map(MuxApplyResult::Changed)
+            let had_float = host.mux.floated_pane().is_some();
+            let result = host.mux.rotate_panes(delta).map(MuxApplyResult::Changed);
+            persist_docked_float(host, had_float);
+            return result;
         }
         MuxNavigationCommand::FocusLastPane => host.mux.focus_last_pane(),
         MuxNavigationCommand::LastTab => {
@@ -18366,6 +18403,18 @@ fn apply_mux_navigation_command(
 }
 
 fn apply_mux_tab_command(
+    host: &mut HostState,
+    command: MuxTabCommand,
+    program: &str,
+    child_args: &[String],
+) -> Result<MuxApplyResult> {
+    let had_float = host.mux.floated_pane().is_some();
+    let result = apply_mux_tab_command_body(host, command, program, child_args);
+    persist_docked_float(host, had_float);
+    result
+}
+
+fn apply_mux_tab_command_body(
     host: &mut HostState,
     command: MuxTabCommand,
     program: &str,
@@ -18499,8 +18548,10 @@ fn handle_mux_command(
         }
     }
     if let MuxCommandPlan::Preset(preset) = plan {
+        let had_float = host.mux.floated_pane().is_some();
         match host.mux.apply_preset(preset) {
             Ok(mux::PresetOutcome::Applied) => {
+                persist_docked_float(host, had_float);
                 mark_layout_dirty(host);
                 App::refit_geom(host, host.window.inner_size(), Some("mux change"));
                 host.app_mouse_button = None;
@@ -18520,6 +18571,7 @@ fn handle_mux_command(
                 host.window.set_title(&format!("Prismattyc — {error}"));
                 host.dirty = true;
                 observe_host_action(host, action, false);
+                persist_docked_float(host, had_float);
             }
         }
         return false;

@@ -303,26 +303,37 @@ fn apply(host: &mut HostState, target: &Target, name: &str) -> Result<()> {
     }
     match target {
         Target::Pane { axis } => {
-            if host.space_rail.current.is_some() {
-                spawn_owned_space_pane(host, *axis, Some(name))?;
+            // A split docks an overlay first. Drop the saved slot even when
+            // the spawn fails afterwards, or a later open floats another pane.
+            let had_float = axis.is_some() && host.mux.floated_pane().is_some();
+            let spawned = if host.space_rail.current.is_some() {
+                spawn_owned_space_pane(host, *axis, Some(name))
             } else {
-                spawn_standalone(host, *axis, name)?;
-            }
+                spawn_standalone(host, *axis, name)
+            };
+            super::persist_docked_float(host, had_float);
+            spawned?;
         }
         Target::Layout { count, quadrants } => {
-            let axis = Some(prismattyc_mux::Axis::Horizontal);
-            if host.space_rail.current.is_some() {
-                spawn_owned_space_pane(host, axis, Some(name))?;
-            } else {
-                spawn_standalone(host, axis, name)?;
-            }
-            if host.mux.active_pane_count() >= *count {
-                if *quadrants {
-                    host.mux.ensure_even_quadrants("/bin/sh", &[])?;
+            let had_float = host.mux.floated_pane().is_some();
+            let tiled = (|| -> Result<()> {
+                let axis = Some(prismattyc_mux::Axis::Horizontal);
+                if host.space_rail.current.is_some() {
+                    spawn_owned_space_pane(host, axis, Some(name))?;
                 } else {
-                    host.mux.ensure_even_columns("/bin/sh", &[], *count)?;
+                    spawn_standalone(host, axis, name)?;
                 }
-            }
+                if host.mux.active_pane_count() >= *count {
+                    if *quadrants {
+                        host.mux.ensure_even_quadrants("/bin/sh", &[])?;
+                    } else {
+                        host.mux.ensure_even_columns("/bin/sh", &[], *count)?;
+                    }
+                }
+                Ok(())
+            })();
+            super::persist_docked_float(host, had_float);
+            tiled?;
         }
         Target::Add { space } => {
             run(&["space", "add", space, "--name", name])?;
@@ -405,27 +416,33 @@ fn apply_blank(host: &mut HostState, target: &Target) -> Result<()> {
         Target::Layout { .. } => Some(prismattyc_mux::Axis::Horizontal),
         _ => bail!("blank terminals are available for new panes and tabs"),
     };
+    let had_float = axis.is_some() && host.mux.floated_pane().is_some();
     let command = prismattyc_mux::platform::default_shell_command();
     let shell = command[0].clone();
     let args = command[1..].to_vec();
-    let pane = if let Some(axis) = axis {
-        host.mux.split_focused(&shell, &args, axis, 0.5)?
-    } else {
-        host.mux.new_tab(&shell, &args)?;
-        host.mux
-            .rename_window(host.mux.active_window(), "Terminal")?;
-        host.mux.focused_id()
-    };
-    host.mux.retain_local_terminal(pane);
-    if let Target::Layout { count, quadrants } = target {
-        if host.mux.active_pane_count() >= *count {
-            if *quadrants {
-                host.mux.ensure_even_quadrants(&shell, &args)?;
-            } else {
-                host.mux.ensure_even_columns(&shell, &args, *count)?;
+    let spawned = (|| -> Result<()> {
+        let pane = if let Some(axis) = axis {
+            host.mux.split_focused(&shell, &args, axis, 0.5)?
+        } else {
+            host.mux.new_tab(&shell, &args)?;
+            host.mux
+                .rename_window(host.mux.active_window(), "Terminal")?;
+            host.mux.focused_id()
+        };
+        host.mux.retain_local_terminal(pane);
+        if let Target::Layout { count, quadrants } = target {
+            if host.mux.active_pane_count() >= *count {
+                if *quadrants {
+                    host.mux.ensure_even_quadrants(&shell, &args)?;
+                } else {
+                    host.mux.ensure_even_columns(&shell, &args, *count)?;
+                }
             }
         }
-    }
+        Ok(())
+    })();
+    super::persist_docked_float(host, had_float);
+    spawned?;
     finish_arrangement(host);
     Ok(())
 }

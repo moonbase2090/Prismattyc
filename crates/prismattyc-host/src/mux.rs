@@ -9493,6 +9493,50 @@ mod tests {
     }
 
     #[test]
+    fn split_after_a_float_drops_the_saved_slot() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let left = runtime.focused_id();
+        let right = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        let overlay = CellRect {
+            col: 10,
+            row: 4,
+            cols: 30,
+            rows: 8,
+        };
+        assert!(runtime.float_pane(right, overlay).unwrap());
+        let mut records = SavedFloats::default();
+        runtime.sync_saved_float("work", &mut records);
+        assert_eq!(records.floats[0].pane_slot, 1);
+
+        runtime.focus(left);
+        let inserted = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        assert_eq!(runtime.floated_pane(), None, "a split docks the overlay");
+        let order = runtime.active_pane_ids();
+        assert_eq!(
+            order.get(1).copied(),
+            Some(inserted),
+            "the saved slot now names the pane the split inserted"
+        );
+        assert_ne!(order.get(1).copied(), Some(right));
+
+        runtime.sync_saved_float("work", &mut records);
+        assert!(
+            records.floats.is_empty(),
+            "the layout edit drops the saved overlay"
+        );
+        assert!(
+            !runtime.apply_open_space_float("work", &records).unwrap(),
+            "reopening does not restore the old slot"
+        );
+        assert_eq!(runtime.floated_pane(), None);
+        assert!(runtime.rects().all(|(_, rect)| rect != overlay));
+    }
+
+    #[test]
     fn zoom_is_a_noop_on_a_single_pane() {
         let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
         assert!(!runtime.toggle_zoom().unwrap());

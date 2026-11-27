@@ -5553,12 +5553,14 @@ fn chrome_overlay(host: &HostState) -> a11y::OverlayKind {
     }
     if host.space_panel.is_some() {
         if let Some((header, rows)) = space_panel::rows(host) {
+            // The menu selects among actions; the reader lists every line.
+            let selected = space_panel::selected_row(host).unwrap_or(0);
             return a11y::OverlayKind::Palette {
                 rows: rows
                     .into_iter()
                     .map(|row| format!("{header}: {} {}", row.name, row.describe))
                     .collect(),
-                selected: host.context_menu.as_ref().map_or(0, |menu| menu.selected),
+                selected,
             };
         }
     }
@@ -12037,12 +12039,14 @@ fn handle_context_menu_key(
     }
     let _menu = host.context_menu.as_ref()?;
     let (_, rows) = context_menu_rows(host)?;
+    // Detail and status lines are painted but never selected.
+    let focusable = rows.iter().filter(|row| row.kind.focusable()).count();
     let logical = overlay_key(event);
     let verdict = host
         .context_menu
         .as_mut()
         .expect("context menu is open")
-        .key(&logical, host.modifiers, rows.len());
+        .key(&logical, host.modifiers, focusable);
     Some(match verdict {
         ContextMenuVerdict::Consumed => {
             host.dirty = true;

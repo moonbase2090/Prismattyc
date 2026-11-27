@@ -202,8 +202,10 @@ def main():
             return rows if any(text.startswith(label + ':') for text in rows) else None
         rows = wait(ready_rows, 'action ' + label)
         index = next(i for i, text in enumerate(rows) if text.startswith(label + ':'))
+        # Arrow keys visit only focusable rows; detail lines are skipped.
+        focusable = status()['space_details'].get('focusable', list(range(len(rows))))
         key(115)  # Home.
-        for _ in range(index):
+        for _ in range(focusable.index(index)):
             key(125)  # Down.
         key(36)  # Enter.
 

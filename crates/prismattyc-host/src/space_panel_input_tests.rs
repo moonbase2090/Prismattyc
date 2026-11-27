@@ -1010,6 +1010,7 @@ fn panel(space: &str, owner: Option<String>, choice: Option<Choice>) -> Panel {
                     label: "row".into(),
                     detail: String::new(),
                     choice,
+                    kind: crate::palette::RowKind::Action,
                 }]
             })
             .unwrap_or_default(),
@@ -1033,11 +1034,17 @@ fn labels(host: &HostState) -> Vec<String> {
         .collect()
 }
 
+/// The menu selection for the row named `label`. The menu counts only
+/// focusable rows, so this is not the row's position on update pages.
 fn index_of(host: &HostState, label: &str) -> usize {
-    labels(host)
+    let row = labels(host)
         .iter()
         .position(|row| row == label)
-        .unwrap_or_else(|| panic!("missing row {label}: {:?}", labels(host)))
+        .unwrap_or_else(|| panic!("missing row {label}: {:?}", labels(host)));
+    host.space_panel
+        .as_ref()
+        .and_then(|panel| panel.selection_of(row))
+        .unwrap_or_else(|| panic!("row {label} does not take focus"))
 }
 
 fn text_page(host: &HostState) -> Option<String> {

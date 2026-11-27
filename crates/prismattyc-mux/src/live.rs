@@ -176,6 +176,9 @@ struct LivePane {
     reader_thread: thread::JoinHandle<()>,
     #[cfg(all(test, windows))]
     reader_publish_delay_ms: Arc<AtomicU64>,
+    /// The reader and writer threads, which a live update can stop.
+    #[cfg(unix)]
+    io: PaneIo,
     to_child_tx: mpsc::SyncSender<Vec<u8>>,
     cols: usize,
     outer_rows: usize,
@@ -260,6 +263,154 @@ impl CursorRequest {
     }
 }
 
+/// A pane's reader and writer threads on unix.
+///
+/// The reader waits on the PTY and on a wake socket together, so a live update
+/// can stop it without reading more: output it has not read stays in the PTY
+/// for the next pmux server. Both threads own duplicates of the master, so
+/// stopping them never closes the pane's PTY or sends its program end of file.
+#[cfg(unix)]
+struct PaneIo {
+    wake: std::os::unix::net::UnixStream,
+    reader: thread::JoinHandle<()>,
+    writer: thread::JoinHandle<()>,
+}
+
+/// A pane's output receiver, input sender and the threads behind them.
+#[cfg(unix)]
+type PaneIoParts = (
+    mpsc::Receiver<std::io::Result<PtyChunk>>,
+    mpsc::SyncSender<Vec<u8>>,
+    PaneIo,
+);
+
+#[cfg(unix)]
+impl PaneIo {
+    fn start(session: &PtySession, pane_id: u64) -> Result<PaneIoParts> {
+        let mut child_writer = std::fs::File::from(session.dup_master()?);
+        let pty_reader = std::fs::File::from(session.dup_master()?);
+        let (wake, wake_reader) = std::os::unix::net::UnixStream::pair()?;
+
+        let (to_child_tx, to_child_rx) = mpsc::sync_channel::<Vec<u8>>(TO_CHILD_CAP);
+        let writer = thread::Builder::new()
+            .name(format!("prism-server-pane-{pane_id}-write"))
+            .spawn(move || {
+                while let Ok(bytes) = to_child_rx.recv() {
+                    if child_writer.write_all(&bytes).is_err() {
+                        break;
+                    }
+                    if child_writer.flush().is_err() {
+                        break;
+                    }
+                }
+            })?;
+
+        let (from_pty_tx, from_pty_rx) =
+            mpsc::sync_channel::<std::io::Result<PtyChunk>>(FROM_PTY_CAP);
+        let budget = ByteBudget::new(PTY_OUTPUT_BUDGET_BYTES);
+        let reader = thread::Builder::new()
+            .name(format!("prism-server-pane-{pane_id}-read"))
+            .spawn(move || read_pty(pty_reader, &wake_reader, &from_pty_tx, &budget))?;
+        Ok((
+            from_pty_rx,
+            to_child_tx,
+            Self {
+                wake,
+                reader,
+                writer,
+            },
+        ))
+    }
+
+    /// Ask both threads to stop. The writer finishes the input already queued
+    /// once its sender is gone; the reader stops at its next wait.
+    fn request_stop(&mut self) {
+        let _ = (&self.wake).write_all(b"s");
+    }
+
+    fn stopped(&self) -> bool {
+        self.reader.is_finished() && self.writer.is_finished()
+    }
+}
+
+/// Read PTY output until end of file, an error, or a byte on `wake`.
+#[cfg(unix)]
+fn read_pty(
+    mut pty: std::fs::File,
+    wake: &std::os::unix::net::UnixStream,
+    tx: &mpsc::SyncSender<std::io::Result<PtyChunk>>,
+    budget: &ByteBudget,
+) {
+    use std::os::fd::AsRawFd;
+
+    let mut buffer = vec![0u8; 8192];
+    loop {
+        let mut fds = [
+            libc::pollfd {
+                fd: pty.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: wake.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        // SAFETY: `fds` is a valid array of two pollfd entries.
+        let ready = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+        if ready < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            let _ = tx.send(Err(error));
+            return;
+        }
+        if fds[1].revents != 0 {
+            // Stopped for a live update: leave unread output in the PTY.
+            return;
+        }
+        if fds[0].revents == 0 {
+            continue;
+        }
+        let count = match pty.read(&mut buffer) {
+            Ok(count) => count,
+            // Every slave is closed.
+            Err(error) if error.raw_os_error() == Some(libc::EIO) => 0,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                let _ = tx.send(Err(error));
+                return;
+            }
+        };
+        if count == 0 {
+            let _ = tx.send(Ok(PtyChunk::eof()));
+            return;
+        }
+        let Some((bytes, reservation)) = budget
+            .admit(PANE_FRAME_OVERHEAD.saturating_add(count), || {
+                buffer[..count].to_vec()
+            })
+        else {
+            let _ = tx.send(Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "PTY output chunk exceeds byte budget",
+            )));
+            return;
+        };
+        if tx
+            .send(Ok(PtyChunk {
+                bytes,
+                _reservation: Some(reservation),
+            }))
+            .is_err()
+        {
+            return;
+        }
+    }
+}
+
 /// Discovery values stamped into the pane child environment.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct GuestStamp<'a> {
@@ -293,7 +444,7 @@ impl LivePane {
                 env.remove(crate::program_resume::TOKEN_ENV);
             }
         }
-        let mut session = PtySession::spawn_config(
+        let session = PtySession::spawn_config(
             &spawn.program,
             &spawn.argv,
             spawn.cwd.as_deref(),
@@ -301,6 +452,8 @@ impl LivePane {
             size,
         )
         .with_context(|| format!("spawn {:?} for pane {pane_id}", spawn.program))?;
+        #[cfg(windows)]
+        let mut session = session;
         // Capture seat identity at spawn from the inject map — never re-read after death
         // (ADR-0037 §3 / wire contract B). Empty string is treated as absent (not a seat).
         let hive_cell = spawn
@@ -309,80 +462,94 @@ impl LivePane {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
         let child_pid = session.process_id();
-        let mut child_writer = session.take_input_writer()?;
-        let mut pty_reader = session.take_reader()?;
+        #[cfg(unix)]
+        let (from_pty_rx, to_child_tx, io) = PaneIo::start(&session, pane_id)?;
+        #[cfg(windows)]
+        let (from_pty_rx, to_child_tx, reader_thread, reader_publish_delay_ms) = {
+            let mut child_writer = session.take_input_writer()?;
+            let mut pty_reader = session.take_reader()?;
 
-        let (to_child_tx, to_child_rx) = mpsc::sync_channel::<Vec<u8>>(TO_CHILD_CAP);
-        thread::Builder::new()
-            .name(format!("prism-server-pane-{pane_id}-write"))
-            .spawn(move || {
-                while let Ok(bytes) = to_child_rx.recv() {
-                    if child_writer.write_all(&bytes).is_err() {
-                        break;
-                    }
-                    if child_writer.flush().is_err() {
-                        break;
-                    }
-                }
-            })?;
-
-        let (from_pty_tx, from_pty_rx) =
-            mpsc::sync_channel::<std::io::Result<PtyChunk>>(FROM_PTY_CAP);
-        let output_budget = ByteBudget::new(PTY_OUTPUT_BUDGET_BYTES);
-        let reader_budget = output_budget.clone();
-        #[cfg(all(test, windows))]
-        let reader_publish_delay_ms = Arc::new(AtomicU64::new(0));
-        #[cfg(all(test, windows))]
-        let reader_publish_delay_thread = Arc::clone(&reader_publish_delay_ms);
-        let reader_thread = thread::Builder::new()
-            .name(format!("prism-server-pane-{pane_id}-read"))
-            .spawn(move || {
-                let mut buffer = vec![0u8; 8192];
-                loop {
-                    match pty_reader.read(&mut buffer) {
-                        Ok(0) => {
-                            let _ = from_pty_tx.send(Ok(PtyChunk::eof()));
+            let (to_child_tx, to_child_rx) = mpsc::sync_channel::<Vec<u8>>(TO_CHILD_CAP);
+            thread::Builder::new()
+                .name(format!("prism-server-pane-{pane_id}-write"))
+                .spawn(move || {
+                    while let Ok(bytes) = to_child_rx.recv() {
+                        if child_writer.write_all(&bytes).is_err() {
                             break;
                         }
-                        Ok(count) => {
-                            #[cfg(all(test, windows))]
-                            {
-                                use std::sync::atomic::Ordering;
-                                let delay_ms = reader_publish_delay_thread.load(Ordering::Acquire);
-                                if delay_ms > 0 {
-                                    thread::sleep(Duration::from_millis(delay_ms));
+                        if child_writer.flush().is_err() {
+                            break;
+                        }
+                    }
+                })?;
+
+            let (from_pty_tx, from_pty_rx) =
+                mpsc::sync_channel::<std::io::Result<PtyChunk>>(FROM_PTY_CAP);
+            let output_budget = ByteBudget::new(PTY_OUTPUT_BUDGET_BYTES);
+            let reader_budget = output_budget.clone();
+            #[cfg(all(test, windows))]
+            let reader_publish_delay_ms = Arc::new(AtomicU64::new(0));
+            #[cfg(all(test, windows))]
+            let reader_publish_delay_thread = Arc::clone(&reader_publish_delay_ms);
+            let reader_thread = thread::Builder::new()
+                .name(format!("prism-server-pane-{pane_id}-read"))
+                .spawn(move || {
+                    let mut buffer = vec![0u8; 8192];
+                    loop {
+                        match pty_reader.read(&mut buffer) {
+                            Ok(0) => {
+                                let _ = from_pty_tx.send(Ok(PtyChunk::eof()));
+                                break;
+                            }
+                            Ok(count) => {
+                                #[cfg(all(test, windows))]
+                                {
+                                    use std::sync::atomic::Ordering;
+                                    let delay_ms =
+                                        reader_publish_delay_thread.load(Ordering::Acquire);
+                                    if delay_ms > 0 {
+                                        thread::sleep(Duration::from_millis(delay_ms));
+                                    }
+                                }
+                                let Some((bytes, reservation)) = reader_budget
+                                    .admit(PANE_FRAME_OVERHEAD.saturating_add(count), || {
+                                        buffer[..count].to_vec()
+                                    })
+                                else {
+                                    let _ = from_pty_tx.send(Err(std::io::Error::new(
+                                        std::io::ErrorKind::InvalidData,
+                                        "PTY output chunk exceeds byte budget",
+                                    )));
+                                    break;
+                                };
+                                if from_pty_tx
+                                    .send(Ok(PtyChunk {
+                                        bytes,
+                                        _reservation: Some(reservation),
+                                    }))
+                                    .is_err()
+                                {
+                                    break;
                                 }
                             }
-                            let Some((bytes, reservation)) = reader_budget
-                                .admit(PANE_FRAME_OVERHEAD.saturating_add(count), || {
-                                    buffer[..count].to_vec()
-                                })
-                            else {
-                                let _ = from_pty_tx.send(Err(std::io::Error::new(
-                                    std::io::ErrorKind::InvalidData,
-                                    "PTY output chunk exceeds byte budget",
-                                )));
-                                break;
-                            };
-                            if from_pty_tx
-                                .send(Ok(PtyChunk {
-                                    bytes,
-                                    _reservation: Some(reservation),
-                                }))
-                                .is_err()
-                            {
+                            Err(error) => {
+                                let _ = from_pty_tx.send(Err(error));
                                 break;
                             }
                         }
-                        Err(error) => {
-                            let _ = from_pty_tx.send(Err(error));
-                            break;
-                        }
                     }
-                }
-            })?;
-        #[cfg(not(windows))]
-        drop(reader_thread);
+                })?;
+            #[cfg(not(all(test, windows)))]
+            let reader_publish_delay_ms = ();
+            (
+                from_pty_rx,
+                to_child_tx,
+                reader_thread,
+                reader_publish_delay_ms,
+            )
+        };
+        #[cfg(all(windows, not(test)))]
+        let () = reader_publish_delay_ms;
 
         // server panes retain alt-screen history so attach scroll
         // mode can page through TUI output. Classic hosts never opt in.
@@ -397,6 +564,8 @@ impl LivePane {
             reader_thread,
             #[cfg(all(test, windows))]
             reader_publish_delay_ms,
+            #[cfg(unix)]
+            io,
             to_child_tx,
             cols,
             outer_rows: rows,
@@ -416,6 +585,146 @@ impl LivePane {
             watch,
             size_owner: None,
             resume: crate::program_resume::PaneResume::new(resume_token, None),
+            resume_checked: None,
+        })
+    }
+
+    /// Stop the reader and writer for a live update. Output not yet read stays
+    /// in the PTY; input already queued is still written. Writes after this
+    /// fail as disconnected.
+    #[cfg(unix)]
+    fn stop_io(&mut self) {
+        self.io.request_stop();
+        let (closed, _) = mpsc::sync_channel(0);
+        self.to_child_tx = closed;
+    }
+
+    /// Apply output a stopping reader already queued. Unlike [`LivePane::drain`]
+    /// a closed channel is not a death: the reader closes it when it stops.
+    /// End of file and read errors still are. Returns any exit notice and the
+    /// bytes applied.
+    #[cfg(unix)]
+    fn drain_stopping(&mut self, pane_id: u64) -> (Option<CellExitNotice>, usize) {
+        if !self.child_alive() {
+            return (None, 0);
+        }
+        let mut bytes = 0usize;
+        loop {
+            match self.from_pty_rx.try_recv() {
+                Ok(Ok(chunk)) if chunk.bytes.is_empty() => {
+                    return (self.observe_death(pane_id), bytes);
+                }
+                Ok(Ok(chunk)) => {
+                    bytes = bytes.saturating_add(chunk.bytes.len());
+                    let _ = self.apply_pty_chunk(chunk);
+                }
+                Ok(Err(_)) => return (self.observe_death(pane_id), bytes),
+                Err(_) => return (None, bytes),
+            }
+        }
+    }
+
+    /// Start new reader and writer threads after a live update was abandoned.
+    #[cfg(unix)]
+    fn restart_io(&mut self, pane_id: u64) -> Result<()> {
+        let (from_pty_rx, to_child_tx, io) = PaneIo::start(&self.session, pane_id)?;
+        self.from_pty_rx = from_pty_rx;
+        self.to_child_tx = to_child_tx;
+        self.io = io;
+        Ok(())
+    }
+
+    /// The pane as a live-update record, with `fd` as the master's number.
+    #[cfg(unix)]
+    fn to_handoff(&self, pane_id: u64, fd: i32) -> crate::handoff::PaneHandoff {
+        let snapshot = self.emulator.export_state().ok();
+        let snapshot_seq = if snapshot.is_some() {
+            self.log.current_seq()
+        } else {
+            self.log.oldest_seq().unwrap_or(1).saturating_sub(1)
+        };
+        let (resume_token, resume_record, resume_times) = self.resume.handoff_parts();
+        crate::handoff::PaneHandoff {
+            pane_id,
+            fd,
+            pid: self.child_pid,
+            exited: !self.child_alive(),
+            cols: u16::try_from(self.cols).unwrap_or(u16::MAX),
+            rows: u16::try_from(self.rows).unwrap_or(u16::MAX),
+            outer_rows: u16::try_from(self.outer_rows).unwrap_or(u16::MAX),
+            cell_px: (self.cell_w, self.cell_h),
+            revision: self.revision,
+            hive_cell: self.hive_cell.clone(),
+            snapshot,
+            snapshot_seq,
+            tail: self.log.frames(),
+            logged_cwd: self.logged_cwd.clone(),
+            size_owner: self.size_owner,
+            resume_token,
+            resume_record,
+            resume_times,
+        }
+    }
+
+    /// Take over a pane from a live-update record and its kept master.
+    #[cfg(unix)]
+    fn adopt(
+        record: crate::handoff::PaneHandoff,
+        master: std::os::fd::OwnedFd,
+        watch: std::sync::Arc<PaneLogWatch>,
+    ) -> Result<Self> {
+        let pid = record
+            .pid
+            .with_context(|| format!("pane {} has no program pid", record.pane_id))?;
+        let session = PtySession::adopt(master, pid, record.exited)?;
+        let cols = usize::from(record.cols).max(1);
+        let rows = usize::from(record.rows).max(1);
+        let cell_w = record.cell_px.0.max(1);
+        let cell_h = record.cell_px.1.max(1);
+        let (mut emulator, replay_from) = match record.snapshot.clone().map(Emulator::import_state)
+        {
+            Some(Ok(emulator))
+                if emulator.screen().columns() == cols && emulator.screen().rows() == rows =>
+            {
+                (emulator, record.snapshot_seq)
+            }
+            _ => (Emulator::new(cols, rows, MAX_SCROLLBACK), 0),
+        };
+        emulator.set_retain_alt_history(true);
+        emulator.set_cell_pixels(cell_w, cell_h);
+        for frame in record.tail.iter().filter(|frame| frame.seq > replay_from) {
+            replay_event(&mut emulator, &frame.event);
+        }
+        let (from_pty_rx, to_child_tx, io) = PaneIo::start(&session, record.pane_id)?;
+        Ok(Self {
+            emulator,
+            session,
+            from_pty_rx,
+            io,
+            to_child_tx,
+            cols,
+            outer_rows: usize::from(record.outer_rows).max(rows),
+            rows,
+            cell_w,
+            cell_h,
+            revision: record.revision.saturating_add(1),
+            exit: if record.exited {
+                ChildExitState::Exited
+            } else {
+                ChildExitState::Running {}
+            },
+            hive_cell: record.hive_cell,
+            child_pid: Some(pid),
+            controller_id: None,
+            log: PaneLog::from_frames(record.tail, DEFAULT_PANE_LOG_BYTES),
+            logged_cwd: record.logged_cwd,
+            watch,
+            size_owner: record.size_owner,
+            resume: crate::program_resume::PaneResume::from_handoff(
+                record.resume_token,
+                record.resume_record,
+                record.resume_times,
+            ),
             resume_checked: None,
         })
     }
@@ -888,6 +1197,113 @@ impl LiveRuntime {
         if self.panes.remove(&pane_id).is_some() {
             self.watch.note();
         }
+    }
+
+    /// Stop every pane's reader and writer for a live update, and apply all
+    /// output they already read. Returns the exit notices seen while draining.
+    /// On an error some panes may still be running their threads: call
+    /// [`LiveRuntime::resume_after_handoff`] before using the runtime again.
+    #[cfg(unix)]
+    pub(crate) fn quiesce_for_handoff(&mut self, timeout: Duration) -> Result<Vec<CellExitNotice>> {
+        let deadline = Instant::now() + timeout;
+        for pane in self.panes.values_mut() {
+            pane.stop_io();
+        }
+        let mut notices = Vec::new();
+        loop {
+            let mut running = None;
+            for (&id, pane) in &mut self.panes {
+                // A reader blocked on a full channel stops only once drained.
+                let (notice, _) = pane.drain_stopping(id);
+                notices.extend(notice);
+                if !pane.io.stopped() {
+                    running = Some(id);
+                }
+            }
+            let Some(id) = running else {
+                // Both threads have ended: anything they sent is now queued.
+                for (&id, pane) in &mut self.panes {
+                    let (notice, _) = pane.drain_stopping(id);
+                    notices.extend(notice);
+                }
+                return Ok(notices);
+            };
+            if Instant::now() >= deadline {
+                anyhow::bail!("pane {id} did not stop reading and writing in {timeout:?}");
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// Restart every pane's reader and writer after a live update was
+    /// abandoned, so the server carries on as before.
+    #[cfg(unix)]
+    pub(crate) fn resume_after_handoff(&mut self) -> Result<()> {
+        for (&id, pane) in &mut self.panes {
+            if pane.io.reader.is_finished() {
+                pane.restart_io(id)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Give every pane up for a live update, after
+    /// [`LiveRuntime::quiesce_for_handoff`]. Each record comes with a duplicate
+    /// of its PTY master; the programs keep running. On an error nothing has
+    /// been given up.
+    #[cfg(unix)]
+    pub(crate) fn export_handoff(
+        &mut self,
+    ) -> Result<Vec<(crate::handoff::PaneHandoff, std::os::fd::OwnedFd)>> {
+        use std::os::fd::AsRawFd;
+
+        let mut ids: Vec<u64> = self.panes.keys().copied().collect();
+        ids.sort_unstable();
+        let mut out = Vec::with_capacity(ids.len());
+        for id in &ids {
+            let pane = &self.panes[id];
+            let master = pane
+                .session
+                .dup_master()
+                .with_context(|| format!("keep the PTY of pane {id}"))?;
+            out.push((pane.to_handoff(*id, master.as_raw_fd()), master));
+        }
+        for id in ids {
+            if let Some(pane) = self.panes.remove(&id) {
+                pane.session.abandon();
+            }
+        }
+        self.watch.note();
+        Ok(out)
+    }
+
+    /// Take over panes from a live update. A pane that cannot be adopted is
+    /// returned with the reason; its master was closed, so its program gets a
+    /// hangup, as in a normal restart.
+    #[cfg(unix)]
+    pub(crate) fn adopt_handoff(
+        panes: Vec<(crate::handoff::PaneHandoff, std::os::fd::OwnedFd)>,
+        mux_socket: Option<PathBuf>,
+        watch: std::sync::Arc<PaneLogWatch>,
+    ) -> (Self, Vec<(u64, anyhow::Error)>) {
+        let mut runtime = Self {
+            panes: HashMap::new(),
+            mux_socket,
+            watch,
+            pending_size_owner: None,
+        };
+        let mut failed = Vec::new();
+        for (record, master) in panes {
+            let id = record.pane_id;
+            match LivePane::adopt(record, master, std::sync::Arc::clone(&runtime.watch)) {
+                Ok(pane) => {
+                    runtime.panes.insert(id, pane);
+                }
+                Err(error) => failed.push((id, error)),
+            }
+        }
+        runtime.watch.note();
+        (runtime, failed)
     }
 
     /// End every pane: stop its program and close its pseudoconsole, so its
@@ -2280,5 +2696,161 @@ mod tests {
         let mut pane = spawn_test_pane(13, &env_report_spawn(lie), None);
         let text = wait_for_pane_text(&mut pane, 13, "HAS_AGENT=0");
         assert!(text.contains("HAS_AGENT=0"), "{text:?}");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod handoff_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn sh(script: &str) -> SpawnSpec {
+        SpawnSpec {
+            program: "/bin/sh".into(),
+            argv: vec!["-c".into(), script.into()],
+            cwd: Some(PathBuf::from("/tmp")),
+            env: BTreeMap::new(),
+        }
+    }
+
+    fn one_pane(script: &str) -> LiveRuntime {
+        LiveRuntime::spawn(
+            &[PaneGeometry {
+                pane_id: 1,
+                col: 0,
+                row: 0,
+                cols: 60,
+                rows: 10,
+            }],
+            &HashMap::from([(1u64, sh(script))]),
+            None,
+        )
+        .expect("spawn")
+    }
+
+    fn text(runtime: &LiveRuntime) -> String {
+        runtime.content(1).expect("pane").lines.join("\n")
+    }
+
+    fn wait_for(runtime: &mut LiveRuntime, needle: &str) -> String {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            let _ = runtime.drain();
+            let text = text(runtime);
+            if text.contains(needle) {
+                return text;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        panic!("never saw {needle:?} in {:?}", text(runtime));
+    }
+
+    fn alive(pid: u32) -> bool {
+        // SAFETY: signal 0 only checks that the pid exists.
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+
+    fn hand_over(mut old: LiveRuntime) -> LiveRuntime {
+        old.quiesce_for_handoff(Duration::from_secs(5))
+            .expect("quiesce");
+        let panes = old.export_handoff().expect("export");
+        drop(old);
+        // The record survives a round trip through its wire form.
+        let panes = panes
+            .into_iter()
+            .map(|(record, fd)| {
+                let json = serde_json::to_vec(&record).expect("encode");
+                (serde_json::from_slice(&json).expect("decode"), fd)
+            })
+            .collect();
+        let (runtime, failed) = LiveRuntime::adopt_handoff(panes, None, PaneLogWatch::new());
+        assert!(failed.is_empty(), "panes failed to adopt: {failed:?}");
+        runtime
+    }
+
+    /// The program keeps running with the same pid, its screen comes along,
+    /// and input typed after the handoff reaches it.
+    #[test]
+    fn a_running_program_survives_a_handoff_with_its_screen_and_input() {
+        let mut old = one_pane("echo start; while read line; do echo got:$line; done");
+        wait_for(&mut old, "start");
+        old.write(1, b"one\n".to_vec()).expect("write");
+        wait_for(&mut old, "got:one");
+        let pid = old.child_pid(1).expect("pid");
+        let revision = old.panes[&1].revision;
+
+        let mut new = hand_over(old);
+        assert!(alive(pid), "the program ended in the handoff");
+        assert_eq!(new.child_pid(1), Some(pid));
+        assert!(new.panes[&1].revision > revision);
+        assert!(
+            text(&new).contains("got:one"),
+            "screen lost: {:?}",
+            text(&new)
+        );
+        new.write(1, b"two\n".to_vec()).expect("write");
+        wait_for(&mut new, "got:two");
+
+        drop(new);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while alive(pid) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !alive(pid),
+            "closing the adopted pane did not end its program"
+        );
+    }
+
+    /// Output the program writes while no server is reading waits in the PTY
+    /// and shows up after the handoff.
+    #[test]
+    fn output_written_during_the_handoff_is_not_lost() {
+        let mut old = one_pane("echo ready; read x; sleep 0.3; echo written-in-the-gap; read y");
+        wait_for(&mut old, "ready");
+        old.write(1, b"go\n".to_vec()).expect("write");
+        old.quiesce_for_handoff(Duration::from_secs(5))
+            .expect("quiesce");
+        let panes = old.export_handoff().expect("export");
+        drop(old);
+        thread::sleep(Duration::from_millis(600));
+        let (mut new, failed) = LiveRuntime::adopt_handoff(panes, None, PaneLogWatch::new());
+        assert!(failed.is_empty());
+        wait_for(&mut new, "written-in-the-gap");
+    }
+
+    /// A pane whose program already ended keeps its last screen and stays
+    /// ended.
+    #[test]
+    fn an_exited_pane_keeps_its_screen_and_stays_ended() {
+        let mut old = one_pane("echo last-words");
+        wait_for(&mut old, "last-words");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while old.panes[&1].child_alive() && Instant::now() < deadline {
+            let _ = old.drain();
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!old.panes[&1].child_alive());
+        let new = hand_over(old);
+        assert!(!new.panes[&1].child_alive());
+        assert!(text(&new).contains("last-words"));
+    }
+
+    /// A writer stuck on a program that never reads makes the handoff give up
+    /// in time, and the server carries on reading the pane.
+    #[test]
+    fn a_stuck_writer_abandons_the_handoff_and_reading_resumes() {
+        let mut old = one_pane("stty -icanon; echo ready; sleep 1; echo after-abort; sleep 30");
+        wait_for(&mut old, "ready");
+        // Fill the PTY input queue: the program never reads it.
+        for _ in 0..TO_CHILD_CAP {
+            let _ = old.write(1, vec![b'x'; 4096]);
+        }
+        let error = old
+            .quiesce_for_handoff(Duration::from_millis(300))
+            .expect_err("a stuck writer must fail the quiesce");
+        assert!(error.to_string().contains("did not stop"), "{error}");
+        old.resume_after_handoff().expect("resume");
+        wait_for(&mut old, "after-abort");
     }
 }

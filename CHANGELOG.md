@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- On macOS and Linux, **Save and restart** keeps the programs in your sessions running through a pmux server update. The new pmux server takes over every pane in the same process, with its screen and scrollback, and app windows reconnect to it. If the new server cannot take the sessions, or does not start, the update restarts them as before and they come back from the saved workspace. `live_update = false` in `[mux]` turns this off. A `pmux attach` in another terminal still ends when the server changes. Windows is unchanged.
+
 ### Removed
 
 - The windowed host (`prismattyc-host`) no longer has the experimental rich mode: it does not paint overlays or a docked workspace that an app sends, and the `rich_focus` key action is gone. A `rich_focus` binding left in a config file is ignored with a warning. `--experimental-rich` and `PRISMATTYC_EXPERIMENTAL_RICH` are still accepted for one release, print a notice, and only turn on native sessions, as `--experimental-native` does. The render-status JSON no longer has the `workspace_layout` and `experimental_rich` fields.

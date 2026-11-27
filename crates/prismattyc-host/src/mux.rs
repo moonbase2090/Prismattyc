@@ -4038,6 +4038,44 @@ impl MuxRuntime {
         Ok(true)
     }
 
+    /// Move the overlay to `col`, `row`. The size stays. `Ok(false)` when
+    /// nothing is floating. The stored place is the visible rectangle, so a
+    /// request past the window edge is kept inside it.
+    #[cfg(test)]
+    pub(crate) fn move_float(&mut self, col: usize, row: usize) -> Result<bool> {
+        let Some(prior) = self.floated else {
+            return Ok(false);
+        };
+        self.floated = Some(FloatPlacement {
+            pane: prior.pane,
+            rect: CellRect {
+                col,
+                row,
+                cols: prior.rect.cols,
+                rows: prior.rect.rows,
+            },
+        });
+        let applied = self
+            .window_rects(self.active_window())
+            .and_then(|rects| self.apply_rects(rects, self.geom));
+        if let Err(error) = applied {
+            self.floated = Some(prior);
+            return Err(error);
+        }
+        let visible = self
+            .rects
+            .iter()
+            .rev()
+            .find_map(|(pane, rect)| (*pane == prior.pane).then_some(*rect));
+        if let Some(rect) = visible {
+            self.floated = Some(FloatPlacement {
+                pane: prior.pane,
+                rect,
+            });
+        }
+        Ok(true)
+    }
+
     /// Put the floated pane back in the tile. `Ok(false)` when nothing is floating.
     pub(crate) fn dock_float(&mut self) -> Result<bool> {
         let Some(prior) = self.floated.take() else {
@@ -8995,6 +9033,70 @@ mod tests {
         assert!(runtime.float_pane(right, overlay).unwrap());
         assert_eq!(runtime.zoomed_pane(), None);
         assert_eq!(runtime.rects().collect::<Vec<_>>(), floated);
+    }
+
+    #[test]
+    fn move_float_repositions_the_overlay_and_keeps_the_tile() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        assert!(!runtime.move_float(20, 6).unwrap());
+        let left = runtime.focused_id();
+        let right = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        let tiled = runtime.rects().collect::<Vec<_>>();
+        let overlay = CellRect {
+            col: 10,
+            row: 4,
+            cols: 30,
+            rows: 8,
+        };
+        assert!(runtime.float_pane(right, overlay).unwrap());
+        let pty = (runtime.panes[&right].cols, runtime.panes[&right].rows);
+
+        assert!(runtime.move_float(20, 6).unwrap());
+        let moved = CellRect {
+            col: 20,
+            row: 6,
+            cols: 30,
+            rows: 8,
+        };
+        assert_eq!(
+            runtime.rects().collect::<Vec<_>>(),
+            vec![(left, full_rect(&runtime)), (right, moved)]
+        );
+        assert_eq!(runtime.active_pane_count(), 2);
+        assert_eq!(
+            (runtime.panes[&right].cols, runtime.panes[&right].rows),
+            pty,
+            "a move keeps the overlay size"
+        );
+        let record = runtime.float_record("work").unwrap();
+        assert_eq!(
+            (record.col, record.row, record.cols, record.rows),
+            (20, 6, 30, 8)
+        );
+
+        assert!(runtime.move_float(70, 20).unwrap());
+        assert_eq!(
+            runtime.rects().collect::<Vec<_>>(),
+            vec![
+                (left, full_rect(&runtime)),
+                (
+                    right,
+                    CellRect {
+                        col: 50,
+                        row: 16,
+                        cols: 30,
+                        rows: 8,
+                    }
+                )
+            ],
+            "a move past the edge stays inside the window"
+        );
+        let record = runtime.float_record("work").unwrap();
+        assert_eq!((record.col, record.row), (50, 16));
+        assert!(runtime.dock_float().unwrap());
+        assert_eq!(runtime.rects().collect::<Vec<_>>(), tiled);
     }
 
     #[test]

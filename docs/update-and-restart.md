@@ -298,6 +298,14 @@ The app menu and maintenance panel share the complete update flow above.
 complete update flow when you are ready to save, stop and restore sessions so
 they run on the new release too.
 
+The maintenance panel shows the update source, versions and explanations as
+details, not as menu rows. A result starts with a status: Up to date, Update
+available, Restarted, Restart incomplete, Restart failed or Failed. Only the
+actions can be selected, with the arrow keys or the pointer, and each action
+keeps its description. When an update is available, the result offers
+**Update and restart all components** first, then **Back to update and
+restart**. Escape closes the panel as before.
+
 The bundle that gets replaced is the `Prismattyc.app` that contains the
 running command. Otherwise the updater uses `/Applications/Prismattyc.app`
 when that app exists, then `~/Applications/Prismattyc.app` when that app

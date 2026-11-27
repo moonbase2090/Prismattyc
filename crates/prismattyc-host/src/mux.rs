@@ -21,8 +21,9 @@ use prismattyc_core::{Cursor, GridDamage, Selection};
 use prismattyc_emulator::{CursorShape, Emulator, PlacedImage, PtySession};
 use prismattyc_mux::{
     apply_arrangement, even_horizontal_row, even_two_row_grid, even_vertical_column,
-    layout_to_rects, Arrangement, Axis, CellRect, ClientView, Domain, PaneId, PaneLayout,
-    SessionId, SizeOwner, WindowId, DEFAULT_MIN_COLS, DEFAULT_MIN_ROWS,
+    layout_to_rects, rects_with_float, Arrangement, Axis, CellRect, ClientView, Domain, PaneId,
+    PaneLayout, SavedFloat, SavedFloats, SessionId, SizeOwner, WindowId, DEFAULT_MIN_COLS,
+    DEFAULT_MIN_ROWS,
 };
 use prismattyc_protocol::{InputModifiers, PointerPhase, ViewerId};
 
@@ -2943,6 +2944,24 @@ pub(crate) fn tab_close_left_with_inset(
     Some(x0 + width - need)
 }
 
+/// One client-local overlay. The server tree stays tiled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FloatPlacement {
+    pane: PaneId,
+    rect: CellRect,
+}
+
+/// Pixel drag of one overlay. `origin_*` is the visible place when the press
+/// landed, and `start_*` is that press. Later motion is measured from the
+/// press, in whole cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FloatDrag {
+    origin_col: usize,
+    origin_row: usize,
+    start_x: usize,
+    start_y: usize,
+}
+
 /// Domain topology plus one live runtime per pane leaf.
 pub(crate) struct MuxRuntime {
     /// Unique per runtime in this process. Pane ids restart at 1 in every
@@ -2988,6 +3007,14 @@ pub(crate) struct MuxRuntime {
     /// mutation). While set, the pane takes the whole window of the tab that
     /// owns it and its siblings keep their PTY sizes untouched in the tree.
     zoomed: Option<PaneId>,
+    /// Client-local overlay for one pane. The server tree stays tiled.
+    /// Siblings reflow, and this pane is drawn at `rect`.
+    floated: Option<FloatPlacement>,
+    /// Armed while the pointer is dragging the overlay.
+    float_drag: Option<FloatDrag>,
+    /// Space whose saved overlay was applied. A later layout refresh for the
+    /// same space does not pull the pane back.
+    float_restored_space: Option<String>,
 }
 
 impl MuxRuntime {
@@ -3074,7 +3101,7 @@ impl MuxRuntime {
         let async_connect = attach_log::async_connect_requested();
         let client = domain.mint_client()?;
         let view = ClientView::attach_session(&domain, client, session);
-        let rects = rects_for(&domain, window, cols, rows, geom, None)?;
+        let rects = rects_for(&domain, window, cols, rows, geom, None, None)?;
         let root_rect = rects
             .iter()
             .find_map(|(id, rect)| (*id == pane).then_some(*rect))
@@ -3123,6 +3150,9 @@ impl MuxRuntime {
             last_window: None,
             fixed_tab_names: HashMap::new(),
             zoomed: None,
+            floated: None,
+            float_drag: None,
+            float_restored_space: None,
         })
     }
 
@@ -3895,9 +3925,13 @@ impl MuxRuntime {
     /// view projection: the split tree stays as it is, the focused pane
     /// takes the whole tab, and hidden siblings keep their PTY geometry.
     /// Returns `Ok(false)` when the tab has a single pane.
+    /// Zooming the floated pane docks it. The two views do not stack.
     pub(crate) fn toggle_zoom(&mut self) -> Result<bool> {
         if self.zoomed_here().is_some() {
             return self.set_zoom(None);
+        }
+        if self.floated_here() == Some(self.focused_id()) {
+            return self.dock_float();
         }
         if self.active_pane_count() < 2 {
             return Ok(false);
@@ -3977,26 +4011,381 @@ impl MuxRuntime {
     }
 
     fn set_zoom(&mut self, zoomed: Option<PaneId>) -> Result<bool> {
-        let prior = self.zoomed;
+        let prior_zoom = self.zoomed;
+        let prior_float = self.floated;
+        let prior_drag = self.float_drag;
         self.zoomed = zoomed;
+        if zoomed.is_some() {
+            self.floated = None;
+            self.float_drag = None;
+        }
         let applied = self
             .window_rects(self.active_window())
             .and_then(|rects| self.apply_rects(rects, self.geom));
         if let Err(error) = applied {
-            self.zoomed = prior;
+            self.zoomed = prior_zoom;
+            self.floated = prior_float;
+            self.float_drag = prior_drag;
             return Err(error);
         }
         Ok(true)
     }
 
+    /// Lift `pane` into a client overlay at `rect` and reflow the tile.
+    /// Clears zoom. `Ok(false)` when `pane` is not on the active tab.
+    /// The placement is rolled back when the rectangles cannot be applied.
+    pub(crate) fn float_pane(&mut self, pane: PaneId, rect: CellRect) -> Result<bool> {
+        let on_tab = self
+            .domain
+            .window(self.active_window())
+            .is_some_and(|window| window.layout.contains_pane(pane));
+        if !on_tab || !self.panes.contains_key(&pane) {
+            return Ok(false);
+        }
+        let prior_zoom = self.zoomed;
+        let prior_float = self.floated;
+        self.zoomed = None;
+        self.floated = Some(FloatPlacement { pane, rect });
+        let applied = self
+            .window_rects(self.active_window())
+            .and_then(|rects| self.apply_rects(rects, self.geom));
+        if let Err(error) = applied {
+            self.zoomed = prior_zoom;
+            self.floated = prior_float;
+            return Err(error);
+        }
+        Ok(true)
+    }
+
+    /// The floated pane when it is on the active tab.
+    pub(crate) fn floated_pane(&self) -> Option<PaneId> {
+        self.floated_here()
+    }
+
+    /// Float `pane`, or dock it when it is already the overlay.
+    /// A tab with one pane stays tiled. `Ok(false)` when `pane` cannot float.
+    pub(crate) fn toggle_float(&mut self, pane: PaneId) -> Result<bool> {
+        if self.floated_here() == Some(pane) {
+            return self.dock_float();
+        }
+        if self.active_pane_count() < 2 {
+            return Ok(false);
+        }
+        let rect = CellRect {
+            col: self.cols / 8,
+            row: self.rows / 6,
+            cols: (self.cols / 2).max(1),
+            rows: (self.rows / 3).max(1),
+        };
+        self.float_pane(pane, rect)
+    }
+
+    /// Move the overlay to `col`, `row`. The size stays. `Ok(false)` when
+    /// nothing is floating. The stored place is the visible rectangle, so a
+    /// request past the window edge is kept inside it.
+    pub(crate) fn move_float(&mut self, col: usize, row: usize) -> Result<bool> {
+        let Some(prior) = self.floated else {
+            return Ok(false);
+        };
+        self.floated = Some(FloatPlacement {
+            pane: prior.pane,
+            rect: CellRect {
+                col,
+                row,
+                cols: prior.rect.cols,
+                rows: prior.rect.rows,
+            },
+        });
+        let applied = self
+            .window_rects(self.active_window())
+            .and_then(|rects| self.apply_rects(rects, self.geom));
+        if let Err(error) = applied {
+            self.floated = Some(prior);
+            return Err(error);
+        }
+        let visible = self
+            .rects
+            .iter()
+            .rev()
+            .find_map(|(pane, rect)| (*pane == prior.pane).then_some(*rect));
+        if let Some(rect) = visible {
+            self.floated = Some(FloatPlacement {
+                pane: prior.pane,
+                rect,
+            });
+        }
+        Ok(true)
+    }
+
+    /// Arm a drag when the topmost pane at `(x, y)` is the overlay. Focus
+    /// follows that pane. A press on the tile underneath returns `false`.
+    pub(crate) fn begin_float_drag(&mut self, x: usize, y: usize) -> bool {
+        let Some(placement) = self.floated else {
+            return false;
+        };
+        if self.pane_at_px(x, y) != Some(placement.pane) {
+            return false;
+        }
+        self.float_drag = Some(FloatDrag {
+            origin_col: placement.rect.col,
+            origin_row: placement.rect.row,
+            start_x: x,
+            start_y: y,
+        });
+        self.focus(placement.pane);
+        true
+    }
+
+    /// Move the overlay by the whole cells between the press and `(x, y)`.
+    /// The size stays. `Ok(false)` when no drag is armed.
+    pub(crate) fn update_float_drag(&mut self, x: usize, y: usize) -> Result<bool> {
+        let Some(drag) = self.float_drag else {
+            return Ok(false);
+        };
+        let cell_w = self.geom.cell_w.max(1);
+        let cell_h = self.geom.cell_h.max(1);
+        let dcol = (x as isize).saturating_sub(drag.start_x as isize) / cell_w as isize;
+        let drow = (y as isize).saturating_sub(drag.start_y as isize) / cell_h as isize;
+        let col = (drag.origin_col as isize).saturating_add(dcol).max(0) as usize;
+        let row = (drag.origin_row as isize).saturating_add(drow).max(0) as usize;
+        self.move_float(col, row)?;
+        Ok(true)
+    }
+
+    /// Drop the armed overlay drag. `true` when one was armed.
+    pub(crate) fn end_float_drag(&mut self) -> bool {
+        self.float_drag.take().is_some()
+    }
+
+    /// True while an overlay drag is armed.
+    pub(crate) fn float_drag_active(&self) -> bool {
+        self.float_drag.is_some()
+    }
+
+    /// Put the floated pane back in the tile. `Ok(false)` when nothing is floating.
+    pub(crate) fn dock_float(&mut self) -> Result<bool> {
+        let Some(prior) = self.floated.take() else {
+            self.float_drag = None;
+            return Ok(false);
+        };
+        let prior_drag = self.float_drag.take();
+        let applied = self
+            .window_rects(self.active_window())
+            .and_then(|rects| self.apply_rects(rects, self.geom));
+        if let Err(error) = applied {
+            self.floated = Some(prior);
+            self.float_drag = prior_drag;
+            return Err(error);
+        }
+        Ok(true)
+    }
+
+    /// Window slot of the overlay, before a later edit moves or closes that tab.
+    /// The overlay's tab does not have to be the selected one.
+    pub(crate) fn floated_window_slot(&self) -> Option<u32> {
+        let placement = self.floated?;
+        let window = self.domain.pane_owner(placement.pane)?;
+        let slot = self.window_ids().iter().position(|id| *id == window)?;
+        u32::try_from(slot).ok()
+    }
+
+    /// True while an overlay placement exists, including on a tab that is not selected.
+    pub(crate) fn overlay_placed(&self) -> bool {
+        self.floated.is_some()
+    }
+
+    /// The active overlay as a record keyed by session and place.
+    pub(crate) fn float_record(&self, space: &str) -> Option<SavedFloat> {
+        let placement = self.floated?;
+        let session = self.pane_session_name(placement.pane)?;
+        let window = self.domain.pane_owner(placement.pane)?;
+        let window_slot = self.window_ids().iter().position(|id| *id == window)?;
+        let pane_slot = self
+            .domain
+            .window(window)?
+            .layout
+            .panes()
+            .iter()
+            .position(|id| *id == placement.pane)?;
+        Some(SavedFloat {
+            space: space.to_string(),
+            session,
+            window_slot: u32::try_from(window_slot).ok()?,
+            pane_slot: u32::try_from(pane_slot).ok()?,
+            col: u32::try_from(placement.rect.col).ok()?,
+            row: u32::try_from(placement.rect.row).ok()?,
+            cols: u32::try_from(placement.rect.cols).ok()?,
+            rows: u32::try_from(placement.rect.rows).ok()?,
+        })
+    }
+
+    /// Replace this window's saved overlay with the live one, or drop it
+    /// when the window is tiled.
+    pub(crate) fn sync_saved_float(&self, space: &str, records: &mut SavedFloats) {
+        self.sync_saved_float_window(space, records, None);
+    }
+
+    /// Like `sync_saved_float`, but `prior_window` is the overlay's tab
+    /// before an edit that moves or closes that tab. The selected tab
+    /// afterwards can be a different window, and clearing only that index
+    /// leaves the old record to float another pane.
+    pub(crate) fn sync_saved_float_window(
+        &self,
+        space: &str,
+        records: &mut SavedFloats,
+        prior_window: Option<u32>,
+    ) {
+        let Some(session) = self
+            .floated
+            .and_then(|placement| self.pane_session_name(placement.pane))
+            .or_else(|| self.pane_session_name(self.focused_id()))
+        else {
+            return;
+        };
+        let Ok(window_slot) = prior_window
+            .map(Ok)
+            .unwrap_or_else(|| u32::try_from(self.selected_tab_index()))
+        else {
+            return;
+        };
+        records.floats.retain(|saved| {
+            !(saved.space == space && saved.session == session && saved.window_slot == window_slot)
+        });
+        if let Some(record) = self.float_record(space) {
+            records.upsert(record);
+        }
+    }
+
+    /// Drop or rekey the saved overlay after a tab edit.
+    ///
+    /// `prior_slot` is the overlay's window index before the edit. Closing
+    /// an earlier tab leaves the overlay up and moves it to a lower index,
+    /// and the record has to follow. An overlay that is gone is dropped.
+    /// An overlay that still occupies `prior_slot` is left alone.
+    pub(crate) fn sync_float_after_tab_edit(
+        &self,
+        space: &str,
+        records: &mut SavedFloats,
+        prior_slot: u32,
+    ) -> bool {
+        if self.overlay_placed() {
+            match self.floated_window_slot() {
+                // Same index: the record already names this tab.
+                Some(slot) if slot == prior_slot => return false,
+                // The pane is placed, but its tab index is not visible.
+                // Dropping the record here would lose a live overlay.
+                None => return false,
+                Some(_) => {}
+            }
+        }
+        let before = records.floats.clone();
+        self.sync_saved_float_window(space, records, Some(prior_slot));
+        records.floats != before
+    }
+
+    /// Float the pane named by this space's record for the active window.
+    /// `Ok(false)` when that place was not saved or is not in the window.
+    pub(crate) fn restore_space_float(
+        &mut self,
+        space: &str,
+        records: &SavedFloats,
+    ) -> Result<bool> {
+        if self.floated.is_some() && self.floated_here().is_none() {
+            self.floated = None;
+            self.float_drag = None;
+        }
+        let Some(session) = self.pane_session_name(self.focused_id()) else {
+            return Ok(false);
+        };
+        let Ok(window_slot) = u32::try_from(self.selected_tab_index()) else {
+            return Ok(false);
+        };
+        let Some(saved) = records.floats.iter().find(|saved| {
+            saved.space == space && saved.session == session && saved.window_slot == window_slot
+        }) else {
+            return Ok(false);
+        };
+        self.restore_float(saved)
+    }
+
+    /// Apply `records` for `space` the first time that space's layout is shown.
+    /// A later refresh of the same space leaves a moved overlay where it is.
+    /// A record that cannot be applied yet stays pending for the next refresh.
+    pub(crate) fn apply_open_space_float(
+        &mut self,
+        space: &str,
+        records: &SavedFloats,
+    ) -> Result<bool> {
+        if self.float_restored_space.as_deref() == Some(space) {
+            return Ok(false);
+        }
+        let applied = self.restore_space_float(space, records)?;
+        let pending = records.floats.iter().any(|saved| saved.space == space) && !applied;
+        if !pending {
+            self.float_restored_space = Some(space.to_string());
+        }
+        Ok(applied)
+    }
+
+    /// Float the pane named by `saved` when it is on the active session and tab.
+    pub(crate) fn restore_float(&mut self, saved: &SavedFloat) -> Result<bool> {
+        let session = self
+            .domain
+            .session(self.session_id())
+            .map(|session| session.name.clone());
+        if session.as_deref() != Some(saved.session.as_str()) {
+            return Ok(false);
+        }
+        let Some(&window) = self.window_ids().get(saved.window_slot as usize) else {
+            return Ok(false);
+        };
+        if window != self.active_window() {
+            return Ok(false);
+        }
+        let Some(pane) = self
+            .domain
+            .window(window)
+            .and_then(|window| window.layout.panes().get(saved.pane_slot as usize).copied())
+        else {
+            return Ok(false);
+        };
+        self.float_pane(
+            pane,
+            CellRect {
+                col: saved.col as usize,
+                row: saved.row as usize,
+                cols: saved.cols as usize,
+                rows: saved.rows as usize,
+            },
+        )
+    }
+
     /// Leave zoom before a topology edit (split, retile, move); tmux does
-    /// the same so the new pane is visible. Clears zoom even when it
-    /// lives on an inactive tab.
+    /// the same so the new pane is visible. Also docks a float. Clears zoom
+    /// even when it lives on an inactive tab.
     pub(crate) fn unzoom(&mut self) -> Result<()> {
+        if self.floated.is_some() {
+            self.dock_float()?;
+        }
         if self.zoomed.is_some() {
             self.set_zoom(None)?;
         }
         Ok(())
+    }
+
+    fn floated_rect(&self) -> Option<(PaneId, CellRect)> {
+        self.floated
+            .map(|placement| (placement.pane, placement.rect))
+    }
+
+    /// The floated pane when it lives in the active tab.
+    fn floated_here(&self) -> Option<PaneId> {
+        self.floated.and_then(|placement| {
+            self.domain
+                .window(self.active_window())
+                .is_some_and(|window| window.layout.contains_pane(placement.pane))
+                .then_some(placement.pane)
+        })
     }
 
     fn window_rects(&self, window: WindowId) -> Result<Vec<(PaneId, CellRect)>> {
@@ -4007,6 +4396,7 @@ impl MuxRuntime {
             self.rows,
             self.geom,
             self.zoomed,
+            self.floated_rect(),
         )
     }
 
@@ -4028,6 +4418,7 @@ impl MuxRuntime {
             rows,
             geom,
             self.zoomed,
+            self.floated_rect(),
         )?;
         self.apply_rects(rects, geom)?;
         self.cols = cols;
@@ -4074,8 +4465,14 @@ impl MuxRuntime {
         let prior_view = self.view.clone();
         let prior_rects = self.rects.clone();
         let prior_zoom = self.zoomed;
+        let prior_float = self.floated;
+        let prior_drag = self.float_drag;
         if prior_zoom == Some(pane) {
             self.zoomed = None;
+        }
+        if prior_float.is_some_and(|placement| placement.pane == pane) {
+            self.floated = None;
+            self.float_drag = None;
         }
         let prior_focus = self.view.focused_pane(window).unwrap_or(pane);
         let next_focus = self
@@ -4092,6 +4489,8 @@ impl MuxRuntime {
                     self.domain = prior_domain;
                     self.view = prior_view;
                     self.zoomed = prior_zoom;
+                    self.floated = prior_float;
+                    self.float_drag = prior_drag;
                     return Err(error);
                 }
             };
@@ -4100,6 +4499,8 @@ impl MuxRuntime {
                 self.view = prior_view;
                 self.rects = prior_rects;
                 self.zoomed = prior_zoom;
+                self.floated = prior_float;
+                self.float_drag = prior_drag;
                 return Err(error);
             }
             if let Some(runtime) = self.panes.get_mut(&next_focus) {
@@ -4334,7 +4735,7 @@ impl MuxRuntime {
             .collect()
     }
 
-    pub(crate) fn rects(&self) -> impl Iterator<Item = (PaneId, CellRect)> + '_ {
+    pub(crate) fn rects(&self) -> impl DoubleEndedIterator<Item = (PaneId, CellRect)> + '_ {
         self.rects.iter().copied()
     }
 
@@ -4347,12 +4748,12 @@ impl MuxRuntime {
 
     #[cfg(test)]
     pub(crate) fn pane_at_cell(&self, col: usize, row: usize) -> Option<(PaneId, usize, usize)> {
-        self.rects.iter().find_map(|(pane, rect)| {
+        self.rects.iter().rev().find_map(|(pane, rect)| {
             let inside = col >= rect.col
                 && row >= rect.row
                 && col < rect.col.saturating_add(rect.cols)
                 && row < rect.row.saturating_add(rect.rows);
-            inside.then_some((*pane, row - rect.row, col - rect.col))
+            inside.then(|| (*pane, row - rect.row, col - rect.col))
         })
     }
 
@@ -5236,6 +5637,13 @@ impl MuxRuntime {
         {
             self.zoomed = None;
         }
+        if self
+            .floated
+            .is_some_and(|placement| !self.panes.contains_key(&placement.pane))
+        {
+            self.floated = None;
+            self.float_drag = None;
+        }
         // The closed tab cannot be returned to; the tab we land on is the
         // sensible "last" only if it was already the previous one.
         if self.last_window == Some(window) {
@@ -5458,7 +5866,7 @@ impl MuxRuntime {
     /// Every split of the active window as a draggable divider, in
     /// depth-first order. Empty when zoomed or single-pane.
     pub(crate) fn dividers(&self) -> Vec<Divider> {
-        if self.zoomed.is_some() {
+        if self.zoomed.is_some() || self.floated_here().is_some() {
             return Vec::new();
         }
         let Some(window) = self.domain.window(self.active_window()) else {
@@ -5555,11 +5963,12 @@ impl MuxRuntime {
         self.replace_layout(next)
     }
 
-    /// The pane in the active window whose full slot, chrome included,
-    /// contains the pixel. Used by a pane-header drag released over another
-    /// pane's body.
+    /// The topmost pane in the active window whose full slot, chrome
+    /// included, contains the pixel. Later rectangles win, so an overlay is
+    /// hit instead of the tile underneath. Used by a pane-header drag
+    /// released over another pane's body.
     pub(crate) fn pane_at_px(&self, x: usize, y: usize) -> Option<PaneId> {
-        self.rects.iter().find_map(|(pane, rect)| {
+        self.rects.iter().rev().find_map(|(pane, rect)| {
             let (sx, sy, sw, sh) = self.geom.pane_slot_px(*rect);
             (x >= sx && x < sx + sw && y >= sy && y < sy + sh).then_some(*pane)
         })
@@ -6028,21 +6437,30 @@ fn rects_for(
     rows: usize,
     geom: HostGeom,
     zoomed: Option<PaneId>,
+    floated: Option<(PaneId, CellRect)>,
 ) -> Result<Vec<(PaneId, CellRect)>> {
     let layout = &domain.window(window).context("mux window missing")?.layout;
-    let zoomed_leaf = zoomed
-        .filter(|pane| layout.contains_pane(*pane))
-        .map(PaneLayout::leaf);
-    Ok(layout_to_rects(
-        zoomed_leaf.as_ref().unwrap_or(layout),
-        CellRect {
-            col: 0,
-            row: 0,
-            cols,
-            rows,
-        },
+    let bounds = CellRect {
+        col: 0,
+        row: 0,
+        cols,
+        rows,
+    };
+    if let Some(pane) = zoomed.filter(|pane| layout.contains_pane(*pane)) {
+        return Ok(layout_to_rects(
+            &PaneLayout::leaf(pane),
+            bounds,
+            geom.min_cols(),
+            geom.min_rows(),
+        )?);
+    }
+    let floated = floated.filter(|(pane, _)| layout.contains_pane(*pane));
+    Ok(rects_with_float(
+        layout,
+        bounds,
         geom.min_cols(),
         geom.min_rows(),
+        floated,
     )?)
 }
 
@@ -8751,6 +9169,610 @@ mod tests {
         assert_eq!(runtime.zoomed_pane(), None);
         assert_eq!(runtime.rects().collect::<Vec<_>>(), split_rects);
         assert!(!runtime.tab_infos()[0].zoomed);
+    }
+
+    #[test]
+    fn float_lifts_one_pane_over_the_reflowed_sibling_and_dock_restores_the_tile() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let left = runtime.focused_id();
+        let gone = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        let overlay = CellRect {
+            col: 10,
+            row: 4,
+            cols: 30,
+            rows: 8,
+        };
+        assert!(runtime.close_focused().unwrap());
+        assert!(
+            !runtime.float_pane(gone, overlay).unwrap(),
+            "a pane that has left the tile cannot float"
+        );
+        let right = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        let tiled = runtime.rects().collect::<Vec<_>>();
+        assert_eq!(runtime.dividers().len(), 1);
+
+        assert!(runtime.float_pane(right, overlay).unwrap());
+        assert_eq!(runtime.zoomed_pane(), None);
+        assert_eq!(runtime.active_pane_count(), 2, "the tree stays tiled");
+        let floated = runtime.rects().collect::<Vec<_>>();
+        assert_eq!(floated, vec![(left, full_rect(&runtime)), (right, overlay)]);
+        assert!(runtime.dividers().is_empty());
+        let (cols, rows) = runtime.geom().content_cells(overlay);
+        assert_eq!(
+            (runtime.panes[&right].cols, runtime.panes[&right].rows),
+            (cols, rows)
+        );
+        runtime.resize(90, 28).unwrap();
+        assert_eq!(
+            runtime.rects().collect::<Vec<_>>(),
+            vec![(left, full_rect(&runtime)), (right, overlay)],
+            "a resize keeps the overlay and reflows the sibling"
+        );
+        runtime.resize(80, 24).unwrap();
+
+        let record = runtime.float_record("work").unwrap();
+        assert_eq!(record.space, "work");
+        assert_eq!(record.session, "default");
+        assert_eq!(record.window_slot, 0);
+        assert_eq!(record.pane_slot, 1);
+        assert_eq!(
+            (record.col, record.row, record.cols, record.rows),
+            (10, 4, 30, 8)
+        );
+
+        assert!(runtime.dock_float().unwrap());
+        assert!(!runtime.dock_float().unwrap());
+        assert!(runtime.float_record("work").is_none());
+        assert_eq!(runtime.rects().collect::<Vec<_>>(), tiled);
+        assert_eq!(runtime.dividers().len(), 1);
+
+        let mut other = record.clone();
+        other.session = "elsewhere".to_string();
+        assert!(!runtime.restore_float(&other).unwrap());
+        assert_eq!(runtime.rects().collect::<Vec<_>>(), tiled);
+        assert!(runtime.restore_float(&record).unwrap());
+        assert_eq!(runtime.rects().collect::<Vec<_>>(), floated);
+
+        assert!(runtime.focus(left));
+        assert!(runtime.toggle_zoom().unwrap());
+        assert_eq!(runtime.zoomed_pane(), Some(left));
+        assert!(runtime.float_record("work").is_none());
+        assert_eq!(
+            runtime.rects().collect::<Vec<_>>(),
+            vec![(left, full_rect(&runtime))]
+        );
+        assert!(runtime.float_pane(right, overlay).unwrap());
+        assert_eq!(runtime.zoomed_pane(), None);
+        assert_eq!(runtime.rects().collect::<Vec<_>>(), floated);
+    }
+
+    #[test]
+    fn move_float_repositions_the_overlay_and_keeps_the_tile() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        assert!(!runtime.move_float(20, 6).unwrap());
+        let left = runtime.focused_id();
+        let right = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        let tiled = runtime.rects().collect::<Vec<_>>();
+        let overlay = CellRect {
+            col: 10,
+            row: 4,
+            cols: 30,
+            rows: 8,
+        };
+        assert!(runtime.float_pane(right, overlay).unwrap());
+        let pty = (runtime.panes[&right].cols, runtime.panes[&right].rows);
+
+        assert!(runtime.move_float(20, 6).unwrap());
+        let moved = CellRect {
+            col: 20,
+            row: 6,
+            cols: 30,
+            rows: 8,
+        };
+        assert_eq!(
+            runtime.rects().collect::<Vec<_>>(),
+            vec![(left, full_rect(&runtime)), (right, moved)]
+        );
+        assert_eq!(runtime.active_pane_count(), 2);
+        assert_eq!(
+            (runtime.panes[&right].cols, runtime.panes[&right].rows),
+            pty,
+            "a move keeps the overlay size"
+        );
+        let record = runtime.float_record("work").unwrap();
+        assert_eq!(
+            (record.col, record.row, record.cols, record.rows),
+            (20, 6, 30, 8)
+        );
+
+        assert!(runtime.move_float(70, 20).unwrap());
+        assert_eq!(
+            runtime.rects().collect::<Vec<_>>(),
+            vec![
+                (left, full_rect(&runtime)),
+                (
+                    right,
+                    CellRect {
+                        col: 50,
+                        row: 16,
+                        cols: 30,
+                        rows: 8,
+                    }
+                )
+            ],
+            "a move past the edge stays inside the window"
+        );
+        let record = runtime.float_record("work").unwrap();
+        assert_eq!((record.col, record.row), (50, 16));
+        assert!(runtime.dock_float().unwrap());
+        assert_eq!(runtime.rects().collect::<Vec<_>>(), tiled);
+    }
+
+    #[test]
+    fn dragging_the_overlay_moves_it_and_a_press_on_the_tile_does_not() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        assert!(!runtime.begin_float_drag(12, 6));
+        assert!(!runtime.update_float_drag(17, 8).unwrap());
+        let left = runtime.focused_id();
+        let right = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        let tiled = runtime.rects().collect::<Vec<_>>();
+        let overlay = CellRect {
+            col: 10,
+            row: 4,
+            cols: 30,
+            rows: 8,
+        };
+        assert!(runtime.float_pane(right, overlay).unwrap());
+        runtime.focus(left);
+        let pty = (runtime.panes[&right].cols, runtime.panes[&right].rows);
+
+        assert_eq!(runtime.pane_at_px(12, 6), Some(right));
+        assert_eq!(runtime.pane_at_px(0, 0), Some(left));
+        assert_eq!(runtime.pane_at_cell(12, 6), Some((right, 2, 2)));
+        assert!(!runtime.begin_float_drag(0, 0));
+        assert!(!runtime.update_float_drag(17, 8).unwrap());
+        assert_eq!(
+            runtime.rects().collect::<Vec<_>>(),
+            vec![(left, full_rect(&runtime)), (right, overlay)]
+        );
+        assert_eq!(runtime.focused_id(), left);
+
+        assert!(runtime.begin_float_drag(12, 6));
+        assert_eq!(runtime.focused_id(), right);
+        assert!(runtime.update_float_drag(17, 8).unwrap());
+        let moved = CellRect {
+            col: 15,
+            row: 6,
+            cols: 30,
+            rows: 8,
+        };
+        assert_eq!(
+            runtime.rects().collect::<Vec<_>>(),
+            vec![(left, full_rect(&runtime)), (right, moved)],
+            "a drag moves the overlay by whole cells"
+        );
+        assert!(runtime.update_float_drag(17, 8).unwrap());
+        assert_eq!(
+            runtime.rects().collect::<Vec<_>>(),
+            vec![(left, full_rect(&runtime)), (right, moved)]
+        );
+        assert!(runtime.update_float_drag(0, 0).unwrap());
+        assert_eq!(
+            runtime.rects().collect::<Vec<_>>(),
+            vec![
+                (left, full_rect(&runtime)),
+                (
+                    right,
+                    CellRect {
+                        col: 0,
+                        row: 0,
+                        cols: 30,
+                        rows: 8,
+                    }
+                )
+            ]
+        );
+        assert!(runtime.update_float_drag(200, 40).unwrap());
+        let clamped = CellRect {
+            col: 50,
+            row: 16,
+            cols: 30,
+            rows: 8,
+        };
+        assert_eq!(
+            runtime.rects().collect::<Vec<_>>(),
+            vec![(left, full_rect(&runtime)), (right, clamped)]
+        );
+        let record = runtime.float_record("work").unwrap();
+        assert_eq!(
+            (record.col, record.row, record.cols, record.rows),
+            (50, 16, 30, 8)
+        );
+        assert_eq!(runtime.active_pane_count(), 2);
+        assert_eq!(
+            (runtime.panes[&right].cols, runtime.panes[&right].rows),
+            pty
+        );
+
+        assert!(runtime.end_float_drag());
+        assert!(!runtime.update_float_drag(12, 6).unwrap());
+        assert_eq!(
+            runtime.rects().collect::<Vec<_>>(),
+            vec![(left, full_rect(&runtime)), (right, clamped)]
+        );
+
+        assert!(runtime.begin_float_drag(52, 18));
+        assert!(runtime.dock_float().unwrap());
+        assert!(!runtime.update_float_drag(60, 20).unwrap());
+        assert_eq!(runtime.rects().collect::<Vec<_>>(), tiled);
+    }
+
+    #[test]
+    fn zooming_or_closing_the_floated_pane_ends_its_drag() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let left = runtime.focused_id();
+        let right = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        let overlay = CellRect {
+            col: 10,
+            row: 4,
+            cols: 30,
+            rows: 8,
+        };
+        assert!(runtime.float_pane(right, overlay).unwrap());
+        assert!(runtime.begin_float_drag(12, 6));
+        runtime.focus(left);
+        assert!(runtime.toggle_zoom().unwrap());
+        assert!(!runtime.update_float_drag(17, 8).unwrap());
+        assert_eq!(runtime.zoomed_pane(), Some(left));
+        assert_eq!(
+            runtime.rects().collect::<Vec<_>>(),
+            vec![(left, full_rect(&runtime))]
+        );
+
+        assert!(runtime.toggle_zoom().unwrap());
+        assert!(runtime.float_pane(right, overlay).unwrap());
+        assert!(runtime.begin_float_drag(12, 6));
+        assert!(runtime.close_focused().unwrap());
+        assert!(!runtime.update_float_drag(17, 8).unwrap());
+        assert_eq!(runtime.zoomed_pane(), None);
+        assert_eq!(
+            runtime.rects().collect::<Vec<_>>(),
+            vec![(left, full_rect(&runtime))]
+        );
+    }
+
+    #[test]
+    fn toggle_float_lifts_the_pane_and_a_second_call_docks_it() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let only = runtime.focused_id();
+        assert!(!runtime.toggle_float(only).unwrap());
+        let left = only;
+        let right = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        let tiled = runtime.rects().collect::<Vec<_>>();
+        runtime.focus(right);
+        assert!(runtime.toggle_zoom().unwrap());
+        assert!(runtime.toggle_float(right).unwrap());
+        assert_eq!(runtime.zoomed_pane(), None);
+        assert_eq!(runtime.floated_pane(), Some(right));
+        let overlay = CellRect {
+            col: 10,
+            row: 4,
+            cols: 40,
+            rows: 8,
+        };
+        assert_eq!(
+            runtime.rects().collect::<Vec<_>>(),
+            vec![(left, full_rect(&runtime)), (right, overlay)],
+            "the menu float uses one inset overlay"
+        );
+        assert_eq!(runtime.active_pane_count(), 2);
+        assert!(runtime.toggle_float(right).unwrap());
+        assert_eq!(runtime.floated_pane(), None);
+        assert_eq!(runtime.rects().collect::<Vec<_>>(), tiled);
+    }
+
+    #[test]
+    fn opening_a_space_applies_the_saved_overlay_and_a_later_refresh_keeps_a_move() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let left = runtime.focused_id();
+        let right = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        let overlay = CellRect {
+            col: 10,
+            row: 4,
+            cols: 30,
+            rows: 8,
+        };
+        assert!(runtime.float_pane(right, overlay).unwrap());
+        let mut records = SavedFloats::default();
+        runtime.sync_saved_float("work", &mut records);
+        assert_eq!(records.floats.len(), 1);
+        let saved = &records.floats[0];
+        assert_eq!(saved.space, "work");
+        assert_eq!(saved.session, "default");
+        assert_eq!(
+            (saved.window_slot, saved.pane_slot),
+            (0, 1),
+            "the record names the window and the depth-first pane"
+        );
+        assert_eq!(
+            (saved.col, saved.row, saved.cols, saved.rows),
+            (10, 4, 30, 8)
+        );
+
+        assert!(runtime.dock_float().unwrap());
+        assert!(
+            runtime.apply_open_space_float("work", &records).unwrap(),
+            "opening the space applies the saved overlay"
+        );
+        assert_eq!(
+            runtime.rects().collect::<Vec<_>>(),
+            vec![(left, full_rect(&runtime)), (right, overlay)]
+        );
+        assert_eq!(runtime.active_pane_count(), 2);
+
+        assert!(runtime.move_float(20, 6).unwrap());
+        let moved = CellRect {
+            col: 20,
+            row: 6,
+            cols: 30,
+            rows: 8,
+        };
+        assert!(
+            !runtime.apply_open_space_float("work", &records).unwrap(),
+            "a later layout refresh leaves the moved overlay"
+        );
+        assert_eq!(
+            runtime.rects().collect::<Vec<_>>(),
+            vec![(left, full_rect(&runtime)), (right, moved)],
+            "a later layout refresh does not snap the overlay back"
+        );
+
+        assert!(runtime.dock_float().unwrap());
+        runtime.sync_saved_float("work", &mut records);
+        assert!(
+            records.floats.is_empty(),
+            "docking drops this window's saved overlay"
+        );
+    }
+
+    #[test]
+    fn split_after_a_float_drops_the_saved_slot() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let left = runtime.focused_id();
+        let right = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        let overlay = CellRect {
+            col: 10,
+            row: 4,
+            cols: 30,
+            rows: 8,
+        };
+        assert!(runtime.float_pane(right, overlay).unwrap());
+        let mut records = SavedFloats::default();
+        runtime.sync_saved_float("work", &mut records);
+        assert_eq!(records.floats[0].pane_slot, 1);
+
+        runtime.focus(left);
+        let inserted = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        assert_eq!(runtime.floated_pane(), None, "a split docks the overlay");
+        let order = runtime.active_pane_ids();
+        assert_eq!(
+            order.get(1).copied(),
+            Some(inserted),
+            "the saved slot now names the pane the split inserted"
+        );
+        assert_ne!(order.get(1).copied(), Some(right));
+
+        runtime.sync_saved_float("work", &mut records);
+        assert!(
+            records.floats.is_empty(),
+            "the layout edit drops the saved overlay"
+        );
+        assert!(
+            !runtime.apply_open_space_float("work", &records).unwrap(),
+            "reopening does not restore the old slot"
+        );
+        assert_eq!(runtime.floated_pane(), None);
+        assert!(runtime.rects().all(|(_, rect)| rect != overlay));
+    }
+
+    #[test]
+    fn reorder_after_a_float_drops_the_saved_window() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let overlay = CellRect {
+            col: 10,
+            row: 4,
+            cols: 30,
+            rows: 8,
+        };
+        let right = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        runtime.new_tab("/bin/sh", &[]).unwrap();
+        runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        runtime.select_tab(0).unwrap();
+        assert!(runtime.float_pane(right, overlay).unwrap());
+        let mut records = SavedFloats::default();
+        runtime.sync_saved_float("work", &mut records);
+        assert_eq!(records.floats[0].window_slot, 0);
+        assert_eq!(records.floats[0].pane_slot, 1);
+
+        let prior = runtime.floated_window_slot();
+        assert_eq!(prior, Some(0));
+        assert!(runtime.reorder_tab(0, 1).unwrap());
+        assert_eq!(runtime.floated_pane(), None, "a reorder docks the overlay");
+        assert_eq!(runtime.selected_tab_index(), 1);
+        runtime.sync_saved_float_window("work", &mut records, prior);
+        assert!(records.floats.is_empty(), "the old window slot is cleared");
+        runtime.select_tab(0).unwrap();
+        assert!(
+            !runtime.apply_open_space_float("work", &records).unwrap(),
+            "the tab that slid into the old slot does not float"
+        );
+        runtime.select_tab(1).unwrap();
+        assert!(!runtime.apply_open_space_float("work", &records).unwrap());
+        assert_eq!(runtime.floated_pane(), None);
+    }
+
+    #[test]
+    fn close_after_a_float_drops_the_saved_window() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let overlay = CellRect {
+            col: 10,
+            row: 4,
+            cols: 30,
+            rows: 8,
+        };
+        runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        runtime.new_tab("/bin/sh", &[]).unwrap();
+        let right = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        assert!(runtime.float_pane(right, overlay).unwrap());
+        let mut records = SavedFloats::default();
+        runtime.sync_saved_float("work", &mut records);
+        assert_eq!(records.floats[0].window_slot, 1);
+
+        let prior = runtime.floated_window_slot();
+        assert_eq!(prior, Some(1));
+        assert!(runtime.close_tab().unwrap());
+        assert_eq!(runtime.tab_count(), 1);
+        assert_eq!(
+            runtime.floated_pane(),
+            None,
+            "closing the tab drops the overlay"
+        );
+        assert!(
+            runtime.sync_float_after_tab_edit("work", &mut records, prior.unwrap()),
+            "the closed tab's saved overlay is dropped"
+        );
+        assert!(records.floats.is_empty());
+        assert!(
+            !runtime.apply_open_space_float("work", &records).unwrap(),
+            "the remaining tab does not restore the closed slot"
+        );
+        assert_eq!(runtime.floated_pane(), None);
+    }
+
+    #[test]
+    fn close_of_the_floated_pane_drops_the_saved_slot() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let left = runtime.focused_id();
+        let right = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        let overlay = CellRect {
+            col: 10,
+            row: 4,
+            cols: 30,
+            rows: 8,
+        };
+        assert!(runtime.float_pane(right, overlay).unwrap());
+        let mut records = SavedFloats::default();
+        runtime.sync_saved_float("work", &mut records);
+        assert_eq!(records.floats[0].pane_slot, 1);
+        runtime.focus(right);
+        assert!(runtime.close_focused().unwrap());
+        assert_eq!(runtime.floated_pane(), None);
+        assert_eq!(runtime.focused_id(), left);
+        runtime.sync_saved_float("work", &mut records);
+        assert!(
+            records.floats.is_empty(),
+            "closing the floated pane drops its saved slot"
+        );
+        assert!(!runtime.apply_open_space_float("work", &records).unwrap());
+        assert_eq!(runtime.floated_pane(), None);
+    }
+
+    #[test]
+    fn floated_window_slot_follows_the_overlay_off_the_selected_tab() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let right = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        runtime.new_tab("/bin/sh", &[]).unwrap();
+        runtime.select_tab(0).unwrap();
+        let overlay = CellRect {
+            col: 10,
+            row: 4,
+            cols: 30,
+            rows: 8,
+        };
+        assert!(runtime.float_pane(right, overlay).unwrap());
+        assert_eq!(runtime.floated_window_slot(), Some(0));
+        assert!(runtime.select_tab(1).unwrap());
+        assert_eq!(
+            runtime.floated_pane(),
+            None,
+            "the overlay is not on this tab"
+        );
+        assert_eq!(
+            runtime.floated_window_slot(),
+            Some(0),
+            "the overlay's tab is still known after leaving it"
+        );
+    }
+
+    #[test]
+    fn closing_an_earlier_tab_rekeys_the_saved_overlay() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        runtime.new_tab("/bin/sh", &[]).unwrap();
+        let right = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        let overlay = CellRect {
+            col: 10,
+            row: 4,
+            cols: 30,
+            rows: 8,
+        };
+        assert!(runtime.float_pane(right, overlay).unwrap());
+        let mut records = SavedFloats::default();
+        runtime.sync_saved_float("work", &mut records);
+        assert_eq!(records.floats[0].window_slot, 1);
+        let prior = runtime.floated_window_slot().unwrap();
+        assert_eq!(prior, 1);
+        assert!(runtime.close_tab_at(0).unwrap());
+        assert_eq!(runtime.tab_count(), 1);
+        assert_eq!(
+            runtime.floated_window_slot(),
+            Some(0),
+            "closing an earlier tab moves the overlay"
+        );
+        assert!(
+            runtime.sync_float_after_tab_edit("work", &mut records, prior),
+            "the saved overlay follows the tab"
+        );
+        assert_eq!(records.floats.len(), 1);
+        assert_eq!(records.floats[0].window_slot, 0);
+        assert_eq!(records.floats[0].pane_slot, 1);
+        assert!(runtime.dock_float().unwrap());
+        assert!(
+            runtime.apply_open_space_float("work", &records).unwrap(),
+            "the rekeyed record restores the overlay"
+        );
+        assert_eq!(runtime.floated_pane(), Some(right));
     }
 
     #[test]

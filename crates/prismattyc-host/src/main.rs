@@ -14221,6 +14221,41 @@ fn handle_divider_drag_move(host: &mut HostState) -> bool {
     true
 }
 
+/// Left press on the overlay starts a drag. The tile underneath does not.
+fn handle_float_drag_press(host: &mut HostState, button: MouseButton) -> bool {
+    if button != MouseButton::Left {
+        return false;
+    }
+    let Some((px, py)) = pointer_cells(host) else {
+        return false;
+    };
+    if !host.mux.begin_float_drag(px, py) {
+        return false;
+    }
+    cancel_tab_rename(host);
+    host.cursor_cell = None;
+    true
+}
+
+/// The overlay follows the pointer by whole cells. The size stays.
+fn handle_float_drag_move(host: &mut HostState) -> bool {
+    if !host.mux.float_drag_active() {
+        return false;
+    }
+    let Some((px, py)) = pointer_cells(host) else {
+        return true;
+    };
+    match host.mux.update_float_drag(px, py) {
+        Ok(true) => {
+            host.cursor_cell = None;
+            host.dirty = true;
+        }
+        Ok(false) => {}
+        Err(error) => eprintln!("prismattyc-host: float move failed: {error:#}"),
+    }
+    true
+}
+
 /// col-resize / row-resize over a divider (or during a drag), default
 /// otherwise. Only touches the cursor when the state changes.
 fn update_divider_cursor(host: &mut HostState) {
@@ -17685,18 +17720,20 @@ fn e2e_initial_window_cells() -> Option<(usize, usize)> {
     (cols > 0 && cols <= 400 && rows > 0 && rows <= 120).then_some((cols, rows))
 }
 
-fn cell_at_position(
+/// Topmost pane whose terminal content box contains `position`, as
+/// `(pane, rect, outer_row, col)`. Later rectangles win when they overlap.
+fn topmost_content_cell(
     position: PhysicalPosition<f64>,
     font: &FontMetrics,
     mux: &mux::MuxRuntime,
-) -> Option<(PaneId, usize, usize)> {
+) -> Option<(PaneId, prismattyc_mux::CellRect, usize, usize)> {
     if !position.x.is_finite() || !position.y.is_finite() || position.x < 0.0 || position.y < 0.0 {
         return None;
     }
     let px = position.x as usize;
     let py = position.y as usize;
     let geom = mux.geom();
-    mux.rects().find_map(|(pane, rect)| {
+    mux.rects().rev().find_map(|(pane, rect)| {
         let (x, y, width, height) = geom.pane_content_px(rect);
         let inside =
             px >= x && py >= y && px < x.saturating_add(width) && py < y.saturating_add(height);
@@ -17705,14 +17742,23 @@ fn cell_at_position(
         }
         let col = (px - x) / font.cell_w;
         let outer_row = (py - y) / font.cell_h;
-        let dock_rows = mux.workspace_rows(pane);
-        if outer_row < dock_rows {
-            return None;
-        }
-        let row = outer_row - dock_rows;
-        let (cols, rows) = geom.content_cells(rect);
-        (col < cols && row < rows.saturating_sub(dock_rows)).then_some((pane, row, col))
+        Some((pane, rect, outer_row, col))
     })
+}
+
+fn cell_at_position(
+    position: PhysicalPosition<f64>,
+    font: &FontMetrics,
+    mux: &mux::MuxRuntime,
+) -> Option<(PaneId, usize, usize)> {
+    let (pane, rect, outer_row, col) = topmost_content_cell(position, font, mux)?;
+    let dock_rows = mux.workspace_rows(pane);
+    if outer_row < dock_rows {
+        return None;
+    }
+    let row = outer_row - dock_rows;
+    let (cols, rows) = mux.geom().content_cells(rect);
+    (col < cols && row < rows.saturating_sub(dock_rows)).then_some((pane, row, col))
 }
 
 fn workspace_hit_at_position(
@@ -17720,28 +17766,15 @@ fn workspace_hit_at_position(
     font: &FontMetrics,
     mux: &mux::MuxRuntime,
 ) -> Option<(PaneId, rich::WorkspaceHit)> {
-    if !position.x.is_finite() || !position.y.is_finite() || position.x < 0.0 || position.y < 0.0 {
+    let (pane, _, row, col) = topmost_content_cell(position, font, mux)?;
+    let dock_rows = mux.workspace_rows(pane);
+    if row >= dock_rows {
         return None;
     }
-    let px = position.x as usize;
-    let py = position.y as usize;
-    let geom = mux.geom();
-    mux.rects().find_map(|(pane, rect)| {
-        let (x, y, width, height) = geom.pane_content_px(rect);
-        if px < x || py < y || px >= x.saturating_add(width) || py >= y.saturating_add(height) {
-            return None;
-        }
-        let row = (py - y) / font.cell_h;
-        let col = (px - x) / font.cell_w;
-        let dock_rows = mux.workspace_rows(pane);
-        if row >= dock_rows {
-            return None;
-        }
-        Some((
-            pane,
-            mux.workspace_hit(pane, u16::try_from(row).ok()?, u16::try_from(col).ok()?)?,
-        ))
-    })
+    Some((
+        pane,
+        mux.workspace_hit(pane, u16::try_from(row).ok()?, u16::try_from(col).ok()?)?,
+    ))
 }
 
 fn rich_pointer_dragged(
@@ -21978,6 +22011,11 @@ impl ApplicationHandler<UserAction> for App {
                     host.window.request_redraw();
                     return;
                 }
+                if handle_float_drag_move(host) {
+                    sync_chrome_hover(host);
+                    host.window.request_redraw();
+                    return;
+                }
                 let hover_changed = sync_chrome_hover(host);
                 if handle_strip_drag_move(host) {
                     if host.strip_drag.as_ref().is_some_and(|drag| drag.active) {
@@ -22321,8 +22359,20 @@ impl ApplicationHandler<UserAction> for App {
                     host.window.request_redraw();
                     return;
                 }
+                if state == ElementState::Pressed && handle_float_drag_press(host, button) {
+                    host.left_button_down = false;
+                    host.rich_pointer = None;
+                    host.app_mouse_button = None;
+                    host.window.request_redraw();
+                    return;
+                }
                 if state == ElementState::Released && host.divider_drag.take().is_some() {
                     update_divider_cursor(host);
+                    host.window.request_redraw();
+                    return;
+                }
+                if state == ElementState::Released && host.mux.end_float_drag() {
+                    host.cursor_cell = None;
                     host.window.request_redraw();
                     return;
                 }

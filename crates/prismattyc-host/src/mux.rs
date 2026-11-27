@@ -2952,6 +2952,17 @@ struct FloatPlacement {
     rect: CellRect,
 }
 
+/// Pixel drag of one overlay. `origin_*` is the visible place when the press
+/// landed, and `start_*` is that press. Later motion is measured from the
+/// press, in whole cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FloatDrag {
+    origin_col: usize,
+    origin_row: usize,
+    start_x: usize,
+    start_y: usize,
+}
+
 /// Domain topology plus one live runtime per pane leaf.
 pub(crate) struct MuxRuntime {
     /// Unique per runtime in this process. Pane ids restart at 1 in every
@@ -3000,6 +3011,8 @@ pub(crate) struct MuxRuntime {
     /// Client-local overlay for one pane. The server tree stays tiled.
     /// Siblings reflow, and this pane is drawn at `rect`.
     floated: Option<FloatPlacement>,
+    /// Armed while the pointer is dragging the overlay.
+    float_drag: Option<FloatDrag>,
 }
 
 impl MuxRuntime {
@@ -3136,6 +3149,7 @@ impl MuxRuntime {
             fixed_tab_names: HashMap::new(),
             zoomed: None,
             floated: None,
+            float_drag: None,
         })
     }
 
@@ -3996,9 +4010,11 @@ impl MuxRuntime {
     fn set_zoom(&mut self, zoomed: Option<PaneId>) -> Result<bool> {
         let prior_zoom = self.zoomed;
         let prior_float = self.floated;
+        let prior_drag = self.float_drag;
         self.zoomed = zoomed;
         if zoomed.is_some() {
             self.floated = None;
+            self.float_drag = None;
         }
         let applied = self
             .window_rects(self.active_window())
@@ -4006,6 +4022,7 @@ impl MuxRuntime {
         if let Err(error) = applied {
             self.zoomed = prior_zoom;
             self.floated = prior_float;
+            self.float_drag = prior_drag;
             return Err(error);
         }
         Ok(true)
@@ -4041,7 +4058,6 @@ impl MuxRuntime {
     /// Move the overlay to `col`, `row`. The size stays. `Ok(false)` when
     /// nothing is floating. The stored place is the visible rectangle, so a
     /// request past the window edge is kept inside it.
-    #[cfg(test)]
     pub(crate) fn move_float(&mut self, col: usize, row: usize) -> Result<bool> {
         let Some(prior) = self.floated else {
             return Ok(false);
@@ -4076,16 +4092,64 @@ impl MuxRuntime {
         Ok(true)
     }
 
+    /// Arm a drag when the topmost pane at `(x, y)` is the overlay. Focus
+    /// follows that pane. A press on the tile underneath returns `false`.
+    pub(crate) fn begin_float_drag(&mut self, x: usize, y: usize) -> bool {
+        let Some(placement) = self.floated else {
+            return false;
+        };
+        if self.pane_at_px(x, y) != Some(placement.pane) {
+            return false;
+        }
+        self.float_drag = Some(FloatDrag {
+            origin_col: placement.rect.col,
+            origin_row: placement.rect.row,
+            start_x: x,
+            start_y: y,
+        });
+        self.focus(placement.pane);
+        true
+    }
+
+    /// Move the overlay by the whole cells between the press and `(x, y)`.
+    /// The size stays. `Ok(false)` when no drag is armed.
+    pub(crate) fn update_float_drag(&mut self, x: usize, y: usize) -> Result<bool> {
+        let Some(drag) = self.float_drag else {
+            return Ok(false);
+        };
+        let cell_w = self.geom.cell_w.max(1);
+        let cell_h = self.geom.cell_h.max(1);
+        let dcol = (x as isize).saturating_sub(drag.start_x as isize) / cell_w as isize;
+        let drow = (y as isize).saturating_sub(drag.start_y as isize) / cell_h as isize;
+        let col = (drag.origin_col as isize).saturating_add(dcol).max(0) as usize;
+        let row = (drag.origin_row as isize).saturating_add(drow).max(0) as usize;
+        self.move_float(col, row)?;
+        Ok(true)
+    }
+
+    /// Drop the armed overlay drag. `true` when one was armed.
+    pub(crate) fn end_float_drag(&mut self) -> bool {
+        self.float_drag.take().is_some()
+    }
+
+    /// True while an overlay drag is armed.
+    pub(crate) fn float_drag_active(&self) -> bool {
+        self.float_drag.is_some()
+    }
+
     /// Put the floated pane back in the tile. `Ok(false)` when nothing is floating.
     pub(crate) fn dock_float(&mut self) -> Result<bool> {
         let Some(prior) = self.floated.take() else {
+            self.float_drag = None;
             return Ok(false);
         };
+        let prior_drag = self.float_drag.take();
         let applied = self
             .window_rects(self.active_window())
             .and_then(|rects| self.apply_rects(rects, self.geom));
         if let Err(error) = applied {
             self.floated = Some(prior);
+            self.float_drag = prior_drag;
             return Err(error);
         }
         Ok(true)
@@ -4257,11 +4321,13 @@ impl MuxRuntime {
         let prior_rects = self.rects.clone();
         let prior_zoom = self.zoomed;
         let prior_float = self.floated;
+        let prior_drag = self.float_drag;
         if prior_zoom == Some(pane) {
             self.zoomed = None;
         }
         if prior_float.is_some_and(|placement| placement.pane == pane) {
             self.floated = None;
+            self.float_drag = None;
         }
         let prior_focus = self.view.focused_pane(window).unwrap_or(pane);
         let next_focus = self
@@ -4279,6 +4345,7 @@ impl MuxRuntime {
                     self.view = prior_view;
                     self.zoomed = prior_zoom;
                     self.floated = prior_float;
+                    self.float_drag = prior_drag;
                     return Err(error);
                 }
             };
@@ -4288,6 +4355,7 @@ impl MuxRuntime {
                 self.rects = prior_rects;
                 self.zoomed = prior_zoom;
                 self.floated = prior_float;
+                self.float_drag = prior_drag;
                 return Err(error);
             }
             if let Some(runtime) = self.panes.get_mut(&next_focus) {
@@ -4522,7 +4590,7 @@ impl MuxRuntime {
             .collect()
     }
 
-    pub(crate) fn rects(&self) -> impl Iterator<Item = (PaneId, CellRect)> + '_ {
+    pub(crate) fn rects(&self) -> impl DoubleEndedIterator<Item = (PaneId, CellRect)> + '_ {
         self.rects.iter().copied()
     }
 
@@ -4535,12 +4603,12 @@ impl MuxRuntime {
 
     #[cfg(test)]
     pub(crate) fn pane_at_cell(&self, col: usize, row: usize) -> Option<(PaneId, usize, usize)> {
-        self.rects.iter().find_map(|(pane, rect)| {
+        self.rects.iter().rev().find_map(|(pane, rect)| {
             let inside = col >= rect.col
                 && row >= rect.row
                 && col < rect.col.saturating_add(rect.cols)
                 && row < rect.row.saturating_add(rect.rows);
-            inside.then_some((*pane, row - rect.row, col - rect.col))
+            inside.then(|| (*pane, row - rect.row, col - rect.col))
         })
     }
 
@@ -5429,6 +5497,7 @@ impl MuxRuntime {
             .is_some_and(|placement| !self.panes.contains_key(&placement.pane))
         {
             self.floated = None;
+            self.float_drag = None;
         }
         // The closed tab cannot be returned to; the tab we land on is the
         // sensible "last" only if it was already the previous one.
@@ -5749,11 +5818,12 @@ impl MuxRuntime {
         self.replace_layout(next)
     }
 
-    /// The pane in the active window whose full slot, chrome included,
-    /// contains the pixel. Used by a pane-header drag released over another
-    /// pane's body.
+    /// The topmost pane in the active window whose full slot, chrome
+    /// included, contains the pixel. Later rectangles win, so an overlay is
+    /// hit instead of the tile underneath. Used by a pane-header drag
+    /// released over another pane's body.
     pub(crate) fn pane_at_px(&self, x: usize, y: usize) -> Option<PaneId> {
-        self.rects.iter().find_map(|(pane, rect)| {
+        self.rects.iter().rev().find_map(|(pane, rect)| {
             let (sx, sy, sw, sh) = self.geom.pane_slot_px(*rect);
             (x >= sx && x < sx + sw && y >= sy && y < sy + sh).then_some(*pane)
         })
@@ -9097,6 +9167,143 @@ mod tests {
         assert_eq!((record.col, record.row), (50, 16));
         assert!(runtime.dock_float().unwrap());
         assert_eq!(runtime.rects().collect::<Vec<_>>(), tiled);
+    }
+
+    #[test]
+    fn dragging_the_overlay_moves_it_and_a_press_on_the_tile_does_not() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        assert!(!runtime.begin_float_drag(12, 6));
+        assert!(!runtime.update_float_drag(17, 8).unwrap());
+        let left = runtime.focused_id();
+        let right = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        let tiled = runtime.rects().collect::<Vec<_>>();
+        let overlay = CellRect {
+            col: 10,
+            row: 4,
+            cols: 30,
+            rows: 8,
+        };
+        assert!(runtime.float_pane(right, overlay).unwrap());
+        runtime.focus(left);
+        let pty = (runtime.panes[&right].cols, runtime.panes[&right].rows);
+
+        assert_eq!(runtime.pane_at_px(12, 6), Some(right));
+        assert_eq!(runtime.pane_at_px(0, 0), Some(left));
+        assert_eq!(runtime.pane_at_cell(12, 6), Some((right, 2, 2)));
+        assert!(!runtime.begin_float_drag(0, 0));
+        assert!(!runtime.update_float_drag(17, 8).unwrap());
+        assert_eq!(
+            runtime.rects().collect::<Vec<_>>(),
+            vec![(left, full_rect(&runtime)), (right, overlay)]
+        );
+        assert_eq!(runtime.focused_id(), left);
+
+        assert!(runtime.begin_float_drag(12, 6));
+        assert_eq!(runtime.focused_id(), right);
+        assert!(runtime.update_float_drag(17, 8).unwrap());
+        let moved = CellRect {
+            col: 15,
+            row: 6,
+            cols: 30,
+            rows: 8,
+        };
+        assert_eq!(
+            runtime.rects().collect::<Vec<_>>(),
+            vec![(left, full_rect(&runtime)), (right, moved)],
+            "a drag moves the overlay by whole cells"
+        );
+        assert!(runtime.update_float_drag(17, 8).unwrap());
+        assert_eq!(
+            runtime.rects().collect::<Vec<_>>(),
+            vec![(left, full_rect(&runtime)), (right, moved)]
+        );
+        assert!(runtime.update_float_drag(0, 0).unwrap());
+        assert_eq!(
+            runtime.rects().collect::<Vec<_>>(),
+            vec![
+                (left, full_rect(&runtime)),
+                (
+                    right,
+                    CellRect {
+                        col: 0,
+                        row: 0,
+                        cols: 30,
+                        rows: 8,
+                    }
+                )
+            ]
+        );
+        assert!(runtime.update_float_drag(200, 40).unwrap());
+        let clamped = CellRect {
+            col: 50,
+            row: 16,
+            cols: 30,
+            rows: 8,
+        };
+        assert_eq!(
+            runtime.rects().collect::<Vec<_>>(),
+            vec![(left, full_rect(&runtime)), (right, clamped)]
+        );
+        let record = runtime.float_record("work").unwrap();
+        assert_eq!(
+            (record.col, record.row, record.cols, record.rows),
+            (50, 16, 30, 8)
+        );
+        assert_eq!(runtime.active_pane_count(), 2);
+        assert_eq!(
+            (runtime.panes[&right].cols, runtime.panes[&right].rows),
+            pty
+        );
+
+        assert!(runtime.end_float_drag());
+        assert!(!runtime.update_float_drag(12, 6).unwrap());
+        assert_eq!(
+            runtime.rects().collect::<Vec<_>>(),
+            vec![(left, full_rect(&runtime)), (right, clamped)]
+        );
+
+        assert!(runtime.begin_float_drag(52, 18));
+        assert!(runtime.dock_float().unwrap());
+        assert!(!runtime.update_float_drag(60, 20).unwrap());
+        assert_eq!(runtime.rects().collect::<Vec<_>>(), tiled);
+    }
+
+    #[test]
+    fn zooming_or_closing_the_floated_pane_ends_its_drag() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let left = runtime.focused_id();
+        let right = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        let overlay = CellRect {
+            col: 10,
+            row: 4,
+            cols: 30,
+            rows: 8,
+        };
+        assert!(runtime.float_pane(right, overlay).unwrap());
+        assert!(runtime.begin_float_drag(12, 6));
+        runtime.focus(left);
+        assert!(runtime.toggle_zoom().unwrap());
+        assert!(!runtime.update_float_drag(17, 8).unwrap());
+        assert_eq!(runtime.zoomed_pane(), Some(left));
+        assert_eq!(
+            runtime.rects().collect::<Vec<_>>(),
+            vec![(left, full_rect(&runtime))]
+        );
+
+        assert!(runtime.toggle_zoom().unwrap());
+        assert!(runtime.float_pane(right, overlay).unwrap());
+        assert!(runtime.begin_float_drag(12, 6));
+        assert!(runtime.close_focused().unwrap());
+        assert!(!runtime.update_float_drag(17, 8).unwrap());
+        assert_eq!(runtime.zoomed_pane(), None);
+        assert_eq!(
+            runtime.rects().collect::<Vec<_>>(),
+            vec![(left, full_rect(&runtime))]
+        );
     }
 
     #[test]

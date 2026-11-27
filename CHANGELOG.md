@@ -6,6 +6,10 @@
 
 - Experimental native terminal sessions and images have their own switch, `--experimental-native` or `PRISMATTYC_EXPERIMENTAL_NATIVE=1`, and no longer need rich overlays turned on. `--experimental-rich` still turns native sessions on too for this release; after that it turns on only rich overlays. Both stay off by default.
 
+### Removed
+
+- The classic terminal host (`prismattyc`) no longer has the experimental rich mode: it does not answer capability queries or paint overlays that an app sends. `--experimental-rich` and `PRISMATTYC_EXPERIMENTAL_RICH` are still accepted for one release and only print a notice that they are ignored. Output from such apps is unchanged: their capability messages never reached the screen before and still don't.
+
 ## [0.3.78] - 2026-11-26
 
 ### Added

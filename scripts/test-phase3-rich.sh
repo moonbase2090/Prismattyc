@@ -54,14 +54,6 @@ rich_host_tests=(
   "theme::tests::status_tones_resolve_through_each_active_theme"
   "tests::idle_control_flow_is_wait_not_poll"
 )
-rich_tty_tests=(
-  "tests::paint_policy_skips_primary_overlays_on_alt"
-  "tests::process_rich_chunk_flood_stays_responsive"
-  "tests::experimental_on_replies_and_attaches_cell_rect"
-  "tests::v1_negotiate_grants_viewport_and_limits"
-  "tests::update_mutates_text_without_geometry"
-  "tests::viewport_stays_pinned_while_cell_rect_translates"
-)
 classic_core_tests=(
   "wraps_only_when_the_next_character_arrives"
   "scrolling_is_bounded"
@@ -125,30 +117,20 @@ rich_mux_tests=(
 
 require_tests prismattyc-protocol "${rich_protocol_tests[@]}"
 require_tests prismattyc-host "${rich_host_tests[@]}"
-require_tests prismattyc "${rich_tty_tests[@]}"
 require_tests prismattyc-render "${rich_render_tests[@]}"
 require_tests prismattyc-mux "${rich_mux_tests[@]}"
 
-echo "phase3-rich: named protocol / host / TTY rich proofs"
+echo "phase3-rich: named protocol / host rich proofs"
 run_named prismattyc-protocol "${rich_protocol_tests[@]}"
 run_named prismattyc-host "${rich_host_tests[@]}"
-run_named prismattyc "${rich_tty_tests[@]}"
 run_named prismattyc-render "${rich_render_tests[@]}"
 run_named prismattyc-mux "${rich_mux_tests[@]}"
 
-run_classic() {
-  local label="$1"
-  echo "phase3-rich: classic Spike Baseline v0 fixtures ($label)"
-  run_named prismattyc-core "${classic_core_tests[@]}"
-  run_named prismattyc-emulator "${classic_emu_tests[@]}"
-  run_named prismattyc-render "${classic_render_tests[@]}"
-  run_named prismattyc "${classic_tty_tests[@]}"
-}
+echo "phase3-rich: classic Spike Baseline v0 fixtures"
+run_named prismattyc-core "${classic_core_tests[@]}"
+run_named prismattyc-emulator "${classic_emu_tests[@]}"
+run_named prismattyc-render "${classic_render_tests[@]}"
+run_named prismattyc "${classic_tty_tests[@]}"
 
-unset PRISMATTYC_EXPERIMENTAL_RICH || true
-run_classic "flag off"
-
-PRISMATTYC_EXPERIMENTAL_RICH=1 run_classic "flag on"
-
-echo "phase3-rich: PASS (named rich + classic fixtures flag off/on)"
+echo "phase3-rich: PASS (named rich + classic fixtures)"
 echo "phase3-rich: not a PRD §5.6 pass; A-6 remains deferred"

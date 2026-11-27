@@ -553,7 +553,7 @@ def live_update_fallbacks(f):
 
     # 2. Exec fails: the binary answers the probe, then is gone.
     vanishing = stand_in(f, "pmuxd-vanishing",
-                         'if [ "$1" = "--handoff-probe" ]; then "$REAL" "$@"; rm -f "$0"; exit 0; fi\nexit 1\n')
+                         'case " $* " in *" --handoff-probe "*) probe=1;; esac\nif [ -n "$probe" ]; then "$REAL" "$@"; rm -f "$0"; exit 0; fi\nexit 1\n')
     answer = request_handoff(f, vanishing)
     assert answer["status"] == "ok", answer
     restored_after_crash(f, daemon, pid)
@@ -563,7 +563,7 @@ def live_update_fallbacks(f):
     daemon = f.daemon()
     pane_id, pid = live_session(f, "live-two")
     unreadable = stand_in(f, "pmuxd-unreadable",
-                          'if [ "$1" = "--handoff-probe" ]; then exec "$REAL" "$@"; fi\n'
+                          'case " $* " in *" --handoff-probe "*) probe=1;; esac\nif [ -n "$probe" ]; then exec "$REAL" "$@"; fi\n'
                           'fd=; prev=; for a in "$@"; do [ "$prev" = "--handoff-fd" ] && fd=$a; prev=$a; done\n'
                           'eval "exec $fd<&-"\nexec "$REAL" "$@"\n')
     answer = request_handoff(f, unreadable)

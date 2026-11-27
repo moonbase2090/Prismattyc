@@ -8,4 +8,3 @@ publish.workspace = true
 
 [dependencies]
 prismattyc-core = { path = "../prismattyc-core" }
-prismattyc-protocol = { path = "../prismattyc-protocol" }

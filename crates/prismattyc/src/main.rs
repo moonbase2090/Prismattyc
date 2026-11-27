@@ -614,15 +614,9 @@ fn paint(
         sync_host_title(0, emulator.screen().max_view_scroll(), false);
     }
     let sel = if on_alt { None } else { selection.range() };
-    if sel.is_none() {
-        renderer
-            .render(emulator.screen())
-            .context("render classic fast path")?;
-    } else {
-        renderer
-            .render_composed(emulator.screen(), &[], sel)
-            .context("render classic with selection")?;
-    }
+    renderer
+        .render_scrolled(emulator.screen(), 0, true, sel)
+        .context("render classic grid")?;
     // Honor DECTCEM: show host caret only when the child has not hidden it.
     // Find mode owns the bottom row chrome and keeps the host caret hidden.
     if find.active {

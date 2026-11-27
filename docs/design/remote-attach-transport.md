@@ -265,7 +265,9 @@ The gate constrains a connection only when the SSH server authenticated it
 with a companion key. The same account can usually also be reached:
 
 - with a password or keyboard-interactive login, if the SSH server allows them;
-- with any other key in `authorized_keys` that has no `command=` or `restrict`;
+- with any other key in `authorized_keys` that is not limited by both a forced
+  command and forwarding turned off. `restrict` alone still allows a shell
+  without a terminal, and `command=` alone still allows forwarding;
 - through other credentials the server accepts (certificates, other key files).
 
 Any of these gives a normal login shell. From that shell the caller can run
@@ -295,8 +297,19 @@ what they can see, without changing anything:
 - They probe the address and port in the pairing code for the authentication
   methods the server offers (an authentication attempt with method `none`).
   A warning is shown when `password` or `keyboard-interactive` is offered.
-- They list the account's `authorized_keys` entries that are not companion
-  entries and have no `command=` or `restrict`, as "full-access keys".
+- They list every entry in the account's `authorized_keys` files that pairing
+  did not write, in one of three classes. A key falls in the first class that
+  matches:
+  - **Full access:** no `command=`. This includes keys with only `restrict`,
+    which can still run any command without a terminal.
+  - **Can forward:** a `command=`, but forwarding is still on: neither
+    `restrict` nor `no-port-forwarding` is present, or a later
+    `port-forwarding` option turns it back on. Such a key can forward the pmux
+    socket whatever its command is.
+  - **Forced command:** a `command=` with forwarding off. The report shows the
+    command, because it cannot tell whether that command is itself a shell.
+- The report covers the default `authorized_keys` files. A server that reads
+  keys from elsewhere is outside what it can see, and the report says so.
 - Neither check reads the server's configuration or needs elevated rights.
 
 **Optional hardening: a companion-only listener.** A user with admin rights can
@@ -339,8 +352,8 @@ Assets:
 | --- | --- | --- | --- |
 | Anonymous caller on the network | Probes or brute-forces the host | No new listener. On the overlay, SSH is not exposed to the internet. Pairing warns when the server offers password or keyboard-interactive logins. | Key-only login is a host assumption the project cannot enforce. A public SSH port (option A) with passwords on is exposed to guessing. |
 | Interception on public Wi-Fi | Reads or alters the session | SSH encryption with host keys pinned at pairing; no trust on first use. | None beyond SSH itself. |
-| Socket forwarding to reach the raw control plane | Full control, including shutdown and plug-in admin | For companion keys, `restrict` turns off socket and port forwarding and the forced command cannot be bypassed. On the companion-only listener, `DisableForwarding` covers every key. | On an ordinary SSH port, other keys or a password can still forward the socket. `pmux companion list` flags full-access keys. |
-| Other credentials on the same account | A normal shell, bypassing the gate | Out of the gate's reach. Host assumptions are stated; pairing reports offered methods and full-access keys; the companion-only listener closes these paths on its port. | Without that listener, the account is as safe as its weakest SSH credential, with or without the companion. |
+| Socket forwarding to reach the raw control plane | Full control, including shutdown and plug-in admin | For companion keys, `restrict` turns off socket and port forwarding and the forced command cannot be bypassed. On the companion-only listener, `DisableForwarding` covers every key. | On an ordinary SSH port, other keys or a password can still forward the socket. `pmux companion list` reports full-access and can-forward keys. |
+| Other credentials on the same account | A normal shell, bypassing the gate | Out of the gate's reach. Host assumptions are stated; pairing reports offered methods and keys that are not fully constrained; the companion-only listener closes these paths on its port. | Without that listener, the account is as safe as its weakest SSH credential, with or without the companion. |
 | Gate command injection | Shell access through crafted verbs | Fixed grammar, no shell, identifiers checked against the catalog, refused input exits. | Gate bugs. The gate is small and gets its own tests. |
 | Lost or stolen phone | Someone types into panes | Key needs user presence (biometric or passcode) per connection. Revoke from the host. Watch-only scope for devices that do not need input. | A `drive` device that is unlocked and in hand can type commands. This is inherent to "full terminal input" and should be stated plainly in the app. |
 | Malicious app or backup on the phone | Copies the key | Key is non-exportable and never in backups. | A compromised OS can still ask the key store to sign while unlocked. |
@@ -401,8 +414,12 @@ Checks for the other ways in (the test SSH server also has a password set for
 the test user and one ordinary, unrestricted key):
 
 11. With password login on, the pairing probe reports `password` and shows a
-    warning. With it off, no warning. `pmux companion list` lists the ordinary
-    key as a full-access key.
+    warning. With it off, no warning. `pmux companion list` classes the
+    ordinary key and a `restrict`-only key as full access, a `command=`-only
+    key as can forward, and a `restrict,command=` key as forced command.
+    Companion entries do not appear. A non-PTY `ssh KEY id` with the
+    `restrict`-only key, and `ssh -L` to the socket with the `command=`-only
+    key, both succeed, which confirms the classes.
 12. On the ordinary port, the unrestricted key still gets a shell and can
     forward the socket. This records the limit stated above; it is expected to
     pass before and after the gate.

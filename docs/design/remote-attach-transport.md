@@ -196,7 +196,8 @@ from the pairing code is dialed.
 Pairing writes one line per device (wrapped here; it is one line on disk):
 
 ```
-restrict,pty,command="pmux companion gate --device dev_7f3a --scope drive"
+from="<overlay range>",restrict,pty,
+  command="pmux companion gate --device dev_7f3a --scope drive"
   ecdsa-sha2-nistp256 AAAA... prismattyc-companion dev_7f3a
 ```
 

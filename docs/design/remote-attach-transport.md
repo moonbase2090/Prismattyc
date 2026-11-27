@@ -270,10 +270,18 @@ with a companion key. The same account can usually also be reached:
   without a terminal, and `command=` alone still allows forwarding;
 - through other credentials the server accepts (certificates, other key files).
 
-Any of these gives a normal login shell. From that shell the caller can run
-`pmux` directly or forward the socket. The gate cannot stop this, and Prismattyc
-does not edit the host's SSH server configuration. The design therefore keeps
-three layers apart.
+What each path reaches differs:
+
+- A password, a key with no `command=` (including a `restrict`-only key), or an
+  unconstrained certificate gives a shell, with or without a terminal. From it
+  the caller can run `pmux` directly.
+- A key with a `command=` but forwarding still on gives no shell. It can still
+  forward a local port to the pmux socket and send any control request through
+  it.
+- Either way the caller reaches the whole control plane, not the gate's verbs.
+
+The gate cannot stop this, and Prismattyc does not edit the host's SSH server
+configuration. The design therefore keeps three layers apart.
 
 **What the companion itself does.** The client offers only its own device key.
 It never uses an SSH agent, a password or an interactive prompt. A companion
@@ -353,7 +361,7 @@ Assets:
 | Anonymous caller on the network | Probes or brute-forces the host | No new listener. On the overlay, SSH is not exposed to the internet. Pairing warns when the server offers password or keyboard-interactive logins. | Key-only login is a host assumption the project cannot enforce. A public SSH port (option A) with passwords on is exposed to guessing. |
 | Interception on public Wi-Fi | Reads or alters the session | SSH encryption with host keys pinned at pairing; no trust on first use. | None beyond SSH itself. |
 | Socket forwarding to reach the raw control plane | Full control, including shutdown and plug-in admin | For companion keys, `restrict` turns off socket and port forwarding and the forced command cannot be bypassed. On the companion-only listener, `DisableForwarding` covers every key. | On an ordinary SSH port, other keys or a password can still forward the socket. `pmux companion list` reports full-access and can-forward keys. |
-| Other credentials on the same account | A normal shell, bypassing the gate | Out of the gate's reach. Host assumptions are stated; pairing reports offered methods and keys that are not fully constrained; the companion-only listener closes these paths on its port. | Without that listener, the account is as safe as its weakest SSH credential, with or without the companion. |
+| Other credentials on the same account | A shell, or a forwarded pmux socket, bypassing the gate | Out of the gate's reach. Host assumptions are stated; pairing reports offered methods and keys that are not fully constrained; the companion-only listener closes these paths on its port. | Without that listener, the account is as safe as its weakest SSH credential, with or without the companion. |
 | Gate command injection | Shell access through crafted verbs | Fixed grammar, no shell, identifiers checked against the catalog, refused input exits. | Gate bugs. The gate is small and gets its own tests. |
 | Lost or stolen phone | Someone types into panes | Key needs user presence (biometric or passcode) per connection. Revoke from the host. Watch-only scope for devices that do not need input. | A `drive` device that is unlocked and in hand can type commands. This is inherent to "full terminal input" and should be stated plainly in the app. |
 | Malicious app or backup on the phone | Copies the key | Key is non-exportable and never in backups. | A compromised OS can still ask the key store to sign while unlocked. |

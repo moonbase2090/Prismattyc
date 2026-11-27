@@ -11190,7 +11190,9 @@ fn persist_docked_float(host: &mut HostState, prior_slot: Option<u32>) {
     let Some(prior_slot) = prior_slot else {
         return;
     };
-    if host.mux.floated_pane().is_some() {
+    // An overlay on a tab that is not selected is still placed. Dropping
+    // its record here would let a later open float a different pane.
+    if host.mux.overlay_placed() {
         return;
     }
     let Some(space) = host.space_rail.current.clone() else {

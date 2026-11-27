@@ -2864,6 +2864,21 @@ fn strip_close_and_detach_drop_the_saved_overlay() {
             );
             assert_closed_overlay_stays_down(host);
 
+            lift_overlay_on_the_open_tab(host);
+            let floated = host.mux.selected_tab_index();
+            assert!(host.mux.select_tab(0).unwrap());
+            assert!(host.mux.floated_pane().is_none());
+            assert_eq!(
+                host.mux.floated_window_slot(),
+                Some(u32::try_from(floated).unwrap()),
+                "leaving the tab keeps its overlay slot"
+            );
+            assert_eq!(
+                super::close_tab_from_strip(host, floated),
+                super::StripClickResult::Handled
+            );
+            assert_closed_overlay_stays_down(host);
+
             self.completed = true;
             self.app.windows.clear();
             event_loop.exit();

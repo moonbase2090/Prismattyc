@@ -4180,13 +4180,18 @@ impl MuxRuntime {
         Ok(true)
     }
 
-    /// Window slot of the active overlay, before a later edit moves that tab.
+    /// Window slot of the overlay, before a later edit moves or closes that tab.
+    /// The overlay's tab does not have to be the selected one.
     pub(crate) fn floated_window_slot(&self) -> Option<u32> {
-        self.floated_pane()?;
         let placement = self.floated?;
         let window = self.domain.pane_owner(placement.pane)?;
         let slot = self.window_ids().iter().position(|id| *id == window)?;
         u32::try_from(slot).ok()
+    }
+
+    /// True while an overlay placement exists, including on a tab that is not selected.
+    pub(crate) fn overlay_placed(&self) -> bool {
+        self.floated.is_some()
     }
 
     /// The active overlay as a record keyed by session and place.
@@ -9671,6 +9676,35 @@ mod tests {
         );
         assert!(!runtime.apply_open_space_float("work", &records).unwrap());
         assert_eq!(runtime.floated_pane(), None);
+    }
+
+    #[test]
+    fn floated_window_slot_follows_the_overlay_off_the_selected_tab() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let right = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        runtime.new_tab("/bin/sh", &[]).unwrap();
+        runtime.select_tab(0).unwrap();
+        let overlay = CellRect {
+            col: 10,
+            row: 4,
+            cols: 30,
+            rows: 8,
+        };
+        assert!(runtime.float_pane(right, overlay).unwrap());
+        assert_eq!(runtime.floated_window_slot(), Some(0));
+        assert!(runtime.select_tab(1).unwrap());
+        assert_eq!(
+            runtime.floated_pane(),
+            None,
+            "the overlay is not on this tab"
+        );
+        assert_eq!(
+            runtime.floated_window_slot(),
+            Some(0),
+            "the overlay's tab is still known after leaving it"
+        );
     }
 
     #[test]

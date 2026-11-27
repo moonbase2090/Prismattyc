@@ -81,6 +81,8 @@ payload before SSH encryption and framing.
 
 ### Captures
 
+In the colour and landscape captures, grey boxes cover the shell prompt's user and host names and the file-owner columns. Nothing else in the captures is changed.
+
 | | | |
 | --- | --- | --- |
 | ![Paired hosts, with a drive key and a watch key](companion-terminal/hosts.png) | ![Needs-you section above the Space list](companion-terminal/catalog-inbox.png) | ![A shell with colour output](companion-terminal/terminal.png) |

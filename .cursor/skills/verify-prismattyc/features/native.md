@@ -2,8 +2,9 @@
 
 With `--experimental-native`, an eligible direct local PTY can negotiate a
 native grid and uploaded images. The feature is off by default. The drive
-starts the host with that flag alone, so rich overlays stay off.
-`--experimental-rich` still turns native sessions on too, for one release. An installed native
+starts the host with that flag alone.
+`--experimental-rich` also turns native sessions on for one release; rich mode
+itself was removed. An installed native
 scene supplies displayed text, selection, find, links, accessibility, cursor
 and painting. The retained ANSI terminal becomes visible when ownership ends.
 

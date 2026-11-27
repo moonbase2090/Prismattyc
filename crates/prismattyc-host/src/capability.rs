@@ -1,50 +1,37 @@
 // SPDX-License-Identifier: MIT
-//! Capability negotiation shared by experimental rich and native sessions.
+//! Capability negotiation for experimental native sessions.
 //!
-//! A child asks what the host supports with an APC capability query. Rich
-//! overlays and native sessions answer it on the same PTY writer, so the
-//! writer messages, the grant applied after a reply is written, and the
-//! collector-ordered feeding of child output live here, apart from either
-//! feature.
+//! A child asks what the host supports with an APC capability query, and a
+//! native session answers it on the pane's PTY writer. The writer messages,
+//! the grant applied after a reply is written, and the collector-ordered
+//! feeding of child output live here.
 
-use std::collections::BTreeSet;
 use std::sync::mpsc;
 
 use prismattyc_emulator::Emulator;
-use prismattyc_protocol::{CapabilityQuery, Feature};
+#[cfg(any(test, native_transport))]
+use prismattyc_protocol::CapabilityQuery;
 
-/// The experimental features a pane was started with. Both are off by
-/// default.
+/// The experimental features a pane was started with. Off by default.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Experimental {
-    /// Rich overlays, workspace and structured input (`--experimental-rich`).
-    pub rich: bool,
     /// Native terminal sessions and images for direct local PTY children
     /// (`--experimental-native`).
     pub native: bool,
 }
 
 impl Experimental {
-    /// What `--experimental-rich` turns on. It still enables native sessions
-    /// too, for one release, so existing launches keep them.
-    pub(crate) const fn rich_alias(on: bool) -> Self {
-        Self {
-            rich: on,
-            native: on,
-        }
-    }
-
-    /// Whether the pane's emulator collects APC bodies. Both features read
-    /// capability queries from them.
+    /// Whether the pane's emulator collects APC bodies, where native
+    /// sessions read capability queries.
     pub(crate) const fn collects_apc(self) -> bool {
-        self.rich || self.native
+        self.native
     }
 }
 
 impl From<bool> for Experimental {
-    /// A bare flag means the `--experimental-rich` alias.
-    fn from(on: bool) -> Self {
-        Self::rich_alias(on)
+    /// A bare flag means native sessions on or off.
+    fn from(native: bool) -> Self {
+        Self { native }
     }
 }
 
@@ -59,19 +46,12 @@ pub(crate) struct ChildWrite {
     pub paste: Option<crate::paste_job::PasteTicket>,
 }
 
-/// What a written capability reply grants the pane.
+/// What a written capability reply grants the pane. Without native sessions
+/// nothing is granted, so this has no values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CapabilityGrant {
-    Rich(RichGrant),
     #[cfg(native_transport)]
     Native(crate::native::authority::OfferReceipt),
-}
-
-/// Rich features granted by a written surface reply.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RichGrant {
-    pub features: BTreeSet<Feature>,
-    pub region_limit: usize,
 }
 
 impl ChildWrite {
@@ -91,6 +71,7 @@ impl ChildWrite {
         }
     }
 
+    #[cfg(native_transport)]
     pub(crate) fn capability(bytes: Vec<u8>, grant: CapabilityGrant) -> Self {
         Self {
             bytes,
@@ -124,16 +105,14 @@ pub(crate) fn drain_emulator_replies(
 }
 
 /// How a [`CapabilityHost`] handled a capability query.
+#[cfg(any(test, native_transport))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// Only native sessions take or answer a query; other targets only pass.
+// Only native sessions decline a query; other targets' tests only answer.
 #[cfg_attr(not(native_transport), allow(dead_code))]
 pub(crate) enum QueryReply {
-    /// Not this host's query. Another handler may answer it.
+    /// Not answered: the query was not for this host, or the reply could
+    /// not be made.
     Pass,
-    /// The host took the query and changed the pane's geometry, but could
-    /// not answer it. State tied to the old geometry is stale; another
-    /// handler may still answer.
-    Reset,
     /// The host answered the query.
     Answered,
 }
@@ -141,6 +120,7 @@ pub(crate) enum QueryReply {
 /// Hooks for a host that answers capability queries itself (native
 /// sessions). They run in collector order: `before_bytes` before each slice
 /// is parsed, `capability_reply` after a query is decoded.
+#[cfg(any(test, native_transport))]
 pub(crate) trait CapabilityHost {
     /// True when the bytes about to be fed revoked something the pane shows.
     fn before_bytes(&mut self, emulator: &Emulator) -> bool;
@@ -152,25 +132,11 @@ pub(crate) trait CapabilityHost {
     ) -> QueryReply;
 }
 
-impl CapabilityHost for () {
-    fn before_bytes(&mut self, _emulator: &Emulator) -> bool {
-        false
-    }
-
-    fn capability_reply(
-        &mut self,
-        _query: CapabilityQuery,
-        _emulator: &mut Emulator,
-        _to_child: &mpsc::SyncSender<ChildWrite>,
-    ) -> QueryReply {
-        QueryReply::Pass
-    }
-}
-
 /// End of the next slice of `bytes` from `index`. Plain text runs to the next
 /// ESC in one slice, so a flood cannot stall the event loop. Control-bearing
 /// bytes go one at a time, so a completed APC and a grid scroll never share
 /// one `feed` (the collector runs before the VT parser).
+#[cfg(any(test, native_transport))]
 pub(crate) fn slice_end(emulator: &Emulator, bytes: &[u8], index: usize) -> usize {
     if emulator.apc_pending() || bytes[index] == 0x1b {
         index + 1
@@ -182,9 +148,9 @@ pub(crate) fn slice_end(emulator: &Emulator, bytes: &[u8], index: usize) -> usiz
     }
 }
 
-/// Feed child output for a pane with native sessions and no rich session.
-/// Only capability queries reach `host`; other APC bodies are dropped, as on
-/// a pane without rich. Returns true when `before_bytes` revoked something.
+/// Feed child output for a pane with native sessions. Only capability
+/// queries reach `host`; other APC bodies are dropped. Returns true when
+/// `before_bytes` revoked something.
 #[cfg(any(test, native_transport))]
 pub(crate) fn process_native_chunk(
     emulator: &mut Emulator,
@@ -254,25 +220,15 @@ mod tests {
     }
 
     #[test]
-    fn the_rich_flag_alias_turns_on_native_too_and_native_alone_leaves_rich_off() {
-        assert_eq!(
-            Experimental::from(true),
-            Experimental {
-                rich: true,
-                native: true
-            }
-        );
+    fn only_a_native_pane_collects_apc() {
+        assert_eq!(Experimental::from(true), Experimental { native: true });
         assert_eq!(Experimental::from(false), Experimental::default());
-        let native = Experimental {
-            rich: false,
-            native: true,
-        };
-        assert!(native.collects_apc());
+        assert!(Experimental::from(true).collects_apc());
         assert!(!Experimental::default().collects_apc());
     }
 
     #[test]
-    fn a_native_pane_hands_queries_to_its_host_and_drops_rich_messages() {
+    fn a_native_pane_hands_queries_to_its_host_and_drops_other_apc_messages() {
         let mut emulator = Emulator::new_experimental(20, 4, 100);
         let (to_child, from_host) = mpsc::sync_channel(8);
         let mut host = Recorder::default();

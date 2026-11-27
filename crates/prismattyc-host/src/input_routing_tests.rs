@@ -1070,7 +1070,6 @@ fn verify_dispatch(host: &mut HostState) {
     assert_eq!(dispatch(host, A::SpaceRailPrev), Dispatch::Handled);
     assert_eq!(toast_text(host), before, "no neighbour means no new toast");
 
-    assert_eq!(dispatch(host, A::RichFocus), Dispatch::Handled);
     assert!(host.palette.is_none());
     assert_eq!(dispatch(host, A::NewWindow), Dispatch::OpenWindow);
     assert_eq!(dispatch(host, A::OpenConfig), Dispatch::OpenConfig);

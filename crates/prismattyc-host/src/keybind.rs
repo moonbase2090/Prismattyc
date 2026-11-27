@@ -169,7 +169,6 @@ pub enum Action {
     ChromeLayout,
     /// Collapse or expand the Spaces sidebar (issue #174).
     SidebarCollapse,
-    RichFocus,
 }
 
 impl Action {
@@ -268,7 +267,6 @@ impl Action {
             Action::Transparency,
             Action::ChromeLayout,
             Action::SidebarCollapse,
-            Action::RichFocus,
         ]);
         all
     }
@@ -365,7 +363,6 @@ impl Action {
             Action::Transparency => "transparency".into(),
             Action::ChromeLayout => "chrome_layout".into(),
             Action::SidebarCollapse => "sidebar_collapse".into(),
-            Action::RichFocus => "rich_focus".into(),
         }
     }
 
@@ -488,7 +485,6 @@ impl Action {
                 "choose the Bars or Sidebar layout (graphite chrome only)".into()
             }
             Action::SidebarCollapse => "collapse or expand the spaces sidebar".into(),
-            Action::RichFocus => "toggle rich focus (--experimental-rich)".into(),
         }
     }
 }
@@ -617,8 +613,7 @@ impl Action {
             | Action::ScrollLineDown
             | Action::Transparency
             | Action::ChromeLayout
-            | Action::SidebarCollapse
-            | Action::RichFocus => ActionGroup::ViewEdit,
+            | Action::SidebarCollapse => ActionGroup::ViewEdit,
         }
     }
 
@@ -677,7 +672,6 @@ impl Action {
             Action::WalkthroughReset => {
                 Some("Deletes walkthrough.json. The caption restarts at the first step.")
             }
-            Action::RichFocus => Some("Needs --experimental-rich."),
             Action::Transparency => Some(
                 "Writes the existing opacity keys. Listed in the palette only when chrome_style is graphite.",
             ),
@@ -1346,7 +1340,6 @@ pub(crate) fn default_chords(action: Action) -> Vec<&'static str> {
         Action::Transparency => vec![],
         Action::ChromeLayout => vec![],
         Action::SidebarCollapse => vec!["ctrl+alt+shift+s"],
-        Action::RichFocus => vec!["ctrl+shift+g"],
     }
 }
 

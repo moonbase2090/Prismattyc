@@ -316,8 +316,7 @@ fn a_completed_native_reply_cannot_authorize_an_offer_revoked_by_trailing_pty_by
     }
     let module = module_path!().split_once("::").unwrap().1;
     let name = format!("{module}::a_completed_native_reply_cannot_authorize_an_offer_revoked_by_trailing_pty_bytes");
-    // Native sessions behave the same with rich on (the old flag) and off.
-    for (rich_on, trailing) in [(true, false), (true, true), (false, false), (false, true)] {
+    for trailing in [false, true] {
         let _clock = crate::native::service::PausedClockScope::enter();
         let mode = if trailing { "trailing" } else { "clean" };
         let args = vec![
@@ -345,66 +344,17 @@ fn a_completed_native_reply_cannot_authorize_an_offer_revoked_by_trailing_pty_by
             8,
             2,
             HostGeom::tight(8, 16),
-            Experimental {
-                rich: rich_on,
-                native: true,
-            },
+            Experimental { native: true },
             false,
             Some(wake),
         )
         .unwrap();
         let pane = runtime.focused_mut();
         assert!(pane.native.is_some());
-        assert_eq!(pane.experimental_rich(), rich_on);
         assert!(pane.emulator.collects_apc());
         let receiver = pane.from_pty_rx.take().unwrap();
         let mut signals = Vec::new();
         signal(&receiver, &mut signals, b"NATIVE_FLOW_READY\n");
-        if rich_on && !trailing {
-            pane.rich.apply_grant(capability::RichGrant {
-                features: prismattyc_protocol::Feature::V1.into_iter().collect(),
-                region_limit: 8,
-            });
-            let (overlay_tx, _overlay_rx) = mpsc::sync_channel(8);
-            let overlay = prismattyc_protocol::encode_attach_cell_rect(
-                &prismattyc_protocol::AttachCellRect {
-                    id: 1,
-                    row: 0,
-                    col: 0,
-                    rows: 1,
-                    cols: 4,
-                    text: "STAT".into(),
-                },
-            )
-            .unwrap();
-            let hud =
-                prismattyc_protocol::encode_attach_viewport(&prismattyc_protocol::AttachViewport {
-                    id: 2,
-                    row: 1,
-                    col: 0,
-                    rows: 1,
-                    cols: 3,
-                    text: "HUD".into(),
-                    runs: Vec::new(),
-                })
-                .unwrap();
-            for bytes in [overlay, hud] {
-                rich::process_rich_chunk(
-                    &mut pane.emulator,
-                    &mut pane.rich,
-                    &overlay_tx,
-                    &bytes,
-                    &mut (),
-                );
-            }
-            assert!(!pane.emulator.screen().alt_active());
-            let overlays = rich::visible_overlays(&pane.emulator, &pane.rich);
-            assert_eq!(overlays.cell_rect.len(), 1);
-            assert_eq!(overlays.cell_rect[0].text, "STAT");
-            assert_eq!(overlays.viewport.len(), 1);
-            assert_eq!(overlays.viewport[0].text, "HUD");
-        }
-        let mut native_hid_classic_overlays = true;
         pane.to_child_tx
             .send(ChildWrite::bytes(b"begin\n".to_vec()))
             .unwrap();
@@ -437,22 +387,7 @@ fn a_completed_native_reply_cannot_authorize_an_offer_revoked_by_trailing_pty_by
             },
             written: &written_rx,
         };
-        if rich_on {
-            rich::process_rich_chunk(
-                &mut pane.emulator,
-                &mut pane.rich,
-                &pane.to_child_tx,
-                &bytes,
-                &mut flow,
-            );
-        } else {
-            capability::process_native_chunk(
-                &mut pane.emulator,
-                &pane.to_child_tx,
-                &bytes,
-                &mut flow,
-            );
-        }
+        capability::process_native_chunk(&mut pane.emulator, &pane.to_child_tx, &bytes, &mut flow);
         signal(&receiver, &mut signals, b"NATIVE_HELLO_SENT\n");
         pane.drain_grants();
         let _ = pane.emulator.take_damage();
@@ -492,9 +427,6 @@ fn a_completed_native_reply_cannot_authorize_an_offer_revoked_by_trailing_pty_by
             }
             signal(&receiver, &mut signals, b"NATIVE_ACTIVE_SEEN\n");
             assert!(pane.content().is_native());
-            native_hid_classic_overlays =
-                rich::visible_overlays(&pane.emulator, &pane.rich).is_empty();
-            native_hid_classic_overlays &= pane.rich.attachments_len_for_test() == 0;
             assert_eq!(pane.content().row_text(0), "N");
             assert_eq!(
                 pane.content().cursor(),
@@ -525,9 +457,6 @@ fn a_completed_native_reply_cannot_authorize_an_offer_revoked_by_trailing_pty_by
             assert!(pane.native.as_ref().unwrap().authority.available());
             assert!(pane.native_scene().is_none());
             assert!(!pane.content().is_native());
-            native_hid_classic_overlays &= rich::visible_overlays(&pane.emulator, &pane.rich)
-                .is_empty()
-                && pane.rich.attachments_len_for_test() == 0;
             assert_eq!(pane.content().row_text(0), "");
             assert_eq!(runtime.take_pane_damage()[&pane_id].dirty_cell_count(), 16);
             assert_eq!(runtime.take_pane_damage()[&pane_id].dirty_cell_count(), 0);
@@ -537,10 +466,6 @@ fn a_completed_native_reply_cannot_authorize_an_offer_revoked_by_trailing_pty_by
             .send(ChildWrite::bytes(b"finish\n".to_vec()))
             .unwrap();
         assert!(pane.session.as_mut().unwrap().wait().unwrap().success());
-        assert!(
-            native_hid_classic_overlays,
-            "Classic primary overlays painted over the installed Native scene"
-        );
     }
 }
 

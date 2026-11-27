@@ -117,7 +117,6 @@ mod pty_event_tests;
 #[cfg(target_os = "linux")]
 mod render_window_tests;
 mod restore_prompt;
-mod rich;
 mod session_prompt;
 mod settings;
 mod sidebar;
@@ -174,32 +173,28 @@ use palette::{
     ContextMenu, ContextMenuKind, ContextMenuVerdict, Palette, PaletteRow, PaletteVerdict,
     SpaceMenuTarget, SpacePicker, SpacePickerKind, SpacePickerRow, SpacePickerVerdict,
 };
-use prismattyc_core::{
-    encode_osc52_clipboard, Color, GridDamage, HistoryMatch, Screen, ScrollDamage, Selection, Style,
-};
-use prismattyc_emulator::{CursorShape, Emulator};
+#[cfg(test)]
+use prismattyc_core::Screen;
+use prismattyc_core::{encode_osc52_clipboard, GridDamage, HistoryMatch, ScrollDamage, Selection};
+use prismattyc_emulator::Emulator;
 use prismattyc_mux::{
     layout_path, list_spaces, load_space, spaces_dir, PaneId, WindowId as MuxWindowId,
 };
-use prismattyc_protocol::{InputModifiers, PointerPhase};
-use prismattyc_render::paint_display_row;
 use raster::{
     blit_direct_kitty_images, blit_kitty_placeholders, build_background_layer, contrast_ink,
     cycle_focus_border, cycle_focus_border_back, fill_rect_argb, focus_border_name,
     focus_border_rgb, mix_rgb, opacity_to_alpha, opacity_to_weight, pack_argb, palette_hit,
     palette_pointer_hit, parse_focus_border, premultiply_in_place, rasterize_bell_toast,
-    rasterize_find_prompt, rasterize_footer, rasterize_mail_letter_with_theme,
-    rasterize_overlays_at_with_theme, rasterize_palette, rasterize_palette_with_hover,
-    rasterize_pane_chrome_with_theme, rasterize_preedit_at, rasterize_region_focus_ring,
-    rasterize_render_timer, rasterize_screen_at_with_theme,
-    rasterize_screen_at_with_theme_options_filtered, rasterize_scroll_chip, rasterize_scrollbar,
-    rasterize_space_rail, rasterize_splash, rasterize_tab_strip_with_theme, rasterize_theme_picker,
-    rasterize_walkthrough_caption, scrollbar_layout, scrollbar_scroll_from_thumb_y,
-    scrollbar_thumb_y_for_pointer, set_rect_alpha, space_menu_target, theme_picker_hit,
-    theme_picker_visible_rows, FontMetrics, OverlaySurface, PaletteFrame, PaletteLayout,
-    PaletteLayoutMode, PalettePointerTarget, PaletteSection, ScreenPaint, ScrollbarLayout,
-    ThemePickerRow, TitleRowStyle, DEFAULT_FOCUS_BORDER_INDEX, OPAQUE_ALPHA,
-    THEME_PICKER_HINT_FAMILY, THEME_PICKER_HINT_ROOT,
+    rasterize_find_prompt, rasterize_footer, rasterize_mail_letter_with_theme, rasterize_palette,
+    rasterize_palette_with_hover, rasterize_pane_chrome_with_theme, rasterize_preedit_at,
+    rasterize_render_timer, rasterize_screen_at_with_theme_options_filtered, rasterize_scroll_chip,
+    rasterize_scrollbar, rasterize_space_rail, rasterize_splash, rasterize_tab_strip_with_theme,
+    rasterize_theme_picker, rasterize_walkthrough_caption, scrollbar_layout,
+    scrollbar_scroll_from_thumb_y, scrollbar_thumb_y_for_pointer, set_rect_alpha,
+    space_menu_target, theme_picker_hit, theme_picker_visible_rows, FontMetrics, OverlaySurface,
+    PaletteFrame, PaletteLayout, PaletteLayoutMode, PalettePointerTarget, PaletteSection,
+    ScreenPaint, ScrollbarLayout, ThemePickerRow, TitleRowStyle, DEFAULT_FOCUS_BORDER_INDEX,
+    OPAQUE_ALPHA, THEME_PICKER_HINT_FAMILY, THEME_PICKER_HINT_ROOT,
 };
 use status_toasts::ToastKind;
 use winit::application::ApplicationHandler;
@@ -518,8 +513,10 @@ struct Cli {
     /// Reduced motion (config-only `reduced_motion`; default off): the
     /// focus ring appears instantly instead of sweeping.
     reduced_motion: bool,
-    /// Opt-in rich attachments (APC collect + z1 cell-rect paint).
-    experimental_rich: bool,
+    /// `--experimental-rich` or `PRISMATTYC_EXPERIMENTAL_RICH` was given.
+    /// Rich mode is gone; for one release the flag only turns on native
+    /// sessions, so launches that relied on it keep them.
+    rich_flag: bool,
     /// Opt-in native terminal sessions and images for direct local PTY
     /// children (`--experimental-native` or `PRISMATTYC_EXPERIMENTAL_NATIVE=1`).
     experimental_native: bool,
@@ -555,13 +552,17 @@ pub(crate) struct AttachTarget {
 
 impl Cli {
     /// The experimental features new panes start with.
-    /// `--experimental-rich` still turns on native sessions too, for one
-    /// release, so launches that relied on it keep them.
     fn experimental(&self) -> mux::Experimental {
         mux::Experimental {
-            rich: self.experimental_rich,
-            native: self.experimental_native || self.experimental_rich,
+            native: self.experimental_native || self.rich_flag,
         }
+    }
+
+    /// What to print when the removed rich flag was given.
+    fn removed_rich_notice(&self) -> Option<&'static str> {
+        self.rich_flag.then_some(
+            "prismattyc-host: rich mode was removed; --experimental-rich now only turns on native sessions",
+        )
     }
 
     fn parse(mut args: impl Iterator<Item = String>) -> Result<Self> {
@@ -572,7 +573,7 @@ impl Cli {
         let env_focus_border = focus_border_from_env();
         let mut focus_border = env_focus_border.unwrap_or(DEFAULT_FOCUS_BORDER_INDEX);
         let mut focus_border_pinned = env_focus_border.is_some();
-        let mut experimental_rich = env_flag_enabled("PRISMATTYC_EXPERIMENTAL_RICH");
+        let mut rich_flag = env_flag_enabled("PRISMATTYC_EXPERIMENTAL_RICH");
         let mut experimental_native = env_flag_enabled("PRISMATTYC_EXPERIMENTAL_NATIVE");
         let mut alt_screen_scrollback = env_flag_enabled("PRISMATTYC_ALT_SCREEN_SCROLLBACK");
         let mut gpu = env_flag_enabled("PRISMATTYC_GPU");
@@ -621,7 +622,7 @@ impl Cli {
                 std::process::exit(0);
             }
             if a == "--experimental-rich" && program.is_none() {
-                experimental_rich = true;
+                rich_flag = true;
                 continue;
             }
             if a == "--experimental-native" && program.is_none() {
@@ -716,7 +717,7 @@ impl Cli {
             light_cycle_ms: DEFAULT_LIGHT_CYCLE_MS,
             light_cycle_head: true,
             reduced_motion: false,
-            experimental_rich,
+            rich_flag,
             experimental_native,
             alt_screen_scrollback,
             gpu,
@@ -940,7 +941,7 @@ fn print_help() {
 prismattyc-host — windowed Prismattyc host
 
 USAGE:
-    prismattyc-host [-V|--version] [--list-bindings] [--panes N] [--focus-border NAME] [--experimental-rich] [--experimental-native] [--alt-screen-scrollback] [--gpu] [PROGRAM [ARGS...]]
+    prismattyc-host [-V|--version] [--list-bindings] [--panes N] [--focus-border NAME] [--experimental-native] [--alt-screen-scrollback] [--gpu] [PROGRAM [ARGS...]]
     prismattyc-host --attach-session ID [--attach-title NAME] ...
     prismattyc-host --write-config [PATH] [--merge]
     prismattyc-host -- /bin/bash -l
@@ -990,8 +991,6 @@ Bindings:        --list-bindings prints the effective actions and chords.
                  --write-config --merge appends missing keys to an existing file.
                  CLI flags and PRISMATTYC_* env vars always win over the file.
 Config keys:
-Rich attach:     --experimental-rich or PRISMATTYC_EXPERIMENTAL_RICH=1
-                 (for now it also turns on native sessions)
 Native sessions: --experimental-native or PRISMATTYC_EXPERIMENTAL_NATIVE=1
 Alt scrollback:  --alt-screen-scrollback or PRISMATTYC_ALT_SCREEN_SCROLLBACK=1
                  (or config alt_screen_scrollback = true). Default off:
@@ -1236,7 +1235,6 @@ struct HostState {
     /// Last caption-control press. A bounce or double-click at the same
     /// pixel must not fire Show me then Skip after the caption advances.
     caption_click: Option<(Instant, usize, usize)>,
-    rich_pointer: Option<RichPointerGesture>,
     /// Button currently owned by child application mouse tracking.
     app_mouse_button: Option<u8>,
     /// Last reported application-mouse cell; pane-aware so focus changes do not deduplicate.
@@ -1307,8 +1305,6 @@ struct HostState {
     keymap: Arc<keybind::KeyMap>,
     /// `smart_ctrl_c`: plain Ctrl+C copies a selection. Off by default.
     smart_ctrl_c: bool,
-    /// Whether the experimental rich action is enabled for palette rows.
-    experimental_rich: bool,
     /// Brand spectrum index for the focused-pane border (thin, 1px).
     focus_border: usize,
     /// Graphite bar background preset (#108). `None` follows the theme's
@@ -1987,15 +1983,6 @@ fn context_menu_kind(target: ContextMenuTarget) -> ContextMenuKind {
 
 fn rail_oriented_space_menu(host: &HostState) -> bool {
     sidebar_mode(host) || !host.mux.geom().rail_side.horizontal()
-}
-
-#[derive(Debug, Clone, Copy)]
-struct RichPointerGesture {
-    pane: PaneId,
-    hit: rich::WorkspaceHit,
-    start_x: f64,
-    start_y: f64,
-    cancelled: bool,
 }
 
 /// Present path for the CPU `u32` framebuffer. macOS uses an alpha-capable
@@ -4763,7 +4750,6 @@ impl App {
                 suppress_left_release: false,
                 toast_update_action: None,
                 caption_click: None,
-                rich_pointer: None,
                 app_mouse_button: None,
                 last_app_mouse_cell: None,
                 multi_click: MultiClick::default(),
@@ -4833,7 +4819,6 @@ impl App {
                 walkthrough_save_after_open: false,
                 keymap: self.keymap.clone(),
                 smart_ctrl_c: self.file_config.smart_ctrl_c(),
-                experimental_rich: self.cli.experimental_rich,
                 focus_border: self.cli.focus_border,
                 bar_color: self.file_config.bar_color,
                 tab_strip_mode,
@@ -5621,7 +5606,7 @@ fn chrome_overlay(host: &HostState) -> a11y::OverlayKind {
         };
     }
     if let Some(palette) = host.palette.as_ref() {
-        let view = palette.view(&host.keymap, host.experimental_rich);
+        let view = palette.view(&host.keymap);
         let rows = (0..view.len())
             .filter_map(|index| view.row(index).map(|row| row.name.clone()))
             .collect();
@@ -5749,7 +5734,7 @@ fn dispatch_overlay_activate(
         return Dispatch::Handled;
     }
     if let Some(palette) = host.palette.as_ref() {
-        let view = palette.view(&host.keymap, host.experimental_rich);
+        let view = palette.view(&host.keymap);
         if let Some(row) = view.row(index) {
             if let palette::PaletteEntry::Action(action) = row.entry {
                 host.palette = None;
@@ -6189,9 +6174,7 @@ struct PartialRasterBlockers {
 }
 
 fn unsupported_pane_content(guards: render_diagnostics::GuardMask) -> bool {
-    guards.contains(render_diagnostics::Guard::WorkspaceLayout)
-        || guards.contains(render_diagnostics::Guard::ExperimentalRich)
-        || guards.contains(render_diagnostics::Guard::StoredImages)
+    guards.contains(render_diagnostics::Guard::StoredImages)
 }
 
 fn partial_raster_blocked(blockers: PartialRasterBlockers) -> bool {
@@ -7022,8 +7005,6 @@ fn rasterize_frame(
     guards.set(Guard::ChromeGeometry, chrome_changed);
     for pane_id in host.mux.active_pane_ids() {
         if let Some(pane) = host.mux.pane(pane_id) {
-            guards.add(Guard::WorkspaceLayout, pane.workspace_layout().is_some());
-            guards.add(Guard::ExperimentalRich, pane.experimental_rich());
             guards.add(Guard::StoredImages, !pane.emulator.images().is_empty());
         }
     }
@@ -7466,55 +7447,8 @@ fn rasterize_frame(
             find_active: host.find.active,
             palette_active: host.palette.is_some() || host.context_menu.is_some(),
         });
-        let workspace = pane.workspace_layout();
-        let dock_px = workspace.as_ref().map_or(0, |layout| {
-            usize::from(layout.rows).saturating_mul(host.font.cell_h)
-        });
-        if let Some(layout) = &workspace {
-            let mut workspace_screen =
-                Screen::new(usize::from(layout.cols), usize::from(layout.rows), 0);
-            for (row, line) in layout.lines.iter().enumerate() {
-                paint_display_row(&mut workspace_screen, row, line, |col| {
-                    let inverse = layout.selected_runs.iter().any(|run| {
-                        usize::from(run.row) == row
-                            && col >= usize::from(run.col)
-                            && col < usize::from(run.col.saturating_add(run.cols))
-                    });
-                    let foreground = layout.status_runs.iter().find_map(|run| {
-                        (usize::from(run.row) == row
-                            && col >= usize::from(run.col)
-                            && col < usize::from(run.col.saturating_add(run.cols)))
-                        .then(|| {
-                            let [r, g, b] = theme::status_rgb(&host.theme, run.tone);
-                            Color::Rgb { r, g, b }
-                        })
-                    });
-                    Style {
-                        inverse,
-                        foreground: foreground.unwrap_or_default(),
-                        ..Style::default()
-                    }
-                });
-            }
-            rasterize_screen_at_with_theme(
-                &host.theme,
-                &workspace_screen,
-                &host.font,
-                false,
-                CursorShape::Block,
-                0,
-                None,
-                buffer,
-                width as usize,
-                content_x,
-                content_y,
-                content_w,
-                dock_px.min(content_h),
-                pane_screen_paint(host, pane_id, focused, zoomed),
-            );
-        }
-        let guest_y = content_y.saturating_add(dock_px);
-        let guest_h = content_h.saturating_sub(dock_px);
+        let guest_y = content_y;
+        let guest_h = content_h;
         let current_cursor_row = matches!(overlay.input, InputOverlay::Cursor)
             .then(|| displayed.cursor().map(|cursor| cursor.row))
             .flatten();
@@ -7910,66 +7844,8 @@ fn rasterize_frame(
                 contrast_ink(fill),
             );
         }
-        if pane.experimental_rich() {
-            let overlays = rich::overlays_for_scroll(
-                rich::visible_overlays(&pane.emulator, &pane.rich),
-                scroll,
-            );
-            if !overlays.is_empty() {
-                let (_, _, content_w, _) = geom.pane_content_px(rect);
-                rasterize_overlays_at_with_theme(
-                    &host.theme,
-                    &overlays.cell_rect,
-                    &host.font,
-                    buffer,
-                    width as usize,
-                    content_x,
-                    guest_y,
-                    content_x,
-                    guest_y,
-                    content_w,
-                    guest_h,
-                    pane.emulator.screen().columns(),
-                    pane.emulator.screen().rows(),
-                );
-                rasterize_overlays_at_with_theme(
-                    &host.theme,
-                    &overlays.viewport,
-                    &host.font,
-                    buffer,
-                    width as usize,
-                    content_x,
-                    guest_y,
-                    content_x,
-                    guest_y,
-                    content_w,
-                    guest_h,
-                    pane.emulator.screen().columns(),
-                    pane.emulator.screen().rows(),
-                );
-            }
-        }
         // No structural outline for a single full-window pane — only multi-pane
         // layouts need focus/unfocused borders.
-        if let Some((row, col, rows, cols)) = host
-            .mux
-            .focused_rich_region()
-            .filter(|_| pane_id == focused && scroll == 0)
-        {
-            rasterize_region_focus_ring(
-                buffer,
-                width as usize,
-                content_x,
-                guest_y,
-                host.font.cell_w,
-                host.font.cell_h,
-                row,
-                col,
-                rows,
-                cols,
-                focus_border_rgb(host.focus_border),
-            );
-        }
         if !geom.chrome.graphite && host.mux.pane_count() > 1 {
             if pane_id == focused && cycle_progress.is_some_and(|progress| progress < 1.0) {
                 host.border_underlay.capture(
@@ -8287,7 +8163,7 @@ fn rasterize_frame(
     // gates; HostState is authoritative for this single global paint pass.
     let painted_palette = if let Some(palette) = host.palette.as_ref() {
         let focus = focus_border_rgb(host.focus_border);
-        let view = palette.view(&host.keymap, host.experimental_rich);
+        let view = palette.view(&host.keymap);
         let chips = Palette::chip_labels();
         let detail = view.detail(palette.selected);
         let sections = [
@@ -8965,9 +8841,6 @@ impl App {
                     .collect::<Vec<_>>()
                     .join(". "),
             );
-        }
-        if let Some(text) = host.mux.take_semantic_copy() {
-            write_clipboard_text(host, text);
         }
         let active = host.mux.active_count();
         if prior_panes != host.mux.pane_count() || prior_tabs != host.mux.tab_count() {
@@ -12512,10 +12385,9 @@ fn activate_palette_at_pointer(
         }
         PalettePointerTarget::Row(row) => {
             let keymap = host.keymap.clone();
-            let rich = host.experimental_rich;
             let palette = host.palette.as_mut()?;
             palette.selected = row;
-            let verdict = palette.activate_selected(&keymap, rich);
+            let verdict = palette.activate_selected(&keymap);
             host.dirty = true;
             match finish_palette_result(host, verdict) {
                 PaletteVerdict::Run(action) => Some(action),
@@ -12549,11 +12421,10 @@ fn scroll_palette_with_wheel(host: &mut HostState, delta: &MouseScrollDelta) -> 
         MouseScrollDelta::PixelDelta(position) => (position.y * 1_000.0).round() as i64,
     };
     let keymap = host.keymap.clone();
-    let rich = host.experimental_rich;
     let changed = host
         .palette
         .as_mut()
-        .is_some_and(|palette| palette.scroll_by_wheel(delta_milli_px, row_pitch, &keymap, rich));
+        .is_some_and(|palette| palette.scroll_by_wheel(delta_milli_px, row_pitch, &keymap));
     if changed {
         host.dirty = true;
     }
@@ -15856,7 +15727,6 @@ fn handle_pane_handle_press(host: &mut HostState, button: MouseButton) -> bool {
         open_context_menu(host, ContextMenuTarget::Pane(pane));
     }
     host.left_button_down = false;
-    host.rich_pointer = None;
     host.app_mouse_button = None;
     sync_chrome_hover(host);
     true
@@ -16733,7 +16603,6 @@ fn handle_palette_key(
         host.modifiers,
         action,
         &keymap,
-        host.experimental_rich,
     );
     finish_palette_result(host, result)
 }
@@ -17809,13 +17678,14 @@ fn e2e_initial_window_cells() -> Option<(usize, usize)> {
     (cols > 0 && cols <= 400 && rows > 0 && rows <= 120).then_some((cols, rows))
 }
 
-/// Topmost pane whose terminal content box contains `position`, as
-/// `(pane, rect, outer_row, col)`. Later rectangles win when they overlap.
-fn topmost_content_cell(
+/// Cell under `position` in the topmost pane whose terminal content box
+/// contains it, as `(pane, row, col)`. Later rectangles win when they
+/// overlap, so a floating pane takes the hit over the tile beneath it.
+fn cell_at_position(
     position: PhysicalPosition<f64>,
     font: &FontMetrics,
     mux: &mux::MuxRuntime,
-) -> Option<(PaneId, prismattyc_mux::CellRect, usize, usize)> {
+) -> Option<(PaneId, usize, usize)> {
     if !position.x.is_finite() || !position.y.is_finite() || position.x < 0.0 || position.y < 0.0 {
         return None;
     }
@@ -17830,50 +17700,10 @@ fn topmost_content_cell(
             return None;
         }
         let col = (px - x) / font.cell_w;
-        let outer_row = (py - y) / font.cell_h;
-        Some((pane, rect, outer_row, col))
+        let row = (py - y) / font.cell_h;
+        let (cols, rows) = geom.content_cells(rect);
+        (col < cols && row < rows).then_some((pane, row, col))
     })
-}
-
-fn cell_at_position(
-    position: PhysicalPosition<f64>,
-    font: &FontMetrics,
-    mux: &mux::MuxRuntime,
-) -> Option<(PaneId, usize, usize)> {
-    let (pane, rect, outer_row, col) = topmost_content_cell(position, font, mux)?;
-    let dock_rows = mux.workspace_rows(pane);
-    if outer_row < dock_rows {
-        return None;
-    }
-    let row = outer_row - dock_rows;
-    let (cols, rows) = mux.geom().content_cells(rect);
-    (col < cols && row < rows.saturating_sub(dock_rows)).then_some((pane, row, col))
-}
-
-fn workspace_hit_at_position(
-    position: PhysicalPosition<f64>,
-    font: &FontMetrics,
-    mux: &mux::MuxRuntime,
-) -> Option<(PaneId, rich::WorkspaceHit)> {
-    let (pane, _, row, col) = topmost_content_cell(position, font, mux)?;
-    let dock_rows = mux.workspace_rows(pane);
-    if row >= dock_rows {
-        return None;
-    }
-    Some((
-        pane,
-        mux.workspace_hit(pane, u16::try_from(row).ok()?, u16::try_from(col).ok()?)?,
-    ))
-}
-
-fn rich_pointer_dragged(
-    start_x: f64,
-    start_y: f64,
-    position: PhysicalPosition<f64>,
-    scale_factor: f64,
-) -> bool {
-    let threshold = 4.0 * scale_factor.max(0.25);
-    (position.x - start_x).abs() >= threshold || (position.y - start_y).abs() >= threshold
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18091,7 +17921,6 @@ fn mux_command_for(action: keybind::Action) -> Option<MuxCommand> {
         | Action::SpaceRailNext
         | Action::SpaceRailPrev
         | Action::SaveSpace
-        | Action::RichFocus
         | Action::NewBlankTab
         | Action::NewSessionTab
         | Action::BlankSplitRight
@@ -18673,136 +18502,6 @@ fn selection_claims_ctrl_c(selection: &Selection) -> bool {
     range.start_row != range.end_row || range.start_col != range.end_col
 }
 
-/// Host-owned rich-focus input. No-op when `--experimental-rich` is off so
-/// the `rich_focus` chord still reaches the child. When a region is granted,
-/// regular keys become bounded APC frames instead of VT bytes.
-fn handle_rich_focus_input(
-    host: &mut HostState,
-    event: &winit::event::KeyEvent,
-    action: Option<keybind::Action>,
-) -> bool {
-    if action == Some(keybind::Action::RichFocus) {
-        return toggle_rich_focus(host);
-    }
-    if !host.mux.focused().experimental_rich() {
-        return false;
-    }
-    if !host.mux.rich_focus_active() {
-        return false;
-    }
-    if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
-        let pane = host.mux.focused_id();
-        host.mux.revoke_rich_focus(pane);
-        host.dirty = true;
-        return true;
-    }
-    if !rich_focus_captures(host.modifiers) {
-        return false;
-    }
-    if event.repeat {
-        return true;
-    }
-    if let Some(token) = rich_focus_key_token(&event.logical_key, host.modifiers) {
-        let _ = host
-            .mux
-            .send_rich_focus_key(&token, structured_modifiers(host.modifiers));
-    }
-    true
-}
-
-fn toggle_rich_focus(host: &mut HostState) -> bool {
-    if !host.mux.focused().experimental_rich() {
-        return false;
-    }
-    if host.mux.toggle_rich_focus() {
-        host.dirty = true;
-    }
-    true
-}
-
-/// Ctrl+Shift chords stay host-owned while rich focus is granted (scroll
-/// pan, copy/paste, tab nav); only unmodified keys belong to the region.
-fn rich_focus_captures(modifiers: ModifiersState) -> bool {
-    !(modifiers.control_key() && modifiers.shift_key())
-}
-
-fn structured_modifiers(modifiers: ModifiersState) -> InputModifiers {
-    let mut bits = 0;
-    if modifiers.shift_key() {
-        bits |= InputModifiers::SHIFT;
-    }
-    if modifiers.control_key() {
-        bits |= InputModifiers::CONTROL;
-    }
-    if modifiers.alt_key() {
-        bits |= InputModifiers::ALT;
-    }
-    if modifiers.super_key() {
-        bits |= InputModifiers::SUPER;
-    }
-    InputModifiers::new(bits).expect("winit modifiers use only frozen input bits")
-}
-
-fn rich_focus_key_token(logical: &Key, modifiers: ModifiersState) -> Option<String> {
-    let name = match logical {
-        Key::Named(NamedKey::Enter) => "Enter",
-        Key::Named(NamedKey::Tab) => "Tab",
-        Key::Named(NamedKey::Backspace) => "Backspace",
-        Key::Named(NamedKey::Delete) => "Delete",
-        Key::Named(NamedKey::ArrowUp) => "Up",
-        Key::Named(NamedKey::ArrowDown) => "Down",
-        Key::Named(NamedKey::ArrowLeft) => "Left",
-        Key::Named(NamedKey::ArrowRight) => "Right",
-        Key::Named(NamedKey::Home) => "Home",
-        Key::Named(NamedKey::End) => "End",
-        Key::Named(NamedKey::PageUp) => "PageUp",
-        Key::Named(NamedKey::PageDown) => "PageDown",
-        Key::Named(NamedKey::Space) => "Space",
-        Key::Named(
-            NamedKey::Control
-            | NamedKey::Shift
-            | NamedKey::Alt
-            | NamedKey::AltGraph
-            | NamedKey::Super
-            | NamedKey::Meta
-            | NamedKey::Hyper
-            | NamedKey::Escape,
-        ) => return None,
-        Key::Character(text) => {
-            let mut chs = text.chars();
-            let ch = chs.next()?;
-            if chs.next().is_some() {
-                return None;
-            }
-            let mut token = String::new();
-            if modifiers.control_key() {
-                token.push_str("C-");
-            }
-            if modifiers.shift_key() {
-                token.push_str("S-");
-            }
-            if modifiers.alt_key() {
-                token.push_str("A-");
-            }
-            token.push(ch);
-            return Some(token);
-        }
-        _ => return None,
-    };
-    let mut token = String::new();
-    if modifiers.control_key() {
-        token.push_str("C-");
-    }
-    if modifiers.shift_key() {
-        token.push_str("S-");
-    }
-    if modifiers.alt_key() {
-        token.push_str("A-");
-    }
-    token.push_str(name);
-    Some(token)
-}
-
 fn is_logical_char(logical: &Key, expected: char) -> bool {
     matches!(logical, Key::Character(text) if text.chars().count() == 1
         && text.chars().next().is_some_and(|c| c.eq_ignore_ascii_case(&expected)))
@@ -18973,31 +18672,6 @@ fn dispatch_copy_action(
         let _ = copy();
     }
     Dispatch::Handled
-}
-
-fn write_clipboard_text(host: &mut HostState, text: String) -> bool {
-    if prismattyc_core::encode_osc52_clipboard(&text).is_none() {
-        return false;
-    }
-    if host.clipboard.is_none() {
-        match arboard::Clipboard::new() {
-            Ok(clipboard) => host.clipboard = Some(clipboard),
-            Err(error) => {
-                eprintln!("prismattyc-host: native clipboard unavailable: {error}");
-                return false;
-            }
-        }
-    }
-    let Some(clipboard) = host.clipboard.as_mut() else {
-        return false;
-    };
-    if let Err(error) = clipboard.set_text(text.clone()) {
-        eprintln!("prismattyc-host: native clipboard write failed: {error}");
-        host.clipboard = None;
-        return false;
-    }
-    note_copied_announce(host, &text);
-    true
 }
 
 fn copy_selection_native(host: &mut HostState) -> bool {
@@ -19536,12 +19210,8 @@ fn pane_scrollbar_at(
         let pane = host.mux.pane(pane_id)?;
         let (_, content_y, _, content_h) = geom.pane_content_px(rect);
         let (bar_x, _, bar_w, _) = geom.scrollbar_px(rect);
-        let dock_px = host
-            .mux
-            .workspace_rows(pane_id)
-            .saturating_mul(host.font.cell_h);
-        let guest_y = content_y.saturating_add(dock_px);
-        let guest_h = content_h.saturating_sub(dock_px);
+        let guest_y = content_y;
+        let guest_h = content_h;
         let max = pane.content().max_scroll();
         let scroll = pane.view_scroll.min(max);
         let bar = scrollbar_layout(
@@ -19951,12 +19621,8 @@ fn bell_toast_rect(host: &HostState, toast: &BellToast) -> Option<(usize, usize,
     let geom = host.mux.geom();
     let (_, rect) = host.mux.rects().find(|(id, _)| *id == toast.pane)?;
     let (content_x, content_y, content_w, content_h) = geom.pane_content_px(rect);
-    let dock_px = host
-        .mux
-        .workspace_rows(toast.pane)
-        .saturating_mul(host.font.cell_h);
-    let guest_y = content_y.saturating_add(dock_px);
-    let guest_h = content_h.saturating_sub(dock_px);
+    let guest_y = content_y;
+    let guest_h = content_h;
     bell_toast_chip_rect(
         &toast.label,
         host.font.cell_w,
@@ -20070,12 +19736,8 @@ fn handle_scrollbar_drag(host: &mut HostState) -> bool {
         };
         let (_, content_y, _, content_h) = geom.pane_content_px(rect);
         let (bar_x, _, bar_w, _) = geom.scrollbar_px(rect);
-        let dock_px = host
-            .mux
-            .workspace_rows(drag.pane)
-            .saturating_mul(host.font.cell_h);
-        let guest_y = content_y.saturating_add(dock_px);
-        let guest_h = content_h.saturating_sub(dock_px);
+        let guest_y = content_y;
+        let guest_h = content_h;
         let max = pane.content().max_scroll();
         let Some(bar) = scrollbar_layout(
             bar_x,
@@ -20821,7 +20483,6 @@ enum ActionRoute {
     Paste,
     Copy,
     SelectAll,
-    RichFocus,
     Walkthrough,
     WalkthroughReset,
     Palette,
@@ -20852,7 +20513,6 @@ fn action_route(action: keybind::Action) -> ActionRoute {
         Action::Paste => ActionRoute::Paste,
         Action::Copy => ActionRoute::Copy,
         Action::SelectAll => ActionRoute::SelectAll,
-        Action::RichFocus => ActionRoute::RichFocus,
         Action::Walkthrough => ActionRoute::Walkthrough,
         Action::WalkthroughReset => ActionRoute::WalkthroughReset,
         Action::CommandPalette | Action::PaletteFilterNext | Action::PaletteFilterPrev => {
@@ -21060,7 +20720,6 @@ fn dispatch_action(
             }
             Dispatch::Handled
         }
-        ActionRoute::RichFocus => Dispatch::Handled,
         ActionRoute::Walkthrough => {
             apply_walkthrough_action(host);
             Dispatch::Handled
@@ -21232,9 +20891,6 @@ fn dispatch_palette_mouse_action(
         open_find_prompt(host);
         return Dispatch::Handled;
     }
-    if action == keybind::Action::RichFocus && toggle_rich_focus(host) {
-        return Dispatch::Handled;
-    }
     dispatch_action(host, action, program, child_args)
 }
 
@@ -21300,8 +20956,6 @@ fn wheel_input(delta: &MouseScrollDelta, cell_h: usize) -> WheelInput {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WheelContext {
     shift: bool,
-    rich_focus_active: bool,
-    rich_hit_focused: bool,
     app_wheel: bool,
     app_cursor_over_pane: bool,
     alt_active: bool,
@@ -21310,22 +20964,12 @@ struct WheelContext {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WheelDecision {
-    Rich { step: i16 },
     App { button: u8 },
     Host { rows: isize },
     Consume,
 }
 
 fn wheel_decision(input: WheelInput, context: WheelContext) -> WheelDecision {
-    if !context.shift && context.rich_focus_active && context.rich_hit_focused {
-        return WheelDecision::Rich {
-            step: match input.direction {
-                ScrollDirection::Up => -1,
-                ScrollDirection::Down => 1,
-                ScrollDirection::None => 0,
-            },
-        };
-    }
     if !context.shift && context.app_wheel {
         if !context.app_cursor_over_pane {
             return WheelDecision::Consume;
@@ -21363,8 +21007,6 @@ fn pane_wheel_context(
 ) -> WheelContext {
     WheelContext {
         shift,
-        rich_focus_active: false,
-        rich_hit_focused: false,
         app_wheel: pane.emulator.reports_app_wheel(),
         app_cursor_over_pane,
         alt_active: pane.emulator.screen().alt_active(),
@@ -21373,19 +21015,10 @@ fn pane_wheel_context(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct RichPointerFacts {
-    cancelled: bool,
-    same_node: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MouseInputContext {
     state: ElementState,
     button: MouseButton,
     shift: bool,
-    workspace_hit: Option<(PaneId, rich::WorkspaceHit)>,
-    rich_hit_focused: bool,
-    rich_pointer: Option<RichPointerFacts>,
     url_openable: bool,
     suppress_left_release: bool,
     tracking: prismattyc_emulator::MouseTracking,
@@ -21396,18 +21029,6 @@ struct MouseInputContext {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MouseInputDecision {
-    RichShiftDrag {
-        pane: PaneId,
-        hit: rich::WorkspaceHit,
-    },
-    RichPress {
-        pane: PaneId,
-        hit: rich::WorkspaceHit,
-    },
-    RichRelease {
-        activate: bool,
-        finish_selection: bool,
-    },
     OpenUrl,
     SuppressLeftRelease,
     App {
@@ -21427,26 +21048,6 @@ enum MouseInputDecision {
 
 fn mouse_input_decision(context: MouseInputContext) -> MouseInputDecision {
     if context.button == MouseButton::Left {
-        if context.state == ElementState::Pressed {
-            if context.shift {
-                if let Some((pane, hit)) = context.workspace_hit {
-                    return MouseInputDecision::RichShiftDrag { pane, hit };
-                }
-            } else if context.rich_hit_focused {
-                let (pane, hit) = context
-                    .workspace_hit
-                    .expect("focused rich hit must have a workspace hit");
-                return MouseInputDecision::RichPress { pane, hit };
-            }
-        }
-        if context.state == ElementState::Released {
-            if let Some(pointer) = context.rich_pointer {
-                return MouseInputDecision::RichRelease {
-                    activate: !pointer.cancelled && pointer.same_node,
-                    finish_selection: context.left_button_down,
-                };
-            }
-        }
         if context.state == ElementState::Pressed && context.url_openable {
             return MouseInputDecision::OpenUrl;
         }
@@ -21900,12 +21501,6 @@ impl ApplicationHandler<UserAction> for App {
                             || handle_space_picker_key(host, &event, Some(selected))
                             || handle_find_key(host, &event, Some(selected));
                         if !modal {
-                            if selected == keybind::Action::RichFocus
-                                && handle_rich_focus_input(host, &event, Some(selected))
-                            {
-                                host.window.request_redraw();
-                                return;
-                            }
                             match dispatch_action(
                                 host,
                                 selected,
@@ -22050,12 +21645,6 @@ impl ApplicationHandler<UserAction> for App {
                     let blocked_by_guest_alt =
                         action_blocked_by_guest_alt(action, !host_select, host.modifiers);
                     if !blocked_by_guest_alt {
-                        if action == keybind::Action::RichFocus
-                            && handle_rich_focus_input(host, &event, Some(action))
-                        {
-                            host.window.request_redraw();
-                            return;
-                        }
                         match dispatch_action(host, action, &self.cli.program, &self.cli.child_args)
                         {
                             Dispatch::Exit => {
@@ -22075,10 +21664,6 @@ impl ApplicationHandler<UserAction> for App {
                         host.window.request_redraw();
                         return;
                     }
-                }
-                if handle_rich_focus_input(host, &event, action) {
-                    host.window.request_redraw();
-                    return;
                 }
                 if !event.repeat
                     && is_paste_fallback(&event.logical_key, event.physical_key, host.modifiers)
@@ -22180,29 +21765,6 @@ impl ApplicationHandler<UserAction> for App {
                     return;
                 }
                 let focused = host.mux.focused_id();
-                if let Some(mut gesture) = host.rich_pointer {
-                    if !gesture.cancelled
-                        && rich_pointer_dragged(
-                            gesture.start_x,
-                            gesture.start_y,
-                            position,
-                            host.window.scale_factor(),
-                        )
-                    {
-                        gesture.cancelled = true;
-                        host.rich_pointer = Some(gesture);
-                    }
-                    if gesture.cancelled && !host.left_button_down {
-                        if let Some((pane, row, col)) = host
-                            .cursor_cell
-                            .filter(|(pane, _, _)| *pane == gesture.pane && *pane == focused)
-                        {
-                            begin_pointer_selection(host, pane, row, col);
-                        }
-                    }
-                    host.window.request_redraw();
-                    return;
-                }
                 let app_owns_mouse = host.emulator.mouse_tracking().is_on()
                     && !host.modifiers.shift_key()
                     && !host.link_click_gesture.selecting_drag();
@@ -22254,9 +21816,6 @@ impl ApplicationHandler<UserAction> for App {
                         anchor.col,
                         1,
                     );
-                }
-                if let Some(gesture) = host.rich_pointer.as_mut() {
-                    gesture.cancelled = true;
                 }
                 if sync_chrome_hover(host) {
                     host.window.request_redraw();
@@ -22311,25 +21870,12 @@ impl ApplicationHandler<UserAction> for App {
                             WheelDecision::Host { rows } => {
                                 pan_pane_view_scroll(host, pane_id, rows);
                             }
-                            WheelDecision::Rich { .. } | WheelDecision::Consume => {}
+                            WheelDecision::Consume => {}
                         }
                     }
                     host.window.request_redraw();
                     return;
                 }
-                let rich_hit = if !shift && host.mux.rich_focus_active() {
-                    host.pointer_px
-                        .and_then(|(x, y)| {
-                            workspace_hit_at_position(
-                                PhysicalPosition::new(x, y),
-                                &host.font,
-                                &host.mux,
-                            )
-                        })
-                        .filter(|(pane, _)| *pane == host.mux.focused_id())
-                } else {
-                    None
-                };
                 let app_cursor_over_pane = host
                     .cursor_cell
                     .is_some_and(|(pane, _, _)| pane == host.mux.focused_id());
@@ -22337,8 +21883,6 @@ impl ApplicationHandler<UserAction> for App {
                     wheel_input(&delta, host.font.cell_h),
                     WheelContext {
                         shift,
-                        rich_focus_active: host.mux.rich_focus_active(),
-                        rich_hit_focused: rich_hit.is_some(),
                         app_wheel: host.emulator.reports_app_wheel(),
                         app_cursor_over_pane,
                         alt_active: host.emulator.screen().alt_active(),
@@ -22346,13 +21890,6 @@ impl ApplicationHandler<UserAction> for App {
                     },
                 );
                 match decision {
-                    WheelDecision::Rich { step } => {
-                        if let Some((pane, hit)) = rich_hit {
-                            if step != 0 && host.mux.send_rich_scroll(pane, hit, step) {
-                                host.dirty = true;
-                            }
-                        }
-                    }
                     WheelDecision::App { button } => {
                         if let Some((_, row, col)) = host
                             .cursor_cell
@@ -22402,7 +21939,6 @@ impl ApplicationHandler<UserAction> for App {
                                         .set_title(&window_title(&host.mux, show_tab_strip(host)));
                                 }
                                 host.left_button_down = false;
-                                host.rich_pointer = None;
                                 host.app_mouse_button = None;
                                 open_context_menu(host, ContextMenuTarget::Pane(pane));
                                 host.window.request_redraw();
@@ -22413,7 +21949,6 @@ impl ApplicationHandler<UserAction> for App {
                 }
                 if state == ElementState::Pressed && handle_space_reorder_press(host, button) {
                     host.left_button_down = false;
-                    host.rich_pointer = None;
                     host.app_mouse_button = None;
                     sync_chrome_hover(host);
                     host.window.request_redraw();
@@ -22421,7 +21956,6 @@ impl ApplicationHandler<UserAction> for App {
                 }
                 if state == ElementState::Pressed && handle_rail_click(host, button) {
                     host.left_button_down = false;
-                    host.rich_pointer = None;
                     host.app_mouse_button = None;
                     sync_chrome_hover(host);
                     host.window.request_redraw();
@@ -22449,7 +21983,6 @@ impl ApplicationHandler<UserAction> for App {
                         }
                         StripClickResult::Handled => {
                             host.left_button_down = false;
-                            host.rich_pointer = None;
                             host.app_mouse_button = None;
                             sync_chrome_hover(host);
                             host.window.request_redraw();
@@ -22457,7 +21990,6 @@ impl ApplicationHandler<UserAction> for App {
                         }
                         StripClickResult::Action(action) => {
                             host.left_button_down = false;
-                            host.rich_pointer = None;
                             host.app_mouse_button = None;
                             match dispatch_strip_action(
                                 host,
@@ -22488,7 +22020,6 @@ impl ApplicationHandler<UserAction> for App {
                     && handle_caption_click(host, button, &self.cli.program, &self.cli.child_args)
                 {
                     host.left_button_down = false;
-                    host.rich_pointer = None;
                     host.app_mouse_button = None;
                     host.suppress_left_release = true;
                     sync_chrome_hover(host);
@@ -22497,21 +22028,18 @@ impl ApplicationHandler<UserAction> for App {
                 }
                 if state == ElementState::Pressed && handle_bell_toast_click(host, button) {
                     host.left_button_down = false;
-                    host.rich_pointer = None;
                     host.app_mouse_button = None;
                     host.window.request_redraw();
                     return;
                 }
                 if state == ElementState::Pressed && handle_divider_press(host, button) {
                     host.left_button_down = false;
-                    host.rich_pointer = None;
                     host.app_mouse_button = None;
                     host.window.request_redraw();
                     return;
                 }
                 if state == ElementState::Pressed && handle_float_drag_press(host, button) {
                     host.left_button_down = false;
-                    host.rich_pointer = None;
                     host.app_mouse_button = None;
                     host.window.request_redraw();
                     return;
@@ -22528,7 +22056,6 @@ impl ApplicationHandler<UserAction> for App {
                     return;
                 }
                 if state == ElementState::Pressed && handle_scrollbar_press(host, button) {
-                    host.rich_pointer = None;
                     host.app_mouse_button = None;
                     sync_chrome_hover(host);
                     host.window.request_redraw();
@@ -22591,14 +22118,8 @@ impl ApplicationHandler<UserAction> for App {
                     }
                 }
                 let shift = host.modifiers.shift_key();
-                let workspace_hit = host.pointer_px.and_then(|(x, y)| {
-                    workspace_hit_at_position(PhysicalPosition::new(x, y), &host.font, &host.mux)
-                });
                 if state == ElementState::Pressed {
-                    let pane = workspace_hit
-                        .map(|(pane, _)| pane)
-                        .or_else(|| host.cursor_cell.map(|(pane, _, _)| pane));
-                    if let Some(pane) = pane {
+                    if let Some(pane) = host.cursor_cell.map(|(pane, _, _)| pane) {
                         if host.mux.focus(pane) {
                             mark_layout_dirty(host);
                             host.last_app_mouse_cell = None;
@@ -22608,14 +22129,6 @@ impl ApplicationHandler<UserAction> for App {
                     }
                 }
                 let focused = host.mux.focused_id();
-                let rich_pointer = host.rich_pointer.map(|gesture| RichPointerFacts {
-                    cancelled: gesture.cancelled,
-                    same_node: workspace_hit.is_some_and(|(pane, hit)| {
-                        pane == gesture.pane
-                            && hit.node_id == gesture.hit.node_id
-                            && hit.action_id == gesture.hit.action_id
-                    }),
-                });
                 let link_target = if button == MouseButton::Left
                     && state == ElementState::Pressed
                     && host.cursor_cell.is_some_and(|(pane, _, _)| pane == focused)
@@ -22638,10 +22151,6 @@ impl ApplicationHandler<UserAction> for App {
                     state,
                     button,
                     shift,
-                    workspace_hit,
-                    rich_hit_focused: host.mux.rich_focus_active()
-                        && workspace_hit.is_some_and(|(pane, _)| pane == focused),
-                    rich_pointer,
                     url_openable,
                     suppress_left_release: host.suppress_left_release,
                     tracking: host.emulator.mouse_tracking(),
@@ -22653,54 +22162,6 @@ impl ApplicationHandler<UserAction> for App {
                     left_button_down: host.left_button_down,
                 });
                 match decision {
-                    MouseInputDecision::RichShiftDrag { pane, hit } => {
-                        let (start_x, start_y) = host.pointer_px.unwrap_or((0.0, 0.0));
-                        host.rich_pointer = Some(RichPointerGesture {
-                            pane,
-                            hit,
-                            start_x,
-                            start_y,
-                            cancelled: true,
-                        });
-                        host.window.request_redraw();
-                    }
-                    MouseInputDecision::RichPress { pane, hit } => {
-                        let (start_x, start_y) = host.pointer_px.unwrap_or((0.0, 0.0));
-                        if host.mux.send_rich_pointer(pane, hit, PointerPhase::Press) {
-                            host.rich_pointer = Some(RichPointerGesture {
-                                pane,
-                                hit,
-                                start_x,
-                                start_y,
-                                cancelled: false,
-                            });
-                            host.selection.clear();
-                            host.keyboard_select_mode = false;
-                            host.left_button_down = false;
-                            host.dirty = true;
-                        }
-                        host.window.request_redraw();
-                    }
-                    MouseInputDecision::RichRelease {
-                        activate,
-                        finish_selection,
-                    } => {
-                        let gesture = host.rich_pointer.take().expect("checked gesture");
-                        if activate {
-                            if let Some((_, hit)) = workspace_hit {
-                                let _ = host.mux.send_rich_pointer(
-                                    gesture.pane,
-                                    hit,
-                                    PointerPhase::Activate,
-                                );
-                                host.dirty = true;
-                            }
-                        }
-                        if finish_selection {
-                            finish_pointer_selection(host);
-                        }
-                        host.window.request_redraw();
-                    }
                     MouseInputDecision::OpenUrl => {
                         let (pane, row, col) = host.cursor_cell.expect("openable link hit");
                         let target = link_target.expect("openable link target");
@@ -22819,10 +22280,7 @@ impl ApplicationHandler<UserAction> for App {
                     host.left_button_down = false;
                     host.link_click_gesture.cancel_press();
                     host.suppress_left_release = false;
-                    host.rich_pointer = None;
                     host.scrollbar_drag = None;
-                    let pane = host.mux.focused_id();
-                    host.mux.revoke_rich_focus(pane);
                     if host.selection.active {
                         host.selection.finish();
                         queue_selection_announce(host);
@@ -23143,6 +22601,9 @@ fn main() -> Result<()> {
     // Parse first so --help / --version / --write-config never create
     // the default config path (PT-84 review).
     let mut cli = Cli::parse(std::env::args().skip(1))?;
+    if let Some(notice) = cli.removed_rich_notice() {
+        eprintln!("{notice}");
+    }
     if cli.list_bindings {
         let file_config = config::load(&config::config_path())?;
         println!("{}", file_config.loaded_keymap().listing());
@@ -23483,7 +22944,6 @@ mod tests {
             (Action::Paste, ActionRoute::Paste),
             (Action::Copy, ActionRoute::Copy),
             (Action::SelectAll, ActionRoute::SelectAll),
-            (Action::RichFocus, ActionRoute::RichFocus),
             (Action::Walkthrough, ActionRoute::Walkthrough),
             (Action::WalkthroughReset, ActionRoute::WalkthroughReset),
             (Action::CommandPalette, ActionRoute::Palette),
@@ -24249,15 +23709,9 @@ mod tests {
     fn content_guards_have_boundary_rows() {
         let clear = render_diagnostics::GuardMask::default();
         assert!(!unsupported_pane_content(clear));
-        for guard in [
-            render_diagnostics::Guard::WorkspaceLayout,
-            render_diagnostics::Guard::ExperimentalRich,
-            render_diagnostics::Guard::StoredImages,
-        ] {
-            let mut mask = clear;
-            mask.set(guard, true);
-            assert!(unsupported_pane_content(mask), "{guard:?}");
-        }
+        let mut mask = clear;
+        mask.set(render_diagnostics::Guard::StoredImages, true);
+        assert!(unsupported_pane_content(mask));
     }
 
     #[test]
@@ -25761,39 +25215,9 @@ mod tests {
         let cases = [
             (
                 WheelInput {
-                    direction: ScrollDirection::Up,
-                    host_lines: 3,
-                },
-                false,
-                true,
-                true,
-                true,
-                true,
-                false,
-                24,
-                WheelDecision::Rich { step: -1 },
-            ),
-            (
-                WheelInput {
-                    direction: ScrollDirection::None,
-                    host_lines: 0,
-                },
-                false,
-                true,
-                true,
-                false,
-                false,
-                false,
-                24,
-                WheelDecision::Rich { step: 0 },
-            ),
-            (
-                WheelInput {
                     direction: ScrollDirection::Down,
                     host_lines: -3,
                 },
-                false,
-                false,
                 false,
                 true,
                 true,
@@ -25807,8 +25231,6 @@ mod tests {
                     host_lines: 3,
                 },
                 false,
-                false,
-                false,
                 true,
                 false,
                 false,
@@ -25822,8 +25244,6 @@ mod tests {
                 },
                 false,
                 false,
-                false,
-                false,
                 true,
                 true,
                 24,
@@ -25834,8 +25254,6 @@ mod tests {
                     direction: ScrollDirection::Up,
                     host_lines: 3,
                 },
-                true,
-                true,
                 true,
                 true,
                 true,
@@ -25849,8 +25267,6 @@ mod tests {
                     host_lines: 3,
                 },
                 true,
-                false,
-                false,
                 true,
                 true,
                 true,
@@ -25862,8 +25278,6 @@ mod tests {
                     direction: ScrollDirection::Down,
                     host_lines: -3,
                 },
-                false,
-                false,
                 false,
                 false,
                 true,
@@ -25878,33 +25292,20 @@ mod tests {
                 },
                 false,
                 false,
-                false,
-                false,
                 true,
                 false,
                 1,
                 WheelDecision::Consume,
             ),
         ];
-        for (
-            input,
-            shift,
-            rich_focus_active,
-            rich_hit_focused,
-            app_wheel,
-            app_cursor_over_pane,
-            alt_active,
-            page_rows,
-            expected,
-        ) in cases
+        for (input, shift, app_wheel, app_cursor_over_pane, alt_active, page_rows, expected) in
+            cases
         {
             assert_eq!(
                 wheel_decision(
                     input,
                     WheelContext {
                         shift,
-                        rich_focus_active,
-                        rich_hit_focused,
                         app_wheel,
                         app_cursor_over_pane,
                         alt_active,
@@ -25912,7 +25313,7 @@ mod tests {
                     },
                 ),
                 expected,
-                "{input:?} shift={shift} rich={rich_focus_active}/{rich_hit_focused} app={app_wheel}/{app_cursor_over_pane} alt={alt_active}"
+                "{input:?} shift={shift} app={app_wheel}/{app_cursor_over_pane} alt={alt_active}"
             );
         }
     }
@@ -25922,19 +25323,10 @@ mod tests {
         let pane = mux::MuxRuntime::spawn("/bin/sh", &[], 2, 2)
             .unwrap()
             .focused_id();
-        let hit = rich::WorkspaceHit {
-            node_id: 7,
-            action_id: 11,
-            row: 1,
-            col: 2,
-        };
         let base = |state, button| MouseInputContext {
             state,
             button,
             shift: false,
-            workspace_hit: None,
-            rich_hit_focused: false,
-            rich_pointer: None,
             url_openable: false,
             suppress_left_release: false,
             tracking: prismattyc_emulator::MouseTracking::Off,
@@ -25943,53 +25335,6 @@ mod tests {
             left_button_down: false,
         };
         let cases = [
-            (
-                "shift rich drag",
-                MouseInputContext {
-                    shift: true,
-                    workspace_hit: Some((pane, hit)),
-                    ..base(ElementState::Pressed, MouseButton::Left)
-                },
-                MouseInputDecision::RichShiftDrag { pane, hit },
-            ),
-            (
-                "rich press",
-                MouseInputContext {
-                    workspace_hit: Some((pane, hit)),
-                    rich_hit_focused: true,
-                    ..base(ElementState::Pressed, MouseButton::Left)
-                },
-                MouseInputDecision::RichPress { pane, hit },
-            ),
-            (
-                "rich release activates same node",
-                MouseInputContext {
-                    rich_pointer: Some(RichPointerFacts {
-                        cancelled: false,
-                        same_node: true,
-                    }),
-                    ..base(ElementState::Released, MouseButton::Left)
-                },
-                MouseInputDecision::RichRelease {
-                    activate: true,
-                    finish_selection: false,
-                },
-            ),
-            (
-                "cancelled rich drag finishes selection",
-                MouseInputContext {
-                    rich_pointer: Some(RichPointerFacts {
-                        cancelled: true,
-                        same_node: false,
-                    }),
-                    left_button_down: true,
-                    ..base(ElementState::Released, MouseButton::Left)
-                },
-                MouseInputDecision::RichRelease {
-                    activate: false,
-                    finish_selection: true,
-                },
-            ),
             (
                 "URL owns tracked left press",
                 MouseInputContext {
@@ -26895,45 +26240,6 @@ mod tests {
     }
 
     #[test]
-    fn rich_focus_yields_host_chords_but_captures_plain_keys() {
-        assert!(
-            !rich_focus_captures(mods(true, true)),
-            "C-S chords (scroll pan, copy/paste, tab nav) stay host-owned"
-        );
-        assert!(rich_focus_captures(mods(false, false)));
-        assert!(rich_focus_captures(mods(true, false)));
-        assert!(rich_focus_captures(mods(false, true)));
-    }
-
-    #[test]
-    fn rich_pointer_activation_cancels_at_four_logical_pixels() {
-        assert!(!rich_pointer_dragged(
-            10.0,
-            10.0,
-            PhysicalPosition::new(13.9, 10.0),
-            1.0,
-        ));
-        assert!(rich_pointer_dragged(
-            10.0,
-            10.0,
-            PhysicalPosition::new(14.0, 10.0),
-            1.0,
-        ));
-        assert!(!rich_pointer_dragged(
-            10.0,
-            10.0,
-            PhysicalPosition::new(17.9, 10.0),
-            2.0,
-        ));
-        assert!(rich_pointer_dragged(
-            10.0,
-            10.0,
-            PhysicalPosition::new(18.0, 10.0),
-            2.0,
-        ));
-    }
-
-    #[test]
     fn one_cell_mark_does_not_claim_ctrl_c() {
         let mut selection = Selection::default();
         selection.begin(0, 0);
@@ -27381,33 +26687,21 @@ open(sys.argv[1], 'w').write(str(n))
     }
 
     #[test]
-    fn rich_focus_key_token_is_bounded_and_escaped_shape() {
-        let mut mods = ModifiersState::empty();
-        mods.set(ModifiersState::CONTROL, true);
-        mods.set(ModifiersState::SHIFT, true);
-        let token = rich_focus_key_token(&Key::Character(";".into()), mods).expect("token");
-        assert_eq!(token, "C-S-;");
-        assert!(token.len() <= 32);
-        assert!(rich_focus_key_token(&Key::Named(NamedKey::Control), mods).is_none());
-        assert_eq!(
-            rich_focus_key_token(&Key::Named(NamedKey::Enter), ModifiersState::empty()).as_deref(),
-            Some("Enter")
-        );
-    }
-
-    #[test]
-    fn experimental_rich_cli_flag_enables() {
+    fn the_removed_rich_flag_is_still_accepted_and_prints_a_notice() {
         let previous = std::env::var_os("PRISMATTYC_EXPERIMENTAL_RICH");
         std::env::remove_var("PRISMATTYC_EXPERIMENTAL_RICH");
         let off = Cli::parse(["--", "/bin/sh"].into_iter().map(str::to_owned)).expect("parse");
-        assert!(!off.experimental_rich);
+        assert_eq!(off.removed_rich_notice(), None);
         let on = Cli::parse(
             ["--experimental-rich", "--", "/bin/sh"]
                 .into_iter()
                 .map(str::to_owned),
         )
         .expect("parse");
-        assert!(on.experimental_rich);
+        assert_eq!(on.program, "/bin/sh");
+        assert!(on
+            .removed_rich_notice()
+            .is_some_and(|notice| notice.contains("rich mode was removed")));
         match previous {
             Some(value) => std::env::set_var("PRISMATTYC_EXPERIMENTAL_RICH", value),
             None => std::env::remove_var("PRISMATTYC_EXPERIMENTAL_RICH"),
@@ -27432,17 +26726,11 @@ open(sys.argv[1], 'w').write(str(n))
         assert_eq!(parse(&["--", "/bin/sh"]), mux::Experimental::default());
         assert_eq!(
             parse(&["--experimental-native", "--", "/bin/sh"]),
-            mux::Experimental {
-                rich: false,
-                native: true
-            }
+            mux::Experimental { native: true }
         );
         assert_eq!(
             parse(&["--experimental-rich", "--", "/bin/sh"]),
-            mux::Experimental {
-                rich: true,
-                native: true
-            }
+            mux::Experimental { native: true }
         );
         assert_eq!(
             parse(&["--", "/bin/sh", "--experimental-native"]),
@@ -27452,10 +26740,7 @@ open(sys.argv[1], 'w').write(str(n))
         std::env::set_var("PRISMATTYC_EXPERIMENTAL_NATIVE", "1");
         assert_eq!(
             parse(&["--", "/bin/sh"]),
-            mux::Experimental {
-                rich: false,
-                native: true
-            }
+            mux::Experimental { native: true }
         );
         for (name, value) in saved {
             match value {

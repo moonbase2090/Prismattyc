@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Removed
+
+- The windowed host (`prismattyc-host`) no longer has the experimental rich mode: it does not paint overlays or a docked workspace that an app sends, and the `rich_focus` key action is gone. A `rich_focus` binding left in a config file is ignored with a warning. `--experimental-rich` and `PRISMATTYC_EXPERIMENTAL_RICH` are still accepted for one release, print a notice, and only turn on native sessions, as `--experimental-native` does. The render-status JSON no longer has the `workspace_layout` and `experimental_rich` fields.
+
 ## [0.3.79] - 2026-11-26
 
 ### Added

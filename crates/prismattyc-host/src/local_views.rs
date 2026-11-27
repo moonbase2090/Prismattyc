@@ -87,7 +87,6 @@ pub(super) fn switch(host: &mut HostState, owner: Option<String>) -> Result<bool
     host.scrollbar_drag = None;
     host.left_button_down = false;
     host.app_mouse_button = None;
-    host.rich_pointer = None;
     host.cursor_cell = None;
     host.last_app_mouse_cell = None;
     host.hover_target = None;

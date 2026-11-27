@@ -1,7 +1,8 @@
 # Rich overlay robustness
 
-**Status:** Frozen regression pin while rich product vision is open. Not a
-PRD §5.6 / A-6 pass and not a Phase 3 product checkpoint.
+**Status:** Historical. Rich mode was removed from the classic host, the
+daemon, attach and the windowed host, so the host tests and live repros below
+no longer exist. Kept until the protocol cleanup removes the rest.
 **Rules:** [hybrid-rendering.md](hybrid-rendering.md) z-order, clip, alt-screen
 suspend, teardown.
 

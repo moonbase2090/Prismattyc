@@ -49,7 +49,7 @@ When changing shared displayed-content readers, open a real Windows terminal
 pane with a wide glyph, a combining cluster, a URL and enough lines to scroll.
 Use this build's bindings to select/copy, find, hover the URL and return from
 scrollback. Inspect accessibility text and require the complete cluster and
-correct selected text. Repeat with `--experimental-rich`; render status must
+correct selected text. Repeat with `--experimental-native`; render status must
 still report `display_source=classic` and `native=null`, with no native offer.
 Windows does not implement the Unix native transport. Record the Windows
 desktop and toolchain prerequisites above if this route is unavailable.

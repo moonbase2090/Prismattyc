@@ -345,11 +345,6 @@ pub fn shared_colors(theme: &Theme) -> prismattyc_mux::host_theme::ThemeColors {
     }
 }
 
-pub fn status_rgb(theme: &Theme, tone: prismattyc_protocol::StatusTone) -> Rgb {
-    tone.ansi_index()
-        .map_or(theme.default_fg, |index| theme.ansi[usize::from(index)])
-}
-
 /// Resolve a theme spec for a Prismattyc config file.
 ///
 /// A bare name checks `<config-dir>/themes/` before built-ins, allowing a
@@ -958,28 +953,6 @@ mod tests {
             row,
             PickerItem::Theme { index } if builtins()[*index].id == "omarchy-tokyo-night"
         )));
-    }
-
-    #[test]
-    fn status_tones_resolve_through_each_active_theme() {
-        for theme in builtins() {
-            let neutral = status_rgb(theme, prismattyc_protocol::StatusTone::Neutral);
-            let info = status_rgb(theme, prismattyc_protocol::StatusTone::Info);
-            let success = status_rgb(theme, prismattyc_protocol::StatusTone::Success);
-            let danger = status_rgb(theme, prismattyc_protocol::StatusTone::Danger);
-            let warning = status_rgb(theme, prismattyc_protocol::StatusTone::Warning);
-            assert_eq!(neutral, theme.default_fg, "theme {}", theme.id);
-            assert_eq!(info, theme.ansi[4], "theme {}", theme.id);
-            assert_eq!(success, theme.ansi[2], "theme {}", theme.id);
-            assert_eq!(warning, theme.ansi[3], "theme {}", theme.id);
-            assert_eq!(danger, theme.ansi[1], "theme {}", theme.id);
-            assert_ne!(success, danger, "theme {}", theme.id);
-            assert_ne!(warning, theme.default_bg, "theme {}", theme.id);
-        }
-        assert_ne!(
-            status_rgb(&builtins()[0], prismattyc_protocol::StatusTone::Info),
-            status_rgb(&builtins()[5], prismattyc_protocol::StatusTone::Info)
-        );
     }
 
     #[test]

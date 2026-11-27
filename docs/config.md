@@ -529,8 +529,6 @@ scroll_line_down = "ctrl+shift+down"
 # chrome_layout = []
 # collapse or expand the spaces sidebar.
 sidebar_collapse = "ctrl+alt+shift+s"
-# toggle rich focus (--experimental-rich).
-rich_focus = "ctrl+shift+g"
 
 # -- accessibility --
 [a11y]

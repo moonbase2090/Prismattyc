@@ -126,7 +126,7 @@ pub(crate) fn paint_splash(window: &Window, animated: bool) -> Vec<u32> {
 /// filter chips and every command row.
 pub(crate) fn paint_palette(window: &Window) -> (Vec<u32>, Option<PaletteLayout>) {
     let palette = Palette::default();
-    let view = palette.view(&KeyMap::default(), false);
+    let view = palette.view(&KeyMap::default());
     let chips = Palette::chip_labels();
     let detail = view.detail(palette.selected);
     let sections = [

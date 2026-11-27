@@ -61,9 +61,9 @@ The local control plane uses versioned JSON messages over a same-user Unix
 socket. Clients receive snapshots and events. Controller leases prevent
 multiple clients from writing conflicting input to a pane.
 
-Applications can negotiate optional rich-content capabilities. Programs
-that do not negotiate those capabilities continue to use ordinary terminal
-input and output. The protocol types live in `prismattyc-protocol`.
+Applications can negotiate optional native sessions and images. Programs
+that do not negotiate them continue to use ordinary terminal input and
+output. The protocol types live in `prismattyc-protocol`.
 
-See the [pmux reference](mux-cli.md), [capability protocol](capability-protocol.md)
-and [rich surface protocol](rich-surface.md) for those interfaces.
+See the [pmux reference](mux-cli.md) and [capability protocol](capability-protocol.md)
+for those interfaces.

@@ -282,8 +282,7 @@ It does not hold the controller lease for 750 ms the way
   (lease-free).
 - A live controller or a dirty input ledger (unsubmitted bytes): exit 1.
   Pass `--force` to take over, write, and release. `--force` does not
-  hand the lease back, and taking the lease from a live attach also
-  revokes that attach's rich viewer grant. An interactive attach stays
+  hand the lease back. An interactive attach stays
   up: it paints `[held]` and re-acquires on the next key after the force
   write releases.
 - The refusal is enforced by the server too: a lease-free `WritePane`
@@ -1073,8 +1072,8 @@ Search does not pan to history outside the current viewport.
 The client disables outer-terminal autowrap so a full-width row keeps
 its last column. A non-TTY stdin or `--json` keeps the
 JSON `ReadPane` dump. `--styled-json` instead prints the bounded
-`ReadPaneStyled` projection, including workspace rows, rich styles, and
-semantic clipboard state, for local proof/debug tooling; it does not change
+`ReadPaneStyled` projection (cell text, style runs, scroll and mouse
+modes) for local proof/debug tooling; it does not change
 the stable `--json` shape. `attach --all` execs `prismattyc-host` with live mux
 sessions grouped into tabbed panes. Each of those panes subscribes to its
 pane event log and runs its own emulator; it no longer spawns a nested
@@ -1143,8 +1142,8 @@ registered host remains alive. A host that predates this command must restart
 on a supporting version before the command can return data.
 
 Each window reports `current_panes` at the snapshot time. Each pane includes
-its alternate-screen state, scroll offset, stored image count, and rich
-layout flags. Map a daemon pane ID through `remote_pane_id` to its local
+its alternate-screen state, scroll offset, display source (classic or
+native) and stored image count. Map a daemon pane ID through `remote_pane_id` to its local
 `pane_id` before looking up window geometry. `visible_pane_content_rects`
 pairs local pane IDs with terminal content rectangles in rendered pixels.
 `visible_pane_slots` includes pane headers and padding. Use the content

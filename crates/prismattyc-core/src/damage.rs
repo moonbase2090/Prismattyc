@@ -181,7 +181,7 @@ impl GridDamage {
         }
         // Shifting all-ones (or all-zero) bits is a no-op. A PTY flood of LF
         // fills the grid dirty within one region-height, then this path
-        // keeps process_rich_chunk under its stall budget.
+        // keeps chunk processing under its stall budget.
         let cells = self.rows.saturating_mul(self.columns);
         let dirty = self.dirty_cell_count();
         if dirty == 0 || dirty == cells {

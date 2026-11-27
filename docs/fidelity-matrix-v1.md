@@ -6,8 +6,7 @@ version is **`0.3.79`** and can move without widening this claim.
 **Kind:** Supported classic product subset — not universal xterm parity,
 not a modern-terminal marketing claim outside the rows below.
 
-See [terminal input](input.md) and [hybrid rendering](hybrid-rendering.md)
-for input ownership and composition rules.
+See [terminal input](input.md) for input ownership rules.
 
 ## Reference behavior
 
@@ -17,7 +16,7 @@ for input ownership and composition rules.
 | Reference posture | Match **enumerated** row behaviors against those references; not a full binary differential harness vs a distro xterm package |
 | Secondary notes | VTE-derived parse boundaries via the `vte` 0.15 crate; Prismattyc owns grid/PTY semantics |
 | Host OS primary | Linux |
-| Prismattyc experimental rich (`--experimental-rich`) | **Out of product claim** (experimental only) |
+| Prismattyc experimental native sessions (`--experimental-native`) | **Out of product claim** (experimental only) |
 
 ## Workloads in scope
 
@@ -75,9 +74,9 @@ Distinct xterm private modes (ctlseqs):
 
 | | |
 |--|--|
-| **Inputs** | `CSI ? 47/1047/1049 h` / `l` around printed primary text; optional primary cell-rect attach |
-| **Expected** | Mode semantics per table; primary preserved; on **alt**, host does **not** paint primary rich attachments or selection (suspend); CSI never leaks as grid text |
-| **Evidence** | `alternate_screen_switches_buffers`, `alt_screen_preserves_primary`, `mode47_*`, `mode1049_*`; `paint_policy_skips_primary_overlays_on_alt`, `paint_policy_primary_overlay_absent_on_alt_then_resumes`; live `real_binary_alt_screen_child_output_appears` |
+| **Inputs** | `CSI ? 47/1047/1049 h` / `l` around printed primary text |
+| **Expected** | Mode semantics per table; primary preserved; on **alt**, host does **not** paint the primary selection; CSI never leaks as grid text |
+| **Evidence** | `alternate_screen_switches_buffers`, `alt_screen_preserves_primary`, `mode47_*`, `mode1049_*`; live `real_binary_alt_screen_child_output_appears` |
 
 ### F5 — Scroll region (DECSTBM)
 
@@ -230,14 +229,14 @@ mux/protocol styled-underline passthrough remain deferred.
 - Kitty CSI-u **alternate-key base-layout** depth and **lock modifiers** (Caps/Num) beyond keyboard encoding first slice
 - Reflow of alternate-screen application grids (intentionally retained as grids)
 - Nested tmux / SSH transport fidelity claims
-- Production rich/APC product claim (Phase 0B remains experimental)
+- Production APC capability claim (native sessions remain experimental)
 - Full xterm private-mode table on DECSTR/RIS (partial: claimed modes only — residual)
 
 ## Non-claims
 
 - Not “modern-terminal compatible” as a blanket phrase.
 - Not charter-complete VT fidelity.
-- Not a rich-protocol product release.
+- Not a capability-protocol product release.
 - Not validated app-author adoption (discovery gates remain separate).
 
 Primary resize reflow also covers authored spaces, wide-wrap padding, combining

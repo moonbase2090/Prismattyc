@@ -4,8 +4,8 @@ Prismattyc accepts native cell grids and uploaded images from eligible direct
 local PTY children when started with `--experimental-native` (or
 `PRISMATTYC_EXPERIMENTAL_NATIVE=1`). The feature is off by default.
 `--experimental-rich` also turns it on for one release; rich mode itself was
-removed, so that flag now only enables native sessions. Applications that do not negotiate a native session keep their
-ANSI output.
+removed, so that flag now only enables native sessions. Applications that do
+not negotiate a native session keep their ANSI output.
 
 This is the host implementation. The separately locked verification client
 uses Lunatui's real grid, Image widget, discovery decoder and frame encoder.
@@ -20,10 +20,9 @@ work. This feature does not change the published terminal compatibility claim.
 | Native Apple Silicon macOS | 2 | `native.images.v1` |
 | Windows, Intel macOS and other targets | None | None |
 
-The flag gates discovery, transport and native presentation together. It does
-not need rich overlays: with `--experimental-native` alone, the pane answers a
-native capability query and ignores rich messages, as a pane without rich
-does.
+The flag gates discovery, transport and native presentation together. The
+pane answers a native capability query and ignores any other Prismattyc
+message. See the [capability protocol](capability-protocol.md).
 Forwarded sessions and daemon-owned log views keep the Classic display source.
 Linux serves minor 0 through its sealed exact-length backing. Darwin uses
 rounded typed shared memory for minor 2 and does not advertise minor 0.
@@ -110,10 +109,7 @@ screenshots are separate evidence for desktop composition. A complete feature
 review also needs clean-VM proof at the reviewed commit and live text-reader
 checks. Unit tests alone do not establish those results.
 
-Negotiating Native ends the pane's existing Rich attachments and capability
-grant. Release restores the retained ANSI grid and does not restore those
-attachments. Applications that use both protocols must negotiate Rich again
-after releasing Native ownership.
+Releasing Native ownership restores the retained ANSI grid.
 
 ## Rollout
 

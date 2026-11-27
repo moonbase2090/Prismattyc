@@ -1,10 +1,9 @@
 //! Classic VT parsing and PTY integration for Prismattyc.
 //!
-//! Rich document models stay out of this crate. A dependency-light
-//! [`prismattyc_protocol::ApcCollector`] sidecar recovers APC bodies because VTE
-//! 0.15 swallows APC without delivering the payload to [`vte::Perform`].
-//! The collector is constructed only when experimental rich collection is
-//! enabled so the classic path pays about one null check, not a scan.
+//! A dependency-light [`prismattyc_protocol::ApcCollector`] sidecar recovers
+//! APC bodies because VTE 0.15 swallows APC without delivering the payload to
+//! [`vte::Perform`]. The collector is constructed only for a pane with native
+//! sessions on, so the classic path pays about one null check, not a scan.
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -414,7 +413,7 @@ pub struct Emulator {
     /// Complete OSC 7577 program resume report bodies since the last
     /// [`Self::take_resume_reports`]. Unverified; never painted.
     pending_resume_reports: Vec<Vec<u8>>,
-    /// Kitty graphics decoder state (always active; independent of rich mode).
+    /// Kitty graphics decoder state (always active; independent of APC collection).
     graphics: graphics::GraphicsState,
     /// Graphics APC sidecar (independent of the Prismattyc `apc` collector).
     graphics_apc: prismattyc_protocol::GraphicsApcCollector,

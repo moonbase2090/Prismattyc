@@ -116,6 +116,46 @@ impl PaneLayout {
             }),
         }
     }
+
+    /// A client-side view with `pane` removed. The server tree is not
+    /// changed. The sibling replaces a split whose other side was `pane`,
+    /// and ratios above that split stay.
+    pub fn hiding(&self, pane: PaneId) -> PaneHidden {
+        match self {
+            Self::Leaf(id) if *id == pane => PaneHidden::Empty,
+            Self::Leaf(_) => PaneHidden::Missing,
+            Self::Split(split) => match split.first.hiding(pane) {
+                PaneHidden::Tree(rest) => PaneHidden::Tree(Self::Split(Split {
+                    axis: split.axis,
+                    ratio: split.ratio,
+                    first: Box::new(rest),
+                    second: split.second.clone(),
+                })),
+                PaneHidden::Empty => PaneHidden::Tree((*split.second).clone()),
+                PaneHidden::Missing => match split.second.hiding(pane) {
+                    PaneHidden::Tree(rest) => PaneHidden::Tree(Self::Split(Split {
+                        axis: split.axis,
+                        ratio: split.ratio,
+                        first: split.first.clone(),
+                        second: Box::new(rest),
+                    })),
+                    PaneHidden::Empty => PaneHidden::Tree((*split.first).clone()),
+                    PaneHidden::Missing => PaneHidden::Missing,
+                },
+            },
+        }
+    }
+}
+
+/// What remains of a layout after one pane is hidden from the tile.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PaneHidden {
+    /// `pane` is not in this tree.
+    Missing,
+    /// `pane` was the only leaf, so nothing remains to tile.
+    Empty,
+    /// The panes that are still tiled.
+    Tree(PaneLayout),
 }
 
 #[cfg(test)]
@@ -175,5 +215,31 @@ mod tests {
         assert!(tree().rotate_leaves(3).is_none(), "full turn is a no-op");
         assert!(tree().rotate_leaves(0).is_none());
         assert!(leaf(1).rotate_leaves(1).is_none());
+    }
+
+    #[test]
+    fn hiding_a_pane_lifts_it_out_and_keeps_the_sibling() {
+        let hidden = tree().hiding(PaneId::from_raw(1));
+        let PaneHidden::Tree(rest) = hidden else {
+            panic!("sibling remains");
+        };
+        assert_eq!(ids(&rest), vec![2, 3]);
+        let PaneLayout::Split(split) = &rest else {
+            panic!("inner split");
+        };
+        assert_eq!(split.ratio, 0.6, "the removed pane's parent ratio is gone");
+
+        let hidden = tree().hiding(PaneId::from_raw(2));
+        let PaneHidden::Tree(rest) = hidden else {
+            panic!("root remains");
+        };
+        assert_eq!(ids(&rest), vec![1, 3]);
+        let PaneLayout::Split(split) = &rest else {
+            panic!("root split");
+        };
+        assert_eq!(split.ratio, 0.4, "ratios above the hidden pane stay");
+        assert_eq!(tree().hiding(PaneId::from_raw(9)), PaneHidden::Missing);
+        assert_eq!(leaf(1).hiding(PaneId::from_raw(1)), PaneHidden::Empty);
+        assert_eq!(ids(&tree()), vec![1, 2, 3], "the source tree stays tiled");
     }
 }

@@ -1,6 +1,7 @@
 //! Optional team details in the existing keyboard-accessible Space menu.
 
 use super::*;
+use crate::palette::{RowKind, StatusTone};
 use prismattyc_mux::space_team::TeamDetails;
 use prismattyc_mux::space_template::TemplatePreview;
 use std::sync::mpsc::{self, Receiver};
@@ -54,6 +55,8 @@ enum Page {
     Templates,
     Preview(String, String),
     Text(String),
+    /// A maintenance command's result: status, details and actions.
+    Result(Report),
     Update(String, Vec<(String, update_flow::Action)>),
     /// Recent messages (#171): (message, age and state) rows, newest first.
     Messages(Vec<(String, String)>),
@@ -70,12 +73,16 @@ struct Row {
     label: String,
     detail: String,
     choice: Choice,
+    /// Only actions take focus. Update and restart information is
+    /// `Detail` or `Status` and is never selected.
+    kind: RowKind,
 }
 enum Payload {
     Details(TeamDetails),
     Templates(Vec<String>),
     Preview(TemplatePreview),
     Text(String),
+    Report(Report),
     Created(String),
 }
 
@@ -101,6 +108,13 @@ impl Panel {
     fn row(&mut self, label: impl Into<String>, detail: impl Into<String>, choice: Choice) {
         let label = label.into();
         let detail = detail.into();
+        // Update and restart pages show information that does nothing when
+        // chosen, so it is never focusable there.
+        let info = if self.update_pages() {
+            RowKind::Detail
+        } else {
+            RowKind::Action
+        };
         if matches!(choice, Choice::None) {
             let text = if detail.is_empty() {
                 label
@@ -112,6 +126,7 @@ impl Panel {
                     label: line,
                     detail: String::new(),
                     choice: Choice::None,
+                    kind: info,
                 });
             }
         } else if space_rail::name_cells(&detail) > self.columns.saturating_sub(36).max(12) {
@@ -119,12 +134,27 @@ impl Panel {
                 label,
                 detail: String::new(),
                 choice,
+                kind: RowKind::Action,
             });
-            for line in wrap_text(&detail, self.columns.max(12)) {
+            // On update pages the wrapped description stays in the
+            // description column, under its action, as information, so it
+            // wraps to that column's width.
+            let wrap = if info == RowKind::Detail {
+                self.columns.saturating_sub(36).max(12)
+            } else {
+                self.columns.max(12)
+            };
+            for line in wrap_text(&detail, wrap) {
+                let (label, detail) = if info == RowKind::Detail {
+                    (String::new(), line)
+                } else {
+                    (line, String::new())
+                };
                 self.rows.push(Row {
-                    label: line,
-                    detail: String::new(),
+                    label,
+                    detail,
                     choice: Choice::None,
+                    kind: info,
                 });
             }
         } else {
@@ -132,8 +162,61 @@ impl Panel {
                 label,
                 detail,
                 choice,
+                kind: RowKind::Action,
             });
         }
+    }
+
+    /// The Update and restart menu, its progress pages and its results.
+    fn update_pages(&self) -> bool {
+        match self.page {
+            Page::Maintenance | Page::Update(..) | Page::Result(_) => true,
+            Page::Text(_) => self.maintenance,
+            _ => false,
+        }
+    }
+
+    /// A labelled value in the details block. Never focusable.
+    fn detail_row(&mut self, label: impl Into<String>, value: impl Into<String>) {
+        self.rows.push(Row {
+            label: label.into(),
+            detail: value.into(),
+            choice: Choice::None,
+            kind: RowKind::Detail,
+        });
+    }
+
+    /// Explanation text, wrapped to the panel. Never focusable.
+    fn note_rows(&mut self, text: &str) {
+        for line in wrap_text(text, self.columns.max(12)) {
+            self.rows.push(Row {
+                label: line,
+                detail: String::new(),
+                choice: Choice::None,
+                kind: RowKind::Detail,
+            });
+        }
+    }
+
+    /// Indices into `rows` of the rows that take focus, in order. The menu's
+    /// selection is a position in this list.
+    fn focusable(&self) -> Vec<usize> {
+        self.rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.kind.focusable())
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// The row a menu selection points at.
+    fn row_at(&self, selected: usize) -> Option<usize> {
+        self.focusable().get(selected).copied()
+    }
+
+    /// The menu selection for a row, if that row takes focus.
+    fn selection_of(&self, row: usize) -> Option<usize> {
+        self.focusable().iter().position(|&index| index == row)
     }
 
     /// Bars or Sidebar, with the live choice marked. Only for Graphite chrome.
@@ -267,10 +350,9 @@ impl Panel {
         self.rows.clear();
         match self.page.clone() {
             Page::Maintenance => {
-                self.row(
+                self.detail_row(
                     "Update source",
                     "Moonbase2090/Prismattyc releases, starting at 0.2.0",
-                    Choice::None,
                 );
                 #[cfg_attr(target_os = "macos", allow(unused_mut))]
                 let mut actions = vec![(
@@ -454,6 +536,7 @@ impl Panel {
                         label: detail,
                         detail: message,
                         choice: Choice::Message,
+                        kind: RowKind::Action,
                     });
                 }
                 self.row("Back to settings", "", Choice::Settings);
@@ -595,11 +678,42 @@ impl Panel {
             }
             Page::Update(text, actions) => {
                 for line in text.lines() {
-                    self.row(line, "", Choice::None);
+                    self.note_rows(line);
                 }
                 for (label, action) in actions {
                     self.row(label, "", Choice::FullUpdate(action));
                 }
+            }
+            Page::Result(report) => {
+                if let Some((tone, badge)) = &report.status {
+                    let line = match (&report.update_to, tone) {
+                        (Some(version), _) => format!("Prismattyc {version} is ready to install"),
+                        (None, StatusTone::Good) if badge == "Up to date" => {
+                            "You have the latest release".into()
+                        }
+                        _ => String::new(),
+                    };
+                    self.rows.push(Row {
+                        label: badge.clone(),
+                        detail: line,
+                        choice: Choice::None,
+                        kind: RowKind::Status(*tone),
+                    });
+                }
+                for line in &report.lines {
+                    match line {
+                        ReportLine::Detail(label, value) => self.detail_row(label, value),
+                        ReportLine::Note(text) => self.note_rows(text),
+                    }
+                }
+                if let Some(version) = &report.update_to {
+                    self.row(
+                        "Update and restart all components",
+                        format!("Install {version}, then restart"),
+                        Choice::FullUpdate(update_flow::Action::Start),
+                    );
+                }
+                self.row("Back to update and restart", "", Choice::Maintenance);
             }
             Page::Text(text) => {
                 for line in text.lines() {
@@ -687,6 +801,7 @@ pub(super) fn update_page(
             .rows
             .iter()
             .position(|row| matches!(row.choice, Choice::FullUpdate(_)))
+            .and_then(|row| panel.selection_of(row))
             .unwrap_or(0);
     }
     host.dirty = true;
@@ -694,16 +809,17 @@ pub(super) fn update_page(
 }
 
 fn action_label(panel: &Panel, index: Option<usize>) -> Option<String> {
-    let row = panel.rows.get(index?)?;
+    let row = panel.rows.get(panel.row_at(index?)?)?;
     (!matches!(row.choice, Choice::None)).then(|| row.label.clone())
 }
 
 fn action_index(panel: &Panel, label: Option<&str>) -> Option<usize> {
     let label = label?;
-    panel
+    let row = panel
         .rows
         .iter()
-        .position(|row| row.label == label && !matches!(row.choice, Choice::None))
+        .position(|row| row.label == label && !matches!(row.choice, Choice::None))?;
+    panel.selection_of(row)
 }
 
 fn update_columns(
@@ -720,7 +836,7 @@ fn update_columns(
             panel.rebuild();
         }
     }
-    let last = panel.rows.len().saturating_sub(1);
+    let last = panel.focusable().len().saturating_sub(1);
     (
         action_index(panel, selected_action.as_deref())
             .or_else(|| selected.map(|index| index.min(last))),
@@ -752,6 +868,7 @@ pub(super) fn maintenance(host: &mut HostState) {
         .rows
         .iter()
         .position(|r| matches!(r.choice, Choice::Command(_)))
+        .and_then(|row| panel.selection_of(row))
         .unwrap_or(0);
     if let Some(menu) = host.context_menu.as_mut() {
         menu.selected = first;
@@ -781,6 +898,7 @@ pub(super) fn layout(host: &mut HostState) {
         .rows
         .iter()
         .position(|r| matches!(r.choice, Choice::Layout(mode) if Some(mode) == panel.chrome_layout))
+        .and_then(|row| panel.selection_of(row))
         .unwrap_or(0);
     if let Some(menu) = host.context_menu.as_mut() {
         menu.selected = current;
@@ -870,7 +988,7 @@ fn command(host: &mut HostState, args: Vec<String>, kind: &'static str) {
             }
             let text = String::from_utf8_lossy(&output.stdout).into_owned();
             match kind {
-                "maintenance" => Ok(Payload::Text(maintenance_result(&text))),
+                "maintenance" => Ok(Payload::Report(maintenance_report(&text))),
                 "details" => serde_json::from_str(&text)
                     .map(Payload::Details)
                     .map_err(|e| e.to_string()),
@@ -928,6 +1046,7 @@ pub(super) fn rows(host: &HostState) -> Option<(String, Vec<PaletteRow>)> {
         match &panel.page {
             Page::Maintenance => "UPDATE AND RESTART".into(),
             Page::Update(..) => "UPDATE AND RESTART".into(),
+            Page::Result(_) => "UPDATE AND RESTART RESULT".into(),
             Page::Text(_) if panel.maintenance => "UPDATE AND RESTART RESULT".into(),
             Page::Settings => "SPACES SETTINGS".into(),
             Page::Layout => "LAYOUT".into(),
@@ -945,17 +1064,27 @@ pub(super) fn rows(host: &HostState) -> Option<(String, Vec<PaletteRow>)> {
             String::new(),
         )]
     } else {
-        panel
-            .rows
-            .iter()
-            .map(|r| {
+        palette_rows(panel)
+    };
+    Some((header, rows))
+}
+
+/// The panel's rows as palette rows. Information keeps its kind, so the
+/// palette paints it without ever selecting it.
+fn palette_rows(panel: &Panel) -> Vec<PaletteRow> {
+    panel
+        .rows
+        .iter()
+        .map(|r| match r.kind {
+            RowKind::Action => {
                 let mut row = PaletteRow::plain(r.label.clone(), r.detail.clone(), String::new());
                 row.full_width = matches!(r.choice, Choice::None);
                 row
-            })
-            .collect()
-    };
-    Some((header, rows))
+            }
+            RowKind::Detail => PaletteRow::detail(r.label.clone(), r.detail.clone()),
+            RowKind::Status(tone) => PaletteRow::status(tone, r.label.clone(), r.detail.clone()),
+        })
+        .collect()
 }
 
 /// The update panel's page and selected row index, for the opt-in UI change
@@ -968,15 +1097,22 @@ pub(super) fn update_state(host: &HostState) -> Option<serde_json::Value> {
     let page = match panel.page {
         Page::Maintenance => "maintenance",
         Page::Update(..) => "update",
-        Page::Text(_) => "result",
+        Page::Text(_) | Page::Result(_) => "result",
         _ => "other",
     };
     Some(serde_json::json!({
         "page": page,
-        "selected": host.context_menu.as_ref().map(|menu| menu.selected),
+        "selected": selected_row(host),
         "rows": panel.rows.len(),
         "loading": panel.pending.is_some(),
     }))
+}
+
+/// The row the menu selection is on, as an index into the panel's rows.
+/// The menu itself counts only focusable rows.
+pub(super) fn selected_row(host: &HostState) -> Option<usize> {
+    let panel = host.space_panel.as_ref()?;
+    panel.row_at(host.context_menu.as_ref()?.selected)
 }
 
 pub(super) fn status(host: &HostState) -> Option<serde_json::Value> {
@@ -984,7 +1120,8 @@ pub(super) fn status(host: &HostState) -> Option<serde_json::Value> {
     Some(
         serde_json::json!({"header":header,"rows":rows.iter().map(|row| format!("{}: {}", row.name, row.describe)).collect::<Vec<_>>(),
         "loading":host.space_panel.as_ref()?.pending.is_some(),
-        "selected":host.context_menu.as_ref().map(|menu| menu.selected)}),
+        "selected":selected_row(host),
+        "focusable":rows.iter().enumerate().filter(|(_, row)| row.kind.focusable()).map(|(index, _)| index).collect::<Vec<_>>()}),
     )
 }
 
@@ -1006,7 +1143,7 @@ pub(super) fn poll(host: &mut HostState) {
         if panel.columns != columns
             && matches!(
                 panel.page,
-                Page::Text(_) | Page::Update(..) | Page::Maintenance
+                Page::Text(_) | Page::Result(_) | Page::Update(..) | Page::Maintenance
             )
         {
             panel.columns = columns;
@@ -1123,10 +1260,18 @@ pub(super) fn poll(host: &mut HostState) {
             panel.page = Page::Text(text);
             panel.rebuild();
         }
+        Ok(Payload::Report(report)) => {
+            panel.submitted = None;
+            panel.page = Page::Result(report);
+            panel.rebuild();
+        }
         Err(text) => {
             if let Some(mut input) = panel.submitted.take() {
                 input.label = format!("{} — {text}", input.label);
                 panel.input = Some(input);
+            } else if panel.maintenance {
+                panel.page = Page::Result(Report::failed(&text));
+                panel.rebuild();
             } else {
                 panel.page = Page::Text(text);
                 panel.rebuild();
@@ -1149,8 +1294,8 @@ pub(super) fn activate(host: &mut HostState, index: usize) {
         return;
     };
     let choice = panel
-        .rows
-        .get(index)
+        .row_at(index)
+        .and_then(|row| panel.rows.get(row))
         .map(|r| r.choice.clone())
         .unwrap_or(Choice::None);
     let name = panel.space.clone();
@@ -1629,12 +1774,71 @@ fn focus_pending(host: &mut HostState) {
     }
 }
 
+/// One line of a maintenance result: a labelled value, or a sentence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum ReportLine {
+    Detail(String, String),
+    Note(String),
+}
+
+/// A maintenance result as information: an optional status badge, the lines
+/// in order, and the release an update would install.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Report {
+    pub(super) status: Option<(StatusTone, String)>,
+    pub(super) lines: Vec<ReportLine>,
+    pub(super) update_to: Option<String>,
+}
+
+impl Report {
+    fn failed(text: &str) -> Self {
+        Report {
+            status: Some((StatusTone::Failed, "Failed".into())),
+            lines: text
+                .lines()
+                .map(|line| ReportLine::Note(line.into()))
+                .collect(),
+            update_to: None,
+        }
+    }
+
+    /// The plain-text form used by toasts and the update flow.
+    pub(super) fn to_text(&self) -> String {
+        self.lines
+            .iter()
+            .map(|line| match line {
+                ReportLine::Detail(label, value) => format!("{label}: {value}"),
+                ReportLine::Note(text) => text.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
 pub(super) fn maintenance_result(text: &str) -> String {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
-        return text.to_owned();
+    maintenance_report(text).to_text()
+}
+
+pub(super) fn maintenance_report(text: &str) -> Report {
+    let mut report = Report {
+        status: None,
+        lines: Vec::new(),
+        update_to: None,
     };
-    let mut lines = Vec::new();
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        report.lines.push(ReportLine::Note(text.to_owned()));
+        return report;
+    };
+    let lines = &mut report.lines;
     if let Some(components) = value["components"].as_array() {
+        let mut worst: Option<StatusTone> = None;
+        let mut raise = |tone: StatusTone| {
+            worst = Some(match (worst, tone) {
+                (Some(StatusTone::Failed), _) | (_, StatusTone::Failed) => StatusTone::Failed,
+                (Some(StatusTone::Notice), _) | (_, StatusTone::Notice) => StatusTone::Notice,
+                _ => StatusTone::Good,
+            });
+        };
         for component in components {
             let result = component.get("response").unwrap_or(component);
             let name = component["component"].as_str().unwrap_or("Component");
@@ -1644,7 +1848,8 @@ pub(super) fn maintenance_result(text: &str) -> String {
                 "mcp" => "MCP server",
                 other => other,
             };
-            let message = match result["status"].as_str().unwrap_or("") {
+            let status = result["status"].as_str().unwrap_or("");
+            let message = match status {
                 "restarted" => "restarted successfully",
                 "not_registered" if name == "mcp" => "not running, nothing to restart",
                 "not_registered" => {
@@ -1657,20 +1862,37 @@ pub(super) fn maintenance_result(text: &str) -> String {
                 "failed" => "restart failed",
                 _ => "could not confirm the restart; check running versions",
             };
+            match status {
+                "restarted" => raise(StatusTone::Good),
+                "not_registered" if name == "mcp" => {}
+                "failed" => raise(StatusTone::Failed),
+                _ => raise(StatusTone::Notice),
+            }
             let detail = result["detail"].as_str().unwrap_or("");
-            lines.push(format!("{label}: {message}."));
+            lines.push(ReportLine::Detail(label.into(), format!("{message}.")));
             if !detail.is_empty() && result["status"] != "not_registered" {
-                lines.push(detail.into());
+                lines.push(ReportLine::Note(detail.into()));
             }
         }
+        report.status = worst.map(|tone| {
+            let badge = match tone {
+                StatusTone::Good => "Restarted",
+                StatusTone::Notice => "Restart incomplete",
+                StatusTone::Failed => "Restart failed",
+            };
+            (tone, badge.into())
+        });
     } else if let Some(installed) = value["installed"].as_array() {
         for component in installed {
             let Some(version) = component["version"].as_str() else {
                 continue;
             };
-            lines.push(format!(
-                "Installed {}: {version}",
-                component["component"].as_str().unwrap_or("component")
+            lines.push(ReportLine::Detail(
+                format!(
+                    "Installed {}",
+                    component["component"].as_str().unwrap_or("component")
+                ),
+                version.into(),
             ));
         }
         let daemon = if value["daemon"]["status"] == "not_running" {
@@ -1680,43 +1902,444 @@ pub(super) fn maintenance_result(text: &str) -> String {
                 .as_str()
                 .unwrap_or("version cannot be read; restart to update it")
         };
-        lines.push(format!("Running daemon: {daemon}"));
+        lines.push(ReportLine::Detail("Running daemon".into(), daemon.into()));
         if let Some(running) = value["running"].as_array() {
             for component in running {
-                lines.push(format!(
-                    "Running {}: {}",
-                    component["component"].as_str().unwrap_or("component"),
+                lines.push(ReportLine::Detail(
+                    format!(
+                        "Running {}",
+                        component["component"].as_str().unwrap_or("component")
+                    ),
                     component["version"]
                         .as_str()
                         .unwrap_or("version cannot be read")
+                        .into(),
                 ));
             }
         }
     } else if value["status"] == "checked" {
         let installed = value["installed"].as_str().unwrap_or("unknown");
         let available = value["available"].as_str().unwrap_or("unknown");
-        lines.push(format!(
-            "Installed release: {installed}\nLatest release: {available}"
+        lines.push(ReportLine::Detail(
+            "Installed release".into(),
+            installed.into(),
         ));
-        lines.push(if value["update_available"] == true { "An update is available. Choose Update and restart all components to install it." } else { "The installed release is up to date. Check installed and running versions to see whether a restart is needed." }.into());
+        lines.push(ReportLine::Detail(
+            "Latest release".into(),
+            available.into(),
+        ));
+        if value["update_available"] == true {
+            report.status = Some((StatusTone::Notice, "Update available".into()));
+            report.update_to = Some(available.into());
+            lines.push(ReportLine::Note(
+                "An update is available. Choose Update and restart all components to install it."
+                    .into(),
+            ));
+        } else {
+            report.status = Some((StatusTone::Good, "Up to date".into()));
+            lines.push(ReportLine::Note(
+                "The installed release is up to date. Check installed and running versions to see whether a restart is needed."
+                    .into(),
+            ));
+        }
     } else {
         let version = value["version"].as_str().unwrap_or("");
-        lines.push(match value["status"].as_str().unwrap_or("") {
+        let status = value["status"].as_str().unwrap_or("");
+        report.status = match status {
+            "installed" | "updated" => Some((StatusTone::Good, "Installed".into())),
+            "rolled_back" => Some((StatusTone::Good, "Rolled back".into())),
+            "scheduled" => Some((StatusTone::Notice, "Restart scheduled".into())),
+            _ => None,
+        };
+        lines.push(ReportLine::Note(match status {
             "installed" | "updated" => format!("Prismattyc {version} was installed. Running components must restart to use it."),
             "rolled_back" => format!("Prismattyc was restored to {version}. Restart running components to use it."),
             "scheduled" => "The restart is running in the background. Check running versions to confirm it finished.".into(),
             _ => "The operation returned no recognized result. Check installed and running versions.".into(),
-        });
+        }));
         if let Some(message) = value["message"].as_str() {
-            lines.push(message.into());
+            lines.push(ReportLine::Note(message.into()));
         }
     }
-    lines.join("\n")
+    report
 }
 
 #[cfg(test)]
 mod maintenance_tests {
     use super::*;
+
+    fn update_panel(page: Page, columns: usize) -> Panel {
+        let mut panel = Panel {
+            space: "demo".into(),
+            maintenance: true,
+            owner: None,
+            details: None,
+            page,
+            rows: vec![],
+            input: None,
+            submitted: None,
+            pending: None,
+            update_action: None,
+            scroll: 0,
+            columns,
+            chrome_layout: None,
+        };
+        panel.rebuild();
+        panel
+    }
+
+    /// Every row the menu can land on, by label.
+    fn focusable_labels(panel: &Panel) -> Vec<String> {
+        panel
+            .focusable()
+            .into_iter()
+            .map(|row| panel.rows[row].label.clone())
+            .collect()
+    }
+
+    fn row<'a>(panel: &'a Panel, label: &str) -> &'a Row {
+        panel
+            .rows
+            .iter()
+            .find(|row| row.label == label)
+            .unwrap_or_else(|| panic!("no row {label}"))
+    }
+
+    #[test]
+    fn update_source_is_detail_text_and_only_actions_take_focus() {
+        let panel = update_panel(Page::Maintenance, 100);
+        assert_eq!(row(&panel, "Update source").kind, RowKind::Detail);
+        for row in &panel.rows {
+            assert_eq!(
+                row.kind.focusable(),
+                !matches!(row.choice, Choice::None),
+                "{} focusable mismatch",
+                row.label
+            );
+        }
+        let focusable = focusable_labels(&panel);
+        assert_eq!(
+            focusable.first().map(String::as_str),
+            Some("Update and restart all components")
+        );
+        assert!(focusable.contains(&"Restart daemon".to_string()));
+        assert!(!focusable.contains(&"Update source".to_string()));
+    }
+
+    #[test]
+    fn arrow_keys_cycle_through_actions_and_never_reach_information() {
+        let panel = update_panel(Page::Maintenance, 100);
+        // The count the key handler passes: focusable rows only.
+        let count = panel.focusable().len();
+        assert!(count < panel.rows.len(), "the page has information rows");
+        let mut menu = ContextMenu::new(ContextMenuKind::SpaceChip);
+        let mut seen = Vec::new();
+        for _ in 0..count * 2 {
+            let _ = menu.key(
+                &Key::Named(NamedKey::ArrowDown),
+                ModifiersState::empty(),
+                count,
+            );
+            let row = panel.row_at(menu.selected).expect("selection is on a row");
+            seen.push(panel.rows[row].label.clone());
+            assert!(
+                panel.rows[row].kind.focusable(),
+                "landed on {}",
+                panel.rows[row].label
+            );
+        }
+        assert!(!seen.iter().any(|label| label == "Update source"));
+        let _ = menu.key(&Key::Named(NamedKey::End), ModifiersState::empty(), count);
+        let last = panel.row_at(menu.selected).unwrap();
+        assert_eq!(panel.rows[last].label, "Restart daemon");
+    }
+
+    #[test]
+    fn wrapped_action_descriptions_stay_visible_but_not_focusable() {
+        let panel = update_panel(Page::Maintenance, 60);
+        let start = panel
+            .rows
+            .iter()
+            .position(|row| row.label == "Update and restart all components")
+            .unwrap();
+        let wrapped: Vec<_> = panel.rows[start + 1..]
+            .iter()
+            .take_while(|row| matches!(row.choice, Choice::None))
+            .collect();
+        assert!(!wrapped.is_empty(), "the description wraps at 60 columns");
+        assert!(wrapped.iter().all(|row| row.kind == RowKind::Detail));
+        assert!(wrapped.iter().all(|row| row.label.is_empty()));
+        let text: Vec<_> = wrapped.iter().map(|row| row.detail.as_str()).collect();
+        assert_eq!(
+            text.join(" "),
+            "Review running sessions and optionally save their configuration"
+        );
+    }
+
+    #[test]
+    fn up_to_date_result_shows_status_and_details_with_back_as_the_only_action() {
+        let report = maintenance_report(
+            r#"{"status":"checked","installed":"0.3.41","available":"0.3.41","update_available":false}"#,
+        );
+        let panel = update_panel(Page::Result(report), 100);
+        assert_eq!(panel.rows[0].kind, RowKind::Status(StatusTone::Good));
+        assert_eq!(panel.rows[0].label, "Up to date");
+        assert_eq!(row(&panel, "Installed release").detail, "0.3.41");
+        assert_eq!(row(&panel, "Installed release").kind, RowKind::Detail);
+        assert_eq!(row(&panel, "Latest release").kind, RowKind::Detail);
+        assert_eq!(focusable_labels(&panel), vec!["Back to update and restart"]);
+        let back = panel.row_at(0).unwrap();
+        assert!(matches!(panel.rows[back].choice, Choice::Maintenance));
+    }
+
+    #[test]
+    fn update_available_result_offers_the_update_first_then_back() {
+        let report = maintenance_report(
+            r#"{"status":"checked","installed":"0.3.38","available":"0.3.41","update_available":true}"#,
+        );
+        let panel = update_panel(Page::Result(report), 100);
+        assert_eq!(panel.rows[0].kind, RowKind::Status(StatusTone::Notice));
+        assert_eq!(panel.rows[0].label, "Update available");
+        assert_eq!(
+            focusable_labels(&panel),
+            vec![
+                "Update and restart all components",
+                "Back to update and restart"
+            ]
+        );
+        let primary = panel.row_at(0).unwrap();
+        assert!(matches!(
+            panel.rows[primary].choice,
+            Choice::FullUpdate(update_flow::Action::Start)
+        ));
+        assert_eq!(panel.rows[primary].detail, "Install 0.3.41, then restart");
+    }
+
+    #[test]
+    fn restart_results_take_the_worst_component_status() {
+        let deferred = maintenance_report(
+            r#"{"components":[{"component":"daemon","response":{"status":"deferred","detail":"live sessions"}},{"component":"host","status":"restarted","detail":"ready"}]}"#,
+        );
+        assert_eq!(
+            deferred.status,
+            Some((StatusTone::Notice, "Restart incomplete".into()))
+        );
+        let failed = maintenance_report(
+            r#"{"components":[{"component":"host","status":"restarted"},{"component":"daemon","status":"failed"}]}"#,
+        );
+        assert_eq!(
+            failed.status,
+            Some((StatusTone::Failed, "Restart failed".into()))
+        );
+        let restarted = maintenance_report(
+            r#"{"components":[{"component":"host","status":"restarted"},{"component":"mcp","status":"not_registered"}]}"#,
+        );
+        assert_eq!(
+            restarted.status,
+            Some((StatusTone::Good, "Restarted".into()))
+        );
+    }
+
+    #[test]
+    fn a_failed_command_shows_a_failed_status_and_its_message() {
+        let panel = update_panel(
+            Page::Result(Report::failed("pmux: connection refused")),
+            100,
+        );
+        assert_eq!(panel.rows[0].kind, RowKind::Status(StatusTone::Failed));
+        assert!(panel
+            .rows
+            .iter()
+            .any(|row| row.label == "pmux: connection refused" && !row.kind.focusable()));
+        assert_eq!(focusable_labels(&panel), vec!["Back to update and restart"]);
+    }
+
+    /// Writes every Update and restart state, as the palette paints it, when
+    /// `UPDATE_DIALOG_FRAMES_DIR` is set: Graphite dark and light, and the
+    /// classic chrome. Without it the test only checks that each state paints.
+    #[test]
+    fn update_dialog_states_paint_in_both_themes() {
+        use crate::raster::{OverlaySurface, PaletteFrame, PaletteLayoutMode, PaletteSection};
+        let Ok(font) = FontMetrics::load(14.0) else {
+            return;
+        };
+        let dir = std::env::var_os("UPDATE_DIALOG_FRAMES_DIR").map(std::path::PathBuf::from);
+        let states = [
+            ("menu", "UPDATE AND RESTART", Page::Maintenance, 0),
+            (
+                "update-progress",
+                "UPDATE AND RESTART",
+                Page::Update("Checking for updates.".into(), vec![]),
+                0,
+            ),
+            (
+                "update-error",
+                "UPDATE AND RESTART",
+                Page::Update(
+                    "The pmux server was not set to restart later.\nThe idle restart file could not be written.".into(),
+                    vec![("Check again".into(), update_flow::Action::Start)],
+                ),
+                0,
+            ),
+            (
+                "result-up-to-date",
+                "UPDATE AND RESTART RESULT",
+                Page::Result(maintenance_report(
+                    r#"{"status":"checked","installed":"0.3.73","available":"0.3.73","update_available":false}"#,
+                )),
+                0,
+            ),
+            (
+                "result-update-available",
+                "UPDATE AND RESTART RESULT",
+                Page::Result(maintenance_report(
+                    r#"{"status":"checked","installed":"0.3.72","available":"0.3.73","update_available":true}"#,
+                )),
+                0,
+            ),
+            (
+                "result-versions",
+                "UPDATE AND RESTART RESULT",
+                Page::Result(maintenance_report(
+                    r#"{"installed":[{"component":"pmux","version":"0.3.73"},{"component":"host","version":"0.3.73"}],"daemon":{"version":"0.3.72"},"running":[{"component":"host","pid":1,"version":"0.3.73"}]}"#,
+                )),
+                0,
+            ),
+            (
+                "result-restart-deferred",
+                "UPDATE AND RESTART RESULT",
+                Page::Result(maintenance_report(
+                    r#"{"components":[{"component":"host","status":"restarted"},{"component":"daemon","response":{"status":"deferred","detail":"2 sessions are running"}},{"component":"mcp","status":"not_registered"}]}"#,
+                )),
+                0,
+            ),
+            (
+                "result-failed",
+                "UPDATE AND RESTART RESULT",
+                Page::Result(Report::failed("pmux: could not reach the release server")),
+                0,
+            ),
+        ];
+        let classic_light = crate::theme::builtins()
+            .iter()
+            .find(|theme| theme.variant == crate::theme::ThemeVariant::Light)
+            .expect("a light theme");
+        let width = 120 * font.cell_w;
+        let height = 40 * font.cell_h;
+        for (name, header, page, selected) in states {
+            let panel = update_panel(page, 96);
+            let rows = palette_rows(&panel);
+            let sections = [PaletteSection {
+                header,
+                subtitle: "",
+                rows: &rows,
+            }];
+            let frame = PaletteFrame {
+                layout_mode: PaletteLayoutMode::ContentFit,
+                query: None,
+                query_focused: false,
+                chips: None,
+                sections: &sections,
+                selected,
+                scroll: 0,
+                detail: None,
+                footer: "Enter select · Esc close · ↑↓ move",
+            };
+            let chrome = crate::mux::ChromeGeom {
+                graphite: true,
+                scale_milli: 1_000,
+            };
+            for (variant, tok) in [("dark", &graphite::DARK), ("light", &graphite::LIGHT)] {
+                let ground = 0xff00_0000
+                    | u32::from(tok.ground[0]) << 16
+                    | u32::from(tok.ground[1]) << 8
+                    | u32::from(tok.ground[2]);
+                let mut buffer = vec![ground; width * height];
+                crate::graphite_overlays::palette(
+                    &font,
+                    tok,
+                    chrome,
+                    [98, 168, 255],
+                    &frame,
+                    OverlaySurface::default(),
+                    &mut buffer,
+                    width,
+                    height,
+                    None,
+                    None,
+                )
+                .expect("state paints");
+                assert!(
+                    buffer.iter().any(|pixel| *pixel != ground),
+                    "{name} painted"
+                );
+                if let Some(dir) = &dir {
+                    write_frame(
+                        &dir.join(format!("graphite-{name}-{variant}.png")),
+                        &buffer,
+                        width,
+                        height,
+                    );
+                }
+            }
+            for (variant, theme) in [
+                ("dark", crate::theme::default_theme()),
+                ("light", classic_light),
+            ] {
+                let ground = 0xff00_0000
+                    | u32::from(theme.default_bg[0]) << 16
+                    | u32::from(theme.default_bg[1]) << 8
+                    | u32::from(theme.default_bg[2]);
+                let mut buffer = vec![ground; width * height];
+                crate::raster::rasterize_palette(
+                    &font,
+                    &frame,
+                    theme,
+                    OverlaySurface::default(),
+                    &mut buffer,
+                    width,
+                    height,
+                    [98, 168, 255],
+                )
+                .expect("classic state paints");
+                if let Some(dir) = &dir {
+                    write_frame(
+                        &dir.join(format!("classic-{name}-{variant}.png")),
+                        &buffer,
+                        width,
+                        height,
+                    );
+                }
+            }
+        }
+    }
+
+    fn write_frame(path: &std::path::Path, pixels: &[u32], width: usize, height: usize) {
+        let file = std::fs::File::create(path).expect("create frame");
+        let mut encoder = png::Encoder::new(file, width as u32, height as u32);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("frame header");
+        let rgb: Vec<u8> = pixels
+            .iter()
+            .flat_map(|pixel| {
+                [
+                    ((pixel >> 16) & 0xff) as u8,
+                    ((pixel >> 8) & 0xff) as u8,
+                    (pixel & 0xff) as u8,
+                ]
+            })
+            .collect();
+        writer.write_image_data(&rgb).expect("frame pixels");
+    }
+
+    #[test]
+    fn settings_pages_keep_their_rows_focusable() {
+        let mut panel = update_panel(Page::Text("Saved.".into()), 100);
+        panel.maintenance = false;
+        panel.rebuild();
+        assert!(panel.rows.iter().all(|row| row.kind == RowKind::Action));
+    }
 
     #[test]
     fn maintenance_uses_plain_language_for_absent_mcp_and_update_availability() {
@@ -2416,11 +3039,12 @@ mod resize_tests {
             chrome_layout: None,
         };
         panel.rebuild();
-        let selected = panel
+        let back = panel
             .rows
             .iter()
             .position(|row| matches!(row.choice, Choice::Maintenance))
             .expect("back action exists");
+        let selected = panel.selection_of(back).expect("back action is focusable");
         assert!(panel
             .rows
             .iter()
@@ -2429,7 +3053,8 @@ mod resize_tests {
         let (selected, confirm) = update_columns(&mut panel, 24, Some(selected), Some(selected));
 
         let selected = selected.expect("selection remains present");
-        assert!(matches!(panel.rows[selected].choice, Choice::Maintenance));
+        let row = panel.row_at(selected).expect("selection is on a row");
+        assert!(matches!(panel.rows[row].choice, Choice::Maintenance));
         assert_eq!(confirm, Some(selected));
         assert!(panel
             .rows
@@ -2463,10 +3088,12 @@ mod resize_tests {
             row.choice,
             Choice::FullUpdate(update_flow::Action::Start)
         ));
-        // At this width the description sits on the next row, which is inert.
+        // At this width the description sits on the next row, in the
+        // description column, which is inert and never takes focus.
         let next = &panel.rows[full + 1];
-        assert!(next.label.starts_with("Review running sessions"));
+        assert!(next.detail.starts_with("Review running sessions"));
         assert!(matches!(next.choice, Choice::None));
+        assert!(!next.kind.focusable());
     }
 }
 

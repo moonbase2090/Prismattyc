@@ -194,7 +194,8 @@ pub(super) fn restart(paths: &Paths, args: Vec<String>) -> Result<()> {
             // A kept consent file means the user chose to save the sessions:
             // the new daemon restores them with their layouts and scrollback.
             let mut kept = None;
-            let mut steps = Steps::new(&opts);
+            let mut live_done = false;
+            let mut steps = Steps::new(&opts, live_update_binary().is_some());
             if let Some(file) = &opts.consent_config {
                 let (mut client, client_id, session_ids) =
                     session_config::check_for_restart(paths, file)
@@ -228,16 +229,43 @@ pub(super) fn restart(paths: &Paths, args: Vec<String>) -> Result<()> {
                         prismattyc_mux::workspace::Workspace::for_update(snapshot, view).context(
                             "could not record the sessions to restore; no sessions were stopped",
                         )?;
+                    let live = match live_update_binary() {
+                        Some(binary) => {
+                            steps.start("Handing the sessions to the new pmux server");
+                            live_update(paths, &mut client, client_id, &binary)
+                        }
+                        None => LiveUpdate::Off,
+                    };
                     drop(client);
-                    steps.start("Stopping the old daemon");
-                    // An orderly stop writes every pane's scrollback for the
-                    // next daemon. Write the workspace after the old daemon
-                    // exits so its last checkpoint cannot replace it.
-                    stop_daemon(&executable, paths)?;
-                    workspace.write(&paths.socket).context(
-                        "the daemon stopped, but the sessions to restore could not be written",
-                    )?;
-                    kept = Some(workspace.session_names());
+                    match live {
+                        LiveUpdate::Done { version } => {
+                            results.push(json!({"component":"daemon","status":"updated_live","version":version}));
+                            live_done = true;
+                            kept = Some(workspace.session_names());
+                        }
+                        LiveUpdate::Off | LiveUpdate::Refused(_) | LiveUpdate::Lost(_) => {
+                            if let LiveUpdate::Refused(reason) | LiveUpdate::Lost(reason) = &live {
+                                results.push(json!({"component":"daemon","status":"live_update_skipped","detail":reason}));
+                                steps.add(2);
+                            }
+                            let stuck =
+                                prismattyc_mux::daemon_lock::DaemonLock::is_held(&paths.socket)
+                                    .unwrap_or(true);
+                            if !matches!(live, LiveUpdate::Lost(_)) || stuck {
+                                steps.start("Stopping the old daemon");
+                                // An orderly stop writes every pane's scrollback for the
+                                // next daemon. Write the workspace after the old daemon
+                                // exits so its last checkpoint cannot replace it.
+                                stop_daemon(&executable, paths)?;
+                            } else {
+                                steps.start("The old daemon has stopped");
+                            }
+                            workspace.write(&paths.socket).context(
+                                "the daemon stopped, but the sessions to restore could not be written",
+                            )?;
+                            kept = Some(workspace.session_names());
+                        }
+                    }
                 }
             } else if opts.stop_sessions {
                 steps.start("Stopping the old daemon");
@@ -246,21 +274,23 @@ pub(super) fn restart(paths: &Paths, args: Vec<String>) -> Result<()> {
                 steps.start("Stopping the old daemon");
                 stop_idle(paths)?;
             }
-            steps.start("Starting the new daemon");
-            let mut up = Command::new(&executable);
-            up.arg("--socket").arg(&paths.socket).arg("up");
-            if kept.is_some() {
-                up.arg("--restore-workspace");
+            if !live_done {
+                steps.start("Starting the new daemon");
+                let mut up = Command::new(&executable);
+                up.arg("--socket").arg(&paths.socket).arg("up");
+                if kept.is_some() {
+                    up.arg("--restore-workspace");
+                }
+                up.stdout(Stdio::null());
+                if let Some(server) = prismattyc_mux::release_update::installed_binary("pmuxd") {
+                    up.env("PMUX_SERVER", server);
+                }
+                anyhow::ensure!(
+                    prismattyc_process::status(&mut up)?.success(),
+                    "daemon up failed"
+                );
+                results.push(json!({"component":"daemon","status":"restarted"}));
             }
-            up.stdout(Stdio::null());
-            if let Some(server) = prismattyc_mux::release_update::installed_binary("pmuxd") {
-                up.env("PMUX_SERVER", server);
-            }
-            anyhow::ensure!(
-                prismattyc_process::status(&mut up)?.success(),
-                "daemon up failed"
-            );
-            results.push(json!({"component":"daemon","status":"restarted"}));
             if let Some(names) = kept {
                 steps.start("Checking the restored sessions");
                 results.push(restored_sessions(paths, names));
@@ -289,8 +319,11 @@ struct Steps {
 
 impl Steps {
     /// The steps the daemon restart in `opts` takes, in order.
-    fn new(opts: &Options) -> Self {
+    fn new(opts: &Options, live_update: bool) -> Self {
         let count = match &opts.consent_config {
+            // Save the sessions, hand them to the new server, check the
+            // sessions, plug-ins.
+            Some(_) if !opts.delete_consent_config && live_update => 4,
             // Save the sessions, stop, start, check the sessions, plug-ins.
             Some(_) if !opts.delete_consent_config => 5,
             // Stop the sessions (and with them the daemon), or stop the
@@ -298,6 +331,11 @@ impl Steps {
             _ => 3,
         };
         Steps { index: 0, count }
+    }
+
+    /// A live update fell back to a restart: it stops and starts the server.
+    fn add(&mut self, steps: usize) {
+        self.count += steps;
     }
 
     fn start(&mut self, item: &str) {
@@ -309,6 +347,85 @@ impl Steps {
         });
     }
 }
+
+/// How a live update went.
+enum LiveUpdate {
+    /// Turned off with `[mux] live_update = false`, or no new pmuxd found.
+    Off,
+    /// The new server runs the sessions.
+    Done { version: String },
+    /// The old server said no and still runs the sessions unchanged.
+    Refused(String),
+    /// The old server accepted but no new server came up: the sessions ended.
+    Lost(String),
+}
+
+/// The pmuxd to hand the sessions to, or `None` when live updates are off.
+fn live_update_binary() -> Option<PathBuf> {
+    if !cfg!(unix) {
+        return None;
+    }
+    let enabled = prismattyc_mux::load_mux_section(&prismattyc_mux::prism_config_path())
+        .map(|file| file.live_update())
+        .unwrap_or(true);
+    if !enabled {
+        return None;
+    }
+    prismattyc_mux::release_update::installed_binary("pmuxd")
+        .or_else(|| prismattyc_mux::executable::sibling(&std::env::current_exe().ok()?, &["pmuxd"]))
+}
+
+/// Ask the running server to hand its sessions to `binary`, then wait for the
+/// new server on the same socket.
+fn live_update(paths: &Paths, client: &mut Client, client_id: u64, binary: &Path) -> LiveUpdate {
+    let expected = match prismattyc_mux::handoff::probe(binary) {
+        Ok(reply) => reply.package_version,
+        Err(error) => return LiveUpdate::Refused(error.to_string()),
+    };
+    let accepted = client.request(|request_id| ControlRequest::HandoffUpgrade {
+        version: PROTOCOL_VERSION,
+        request_id,
+        client_id,
+        binary: binary.to_owned(),
+    });
+    match accepted {
+        Ok(ControlResponseData::ShutdownAccepted) => {}
+        Ok(other) => return LiveUpdate::Refused(format!("unexpected answer {other:?}")),
+        Err(error) => return LiveUpdate::Refused(format!("{error:#}")),
+    }
+    let deadline = Instant::now() + LIVE_UPDATE_WAIT;
+    loop {
+        let running = Client::connect(&paths.socket).and_then(|mut client| {
+            client.request(|request_id| ControlRequest::ServerInfo {
+                version: PROTOCOL_VERSION,
+                request_id,
+            })
+        });
+        if let Ok(ControlResponseData::ServerInfo {
+            package_version, ..
+        }) = running
+        {
+            if package_version == expected {
+                return LiveUpdate::Done {
+                    version: package_version,
+                };
+            }
+        }
+        let held = prismattyc_mux::daemon_lock::DaemonLock::is_held(&paths.socket).unwrap_or(true);
+        if !held {
+            return LiveUpdate::Lost("the new pmux server did not start".into());
+        }
+        if Instant::now() >= deadline {
+            return LiveUpdate::Lost(format!(
+                "the new pmux server did not answer in {LIVE_UPDATE_WAIT:?}"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// How long a live update may take before the restart gives up on it.
+const LIVE_UPDATE_WAIT: Duration = Duration::from_secs(20);
 
 /// Stop the daemon in order (its sessions end; their scrollback is written).
 fn stop_daemon(executable: &Path, paths: &Paths) -> Result<()> {

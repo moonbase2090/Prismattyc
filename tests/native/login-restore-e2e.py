@@ -446,16 +446,71 @@ def service(f):
         f.cli("login", "disable")
 
 
+def live_update(f):
+    """A live update keeps the pane's program: same pid, same screen, input still works."""
+    daemon = f.daemon()
+    f.cli("new", "--no-attach", "live", "--", "/bin/sh", "-i")
+    pane = next(s for s in f.snapshot() if s["name"] == "live")["windows"][0]["panes"][0]
+    pane_id, pid = pane["id"], pane["child_pid"]
+    def screen():
+        return f.cli("save-buffer", pane_id, "-")
+    f.cli("send", pane_id, "echo before-$$", "--enter")
+    wait_for(lambda: f"before-{pid}" in screen(), "output before the update")
+    server_pid = int(f.socket.with_suffix(".pid").read_text())
+
+    # The request a restart sends: hand everything to this same pmuxd binary.
+    with socket.socket(socket.AF_UNIX) as client:
+        client.settimeout(10)
+        client.connect(str(f.socket))
+        lines = client.makefile()
+        def send(kind, request_id, **fields):
+            client.sendall((json.dumps(dict(type=kind, version=1, request_id=request_id, **fields)) + "\n").encode())
+            return json.loads(lines.readline())
+        registered = send("register_client", 1)
+        assert registered["status"] == "ok", registered
+        client_id = registered["response"]["client_id"]
+        accepted = send("handoff_upgrade", 2, client_id=client_id, binary=str(f.binaries / "pmuxd"))
+        assert accepted["status"] == "ok" and "shutdown_accepted" in json.dumps(accepted), accepted
+    def new_server():
+        # The old server answers "shutting down" until it execs the new one.
+        try:
+            return f.request("server_info")["pid"] == server_pid
+        except AssertionError:
+            return False
+    wait_for(new_server, "the new server on the same socket")
+    current = next(s for s in f.snapshot() if s["name"] == "live")["windows"][0]["panes"][0]
+    assert current["id"] == pane_id and current["child_pid"] == pid, current
+    os.kill(pid, 0)
+    assert f"before-{pid}" in screen(), "the screen did not carry over"
+    f.cli("send", pane_id, "echo after-$$", "--enter")
+    wait_for(lambda: f"after-{pid}" in screen(), "input after the update")
+    assert daemon.poll() is None, "the server process exited instead of exec'ing"
+
+    # The same through the update flow's restart, with consent to keep sessions.
+    consent = f.root / "consent.json"
+    f.cli("session-config", "save", consent)
+    receipt = json.loads(f.cli("restart", "--daemon", "--stop-sessions", "--consented-config", consent,
+                               "--worker", "--json").strip().splitlines()[-1])
+    statuses = [c["status"] for c in receipt["components"] if c["component"] == "daemon"]
+    assert statuses == ["updated_live"], receipt
+    current = next(s for s in f.snapshot() if s["name"] == "live")["windows"][0]["panes"][0]
+    assert current["child_pid"] == pid, current
+    f.cli("send", pane_id, "echo again-$$", "--enter")
+    wait_for(lambda: f"again-{pid}" in screen(), "input after the restart")
+    return {"case": "live-update", "program": "kept", "screen": "kept", "restart": "updated_live",
+            "result": "PASS"}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bins", type=Path, required=True)
-    parser.add_argument("--case", choices=["single-instance", "concurrent", "foreground", "stable-replay", "reboot", "supervisor", "new-install", "migration", "corrupt", "service", "all"], default="all")
+    parser.add_argument("--case", choices=["single-instance", "concurrent", "foreground", "stable-replay", "reboot", "supervisor", "new-install", "migration", "corrupt", "service", "live-update", "all"], default="all")
     parser.add_argument("--host", action="store_true")
     parser.add_argument("--out", type=Path)
     parser.add_argument("--capture", type=Path)
     args = parser.parse_args()
     bins = args.bins.resolve()
-    for name in ([args.case] if args.case != "all" else ["single-instance", "concurrent", "foreground", "stable-replay", "reboot", "supervisor", "new-install", "migration", "corrupt"]):
+    for name in ([args.case] if args.case != "all" else ["single-instance", "concurrent", "foreground", "stable-replay", "reboot", "supervisor", "new-install", "migration", "corrupt", "live-update"]):
         with tempfile.TemporaryDirectory(prefix="plogin-", dir="/tmp") as directory:
             fixture = Fixture(bins, Path(directory).resolve())
             try:
@@ -465,7 +520,8 @@ def main():
                           "reboot": lambda: reboot(fixture, args.host, args.capture),
                           "supervisor": lambda: supervisor(fixture), "new-install": lambda: new_install(fixture),
                           "migration": lambda: migration(fixture, args.host),
-                          "corrupt": lambda: corrupt_checkpoint(fixture), "service": lambda: service(fixture)}[name]()
+                          "corrupt": lambda: corrupt_checkpoint(fixture), "service": lambda: service(fixture),
+                          "live-update": lambda: live_update(fixture)}[name]()
                 print(json.dumps(result), flush=True)
             finally:
                 if args.out:

@@ -17,17 +17,29 @@ All locations are at main `3bba8e8f`.
 
 ### Seat state, worked out by the daemon
 
-`ReadActivity` returns one entry per session that has an `agent_id`, with a state the daemon recomputes on each read (`activity_session_state`, `crates/prismattyc-mux/src/control.rs`). Nothing is stored.
+`ReadActivity` returns one entry per session that has an `agent_id`, with a state the daemon recomputes on each read (`activity_sessions` and `activity_session_state`, `crates/prismattyc-mux/src/control.rs`). Nothing is stored.
 
-| State | Rule |
+The state belongs to the session, not to a pane. The daemon folds all of the session's panes into three inputs:
+
+- Live: at least one pane has a live child.
+- Foreground: the most significant foreground across the panes. An agent in any pane wins, then any other program, then a shell. If no foreground can be read, it is unknown.
+- Last output: the most recent output time across the panes, if any pane has printed.
+
+| State | Rule, on those session-wide inputs |
 | --- | --- |
-| `stopped` | The pane has no live child. |
-| `idle` | The terminal's foreground process is a shell. |
-| `stuck` | An agent is in the foreground and the pane has printed nothing for 5 minutes. |
-| `working` | The pane printed output in the last 60 seconds. |
-| `waiting` | Anything else: an agent in front, quiet for between 60 seconds and 5 minutes. |
+| `stopped` | No pane has a live child. |
+| `idle` | The foreground is a shell: no pane has an agent or another program in front. |
+| `stuck` | An agent is in front in some pane, and no pane has printed for 5 minutes. |
+| `working` | Some pane printed output in the last 60 seconds. |
+| `waiting` | The fallback for every other live session. That includes an agent quiet for between 60 seconds and 5 minutes, another program quiet for over a minute, a foreground that cannot be read, and a session with no output time at all. |
 
-`waiting` mixes two cases the user cares about differently: an agent thinking quietly, and an agent at its own prompt with nothing to do. The state alone cannot tell them apart.
+Three consequences for a companion:
+
+- Output in any pane marks the whole seat `working`. A build printing in a second pane hides an agent that is waiting in the first.
+- `stuck` needs every pane to be quiet, so a seat with a busy second pane is never `stuck`.
+- `waiting` mixes cases the user cares about differently: an agent thinking quietly, an agent at its own prompt, and a session the daemon could not classify. The state alone cannot tell them apart.
+
+Nor does the state say which pane the agent is in.
 
 ### Activity events, reported by the agent
 
@@ -89,13 +101,15 @@ A seat needs the user when it cannot go on without a person, or when something f
 | --- | --- | --- | --- |
 | 1 | An open attention request that is not snoozed | `AttentionRequests` | It is resolved or snoozed, or the user writes to the pane |
 | 2 | Blocked on a permission request | the latest activity event is `waiting` | The next event is not `waiting`, or the user writes |
-| 3 | Stuck | seat state `stuck` | Output resumes, or the user writes |
+| 3 | Stuck | seat state `stuck`, which is session-wide | Output resumes in any pane, or the user writes |
 | 4 | Failed | the latest activity event is a `*_failed` kind | The next event starts new work |
 | 5 | A terminal notification not yet cleared | `PaneSnapshot.attention` | The user writes to the pane |
 | 6 | Finished its turn and waiting on you | the latest event is `turn_finished` and no input since | The user writes, or a new turn starts |
 | 7 | Mail the agent has not taken | mail depth above zero and the wake not delivered | The agent claims it |
 
-Not needing the user: `working`, `idle`, `stopped` with no failure, and `waiting` with no event that explains it. Those seats show in the full list but not in the inbox.
+Not needing the user: `working`, `idle`, `stopped` with no failure, and `waiting` with no event that explains it. Those seats show in the full list but not in the inbox. Because seat state is session-wide, the inbox does not rank on `working` or `waiting` at all. Ranks 2 and 6 come from the agent's own events, which are not blurred by other panes. Rank 3 can be missed when another pane in the seat keeps printing. That is a known limit until the daemon reports state per pane (gap 11).
+
+Opening a seat from the inbox shows the pane that raised the signal when the signal names one: an attention request, a terminal notification, or mail attention. Otherwise it shows the seat's first pane, the same pane the daemon uses for the mail doorbell.
 
 The rule for clearing follows the daemon's own: a write to the pane clears pane attention. Answering a seat from any device, the desktop included, takes it out of the inbox everywhere.
 
@@ -163,6 +177,7 @@ Timely notifications on iPhone and iPad need a push sent from outside the phone.
 8. Muting a seat (rank 6) and "seen on this device" have no place to live in the daemon. The first version keeps them on the phone.
 9. Docs refer to a `pmux activity tail` command that does not exist. The inbox command would cover what a companion needs.
 10. A background push on iPhone and iPad needs either a push service or a push credential on the desktop. Neither exists.
+11. Seat state is per session. Output in one pane hides a quiet agent in another, `stuck` needs every pane quiet, and the state does not name the agent's pane. Proposed: `ReadActivity` also returns per-pane state and the pane the agent is in, so the inbox can rank and open the right pane.
 
 ## Deferred
 

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Removed
+
+- The windowed host (`prismattyc-host`) no longer has the experimental rich mode: it does not paint overlays or a docked workspace that an app sends, and the `rich_focus` key action is gone. A `rich_focus` binding left in a config file is ignored with a warning. `--experimental-rich` and `PRISMATTYC_EXPERIMENTAL_RICH` are still accepted for one release, print a notice, and only turn on native sessions, as `--experimental-native` does. The render-status JSON no longer has the `workspace_layout` and `experimental_rich` fields.
+
 ## [0.3.79] - 2026-11-26
 
 ### Added
@@ -17,7 +21,6 @@
 
 - The classic terminal host (`prismattyc`) no longer has the experimental rich mode: it does not answer capability queries or paint overlays that an app sends. `--experimental-rich` and `PRISMATTYC_EXPERIMENTAL_RICH` are still accepted for one release and only print a notice that they are ignored. Output from such apps is unchanged: their capability messages never reached the screen before and still don't.
 - The daemon (`pmuxd`) and `pmux-attach` no longer have the experimental rich mode: daemon panes do not answer capability queries or keep overlays, a docked workspace or semantic copies, and attach no longer paints them or sends rich focus, input or copy requests. Ctrl+Shift+G and Ctrl+Shift+C now reach the program in the pane like any other key; before, attach kept them for rich mode, and with rich off it dropped Ctrl+Shift+C. `pmuxd --experimental-rich` and `PRISMATTYC_EXPERIMENTAL_RICH` are still accepted for one release and only print a notice that they are ignored. An older `pmux-attach` that still sends a rich request gets a clear "rich mode was removed" error, and older and newer daemons and attach clients still read each other's pane text.
-- The windowed host (`prismattyc-host`) no longer has the experimental rich mode: it does not paint overlays or a docked workspace that an app sends, and the `rich_focus` key action is gone. A `rich_focus` binding left in a config file is ignored with a warning. `--experimental-rich` and `PRISMATTYC_EXPERIMENTAL_RICH` are still accepted for one release, print a notice, and only turn on native sessions, as `--experimental-native` does. The render-status JSON no longer has the `workspace_layout` and `experimental_rich` fields.
 
 ## [0.3.78] - 2026-11-26
 

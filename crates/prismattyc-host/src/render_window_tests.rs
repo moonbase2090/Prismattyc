@@ -2552,7 +2552,7 @@ fn update_notice_appears_once_in_a_private_window() {
                     )
                     .unwrap();
                 }
-                // A click on the notice opens the Update and restart review.
+                // A click on the notice asks for one confirm to restart the pmux server.
                 let toast = &host.bell_toasts[0];
                 let (x, y, w, h) = bell_toast_rect(host, toast).expect("the notice has a chip");
                 // A driver finds the same chip in the app's change lines.
@@ -2569,9 +2569,9 @@ fn update_notice_appears_once_in_a_private_window() {
                 assert!(
                     matches!(
                         host.toast_update_action.take(),
-                        Some(update_flow::Action::Start)
+                        Some(update_flow::Action::StartOneConfirm)
                     ),
-                    "the click asks for the Update and restart review"
+                    "the click asks for one confirm to restart the pmux server"
                 );
                 update_check::start_check(self.proxy.clone());
             } else {

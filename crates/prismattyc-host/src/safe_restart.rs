@@ -78,6 +78,7 @@ pub(super) fn start_plan(proxy: winit::event_loop::EventLoopProxy<UserAction>) {
 }
 
 pub(super) fn start_restart(proxy: winit::event_loop::EventLoopProxy<UserAction>) {
+    update_flow::withdraw_idle_restart();
     std::thread::spawn(move || {
         let result = restart().map_err(|error| format!("{error:#}"));
         let _ = proxy.send_event(UserAction::SafeRestartFinished(result));

@@ -124,7 +124,7 @@ fn verify_full_settings_menus(host: &mut HostState) {
     );
     assert!(host.space_panel.is_none());
 
-    // Restart now on the Plug-ins page hands over to Update and restart.
+    // Restart now asks for one confirm. It does not open the full review.
     quiet(host);
     settings::open_plugins(host);
     settings::follow_up(host);
@@ -132,12 +132,16 @@ fn verify_full_settings_menus(host: &mut HostState) {
     settings::choose_plugin_restart(host);
     settings::follow_up(host);
     assert!(host.settings.is_none());
-    assert_eq!(panel_header(host).as_deref(), Some("UPDATE AND RESTART"));
-    // Enter must start the session review, not a restart that postpones the
-    // daemon while sessions run.
-    assert_eq!(
-        space_panel::selected_label(host).as_deref(),
-        Some("Update and restart all components")
+    assert!(
+        host.space_panel.is_none(),
+        "Restart now skips the maintenance review"
+    );
+    assert!(
+        matches!(
+            host.toast_update_action,
+            Some(update_flow::Action::StartOneConfirm)
+        ),
+        "Restart now confirms Save and restart with the sessions listed"
     );
 }
 

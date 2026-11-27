@@ -2677,8 +2677,8 @@ struct BellToast {
     label: String,
     /// Set for status toasts (#171); `None` for bell, paste, and write-fail.
     status: Option<ToastKind>,
-    /// A click opens the Update and restart review instead of only
-    /// dismissing the toast (the update notice on Linux and Windows).
+    /// A click opens the one-confirm restart instead of only dismissing
+    /// the toast (the update notice on Linux and Windows).
     opens_update: bool,
 }
 
@@ -3147,6 +3147,8 @@ enum UserAction {
     #[cfg(windows)]
     FocusExisting,
     AccessKit(accesskit_winit::Event),
+    /// A restart-when-idle request found no running sessions.
+    IdleRestartReady,
 }
 
 impl From<accesskit_winit::Event> for UserAction {
@@ -3173,6 +3175,7 @@ impl PartialEq for UserAction {
             (Self::AccessKit(left), Self::AccessKit(right)) => left.window_id == right.window_id,
             #[cfg(windows)]
             (Self::FocusExisting, Self::FocusExisting) => true,
+            (Self::IdleRestartReady, Self::IdleRestartReady) => true,
             _ => false,
         }
     }
@@ -3230,6 +3233,12 @@ struct App {
     last_component_poll: Option<Instant>,
     restart_view: Option<PathBuf>,
     full_update: update_flow::Flow,
+    /// Which dialog the in-flight check will open.
+    update_confirm: update_flow::ConfirmStyle,
+    /// The idle watcher is preparing a restart of the pmux server.
+    idle_restart_commit: bool,
+    /// Set while the idle-restart watcher thread is running.
+    idle_watch: std::sync::Arc<std::sync::atomic::AtomicBool>,
     automatic_update_checks: bool,
     /// A menu Restart is previewing or running; a second click is ignored.
     #[cfg(target_os = "macos")]
@@ -3338,6 +3347,9 @@ impl App {
             last_component_poll: None,
             restart_view: None,
             full_update: update_flow::Flow::default(),
+            update_confirm: update_flow::ConfirmStyle::Review,
+            idle_restart_commit: false,
+            idle_watch: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             automatic_update_checks,
             #[cfg(target_os = "macos")]
             safe_restart_inflight: false,
@@ -10055,8 +10067,8 @@ fn status_toast(host: &mut HostState, kind: ToastKind, label: &str) {
     host.dirty = true;
 }
 
-/// Show the update notice as a toast that opens the Update and restart
-/// review when clicked. Nothing installs until the review is confirmed.
+/// Show the update notice as a toast. A click opens one confirm that lists
+/// the sessions and can restart the pmux server. Nothing installs until then.
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 fn update_notice_toast(host: &mut HostState, label: &str) {
     status_toast(host, ToastKind::Notice, label);
@@ -19774,7 +19786,7 @@ fn bell_toast_rect(host: &HostState, toast: &BellToast) -> Option<(usize, usize,
 }
 
 /// Left-click on a bell toast chip dismisses it and swallows the click. The
-/// update notice also asks the app for the Update and restart review.
+/// update notice also asks for one confirm to restart the pmux server.
 fn handle_bell_toast_click(host: &mut HostState, button: MouseButton) -> bool {
     if button != MouseButton::Left || host.bell_toasts.is_empty() {
         return false;
@@ -19789,7 +19801,7 @@ fn handle_bell_toast_click(host: &mut HostState, button: MouseButton) -> bool {
         return false;
     };
     if host.bell_toasts.remove(idx).opens_update {
-        host.toast_update_action = Some(update_flow::Action::Start);
+        host.toast_update_action = Some(update_flow::Action::StartOneConfirm);
     }
     host.left_button_down = false;
     host.suppress_left_release = true;
@@ -22764,7 +22776,10 @@ impl ApplicationHandler<UserAction> for App {
                 Ok(plan) if macos_menu::confirm_restart(&safe_restart::preview_text(&plan)) => {
                     safe_restart::start_restart(self.event_proxy.clone());
                 }
-                Ok(_) => self.safe_restart_inflight = false,
+                Ok(_) => {
+                    update_flow::withdraw_idle_restart();
+                    self.safe_restart_inflight = false;
+                }
                 Err(error) => {
                     self.safe_restart_inflight = false;
                     macos_menu::show_update_message("Could Not Preview the Restart", &error);
@@ -22774,7 +22789,10 @@ impl ApplicationHandler<UserAction> for App {
             UserAction::SafeRestartFinished(result) => {
                 self.safe_restart_inflight = false;
                 match result {
-                    Ok(report) => macos_menu::show_update_message("Restart Finished", &report),
+                    Ok(report) => {
+                        update_flow::withdraw_idle_restart();
+                        macos_menu::show_update_message("Restart Finished", &report);
+                    }
                     Err(error) => macos_menu::show_update_message("Restart Failed", &error),
                 }
             }
@@ -22787,7 +22805,7 @@ impl ApplicationHandler<UserAction> for App {
                         if (!automatic || self.automatic_update_checks)
                             && macos_menu::prompt_update(&check.available, &check.release_notes)
                         {
-                            update_flow::action(self, update_flow::Action::Start);
+                            update_flow::action(self, update_flow::Action::StartOneConfirm);
                         }
                     }
                     Ok(check) if !automatic => macos_menu::show_update_message(
@@ -22851,6 +22869,7 @@ impl ApplicationHandler<UserAction> for App {
             #[cfg(windows)]
             UserAction::FocusExisting => self.focus_existing_window(),
             UserAction::FullUpdate(event) => update_flow::event(self, event),
+            UserAction::IdleRestartReady => update_flow::begin_idle_restart(self),
             UserAction::AccessKit(event) => self.handle_accesskit(event_loop, event),
         }
     }

@@ -758,31 +758,14 @@ pub(super) fn maintenance(host: &mut HostState) {
     }
 }
 
-/// Open Update and restart with Update and restart all components selected, so
-/// Enter reviews the running sessions and restarts every component. The plain
-/// Restart rows postpone the daemon while sessions run.
-pub(super) fn maintenance_restart(host: &mut HostState) {
-    maintenance(host);
-    let full = host.space_panel.as_ref().and_then(full_update_row);
-    if let (Some(full), Some(menu)) = (full, host.context_menu.as_mut()) {
-        menu.selected = full;
-    }
-}
-
 /// The row that starts Update and restart all components. Its description may
 /// wrap onto rows of its own, which do nothing when chosen.
+#[cfg(test)]
 fn full_update_row(panel: &Panel) -> Option<usize> {
     panel
         .rows
         .iter()
         .position(|r| matches!(r.choice, Choice::FullUpdate(_)))
-}
-
-/// The selected row's label on the open panel, for the Linux window tests.
-#[cfg(all(test, target_os = "linux"))]
-pub(super) fn selected_label(host: &HostState) -> Option<String> {
-    let panel = host.space_panel.as_ref()?;
-    action_label(panel, host.context_menu.as_ref().map(|menu| menu.selected))
 }
 
 /// Open the Layout page (#150). Graphite chrome only; classic has one layout.

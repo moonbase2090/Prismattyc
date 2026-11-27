@@ -13,7 +13,8 @@ readers. The desktop fixtures below normally display the Classic source.
 - `host-restart`: terminal state survives a host restart and is presented again.
 - `complete-update`: session-stop consent, private configuration backup, full component restart, and an explicit restoration choice.
 - `update-progress`: the Update and restart progress meter (download bytes, verify and restart counts, an install bar without a percentage, and a held failed step).
-- `restart-modal`: the Restart to update modal (version change, three choices, sessions hidden behind Show and Hide).
+- `restart-modal`: the palette's Restart to update review (version change, three choices, sessions hidden behind Show and Hide).
+- `one-confirm-restart`: Restart now and the post-update prompt list the running sessions and confirm Save and restart in that step. Restart when idle is the other choice.
 - `window-restore`: a Dock click restores a minimized macOS window, including when another window remains visible.
 - `plugin-settings`: install disabled, approve an exact package and endpoint grants, disable/revoke, and close a page with blocked socket work.
 
@@ -194,8 +195,11 @@ python3 tests/native/one-step-update-e2e.py --pmux ~/.local/bin/pmux \
   so `--again-pmux` (this build) runs the second update.
 - `--notice` (Linux, Windows) opens this build's app, waits for the update
   notice in the change lines (`toasts`: kind, chip rectangle, `opens_update`),
-  clicks the chip, waits for the Restart to update review, then closes it
-  with Escape. Toast text never appears in change lines.
+  clicks the chip, waits for the one-confirm dialog (title "Restart the pmux
+  server", sessions listed, Save and restart, and Restart when idle), then
+  closes it with Escape. Toast text never appears in change lines. The
+  palette's Update and restart all components path still opens the folded
+  Restart to update review.
 - The receipt must name the core and launcher on the new release and the
   daemon deferred with its next step. The open older window must be
   restarted (then `pmux versions` shows it on the new release), or named
@@ -214,6 +218,34 @@ python3 tests/native/one-step-update-e2e.py --pmux ~/.local/bin/pmux \
   `screen-before-update` and `screen-after-update`; on a macOS guest without
   screen recording, `--key-relay DIR` asks the VM console's controller for
   them as `{"snap": NAME}` lines.
+
+## One-confirm restart
+
+Restart now, and the post-update prompt, open one dialog. It lists the running
+sessions, and Save and restart applies the pmux server in that step. Restart
+when idle waits until the last session ends and does not stop anything now.
+The command palette's Update and restart all components path still opens the
+folded review below.
+
+On a logged-in macOS desktop with Accessibility permission, build this branch
+older than the newest public release (say so; do not commit the lowered
+version) and run:
+
+```sh
+python3 tests/native/one-confirm-restart-e2e.py --bins "$verify_bins" \
+  --out "$verify_evidence/one-confirm"
+```
+
+The drive uses a private daemon and two sessions. It presses Review Update on
+the automatic update alert, keeps `sessions.png`, `idle-choice.png`, and
+`idle-waiting.png` (presented frames, not the desktop), and requires PASS:
+the dialog title is "Restart the pmux server", both sessions are listed, Save
+and restart is the first choice, Restart when idle is the next, and choosing
+it leaves both sessions running. The remembered request starts with `v1` and
+names the release. It does not install a release. A clean guest must also
+show Save and restart bringing the sessions back, and Restart when idle
+restarting after the last session closes. The Linux or Windows notice click
+is the other required drive.
 
 ## Restart to update modal
 

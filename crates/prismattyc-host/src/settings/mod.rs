@@ -1561,8 +1561,8 @@ pub(super) fn open_plugins(host: &mut crate::HostState) {
     }
 }
 
-/// After input on the settings panel: Restart now on the Plug-ins page closes the
-/// panel and opens Update and restart at Update and restart all components.
+/// After input on the settings panel: Restart now closes the panel and asks
+/// for one confirm, which lists the sessions and can restart the pmux server.
 pub(super) fn follow_up(host: &mut crate::HostState) {
     if host
         .settings
@@ -1570,7 +1570,7 @@ pub(super) fn follow_up(host: &mut crate::HostState) {
         .is_some_and(|panel| panel.plugins.take_restart_request())
     {
         crate::close_context_menu(host);
-        crate::space_panel::maintenance_restart(host);
+        host.toast_update_action = Some(crate::update_flow::Action::StartOneConfirm);
     }
 }
 

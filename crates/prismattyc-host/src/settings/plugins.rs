@@ -72,7 +72,7 @@ enum Action {
         enable_off: bool,
     },
     UpdateAll,
-    /// Open Update and restart, where the daemon restart happens.
+    /// Ask for one confirm that restarts the pmux server.
     RestartNow,
 }
 
@@ -107,7 +107,7 @@ pub(super) struct Page {
     entered: bool,
     notice: String,
     queued: Option<Command>,
-    /// Restart now was chosen; the host opens Update and restart.
+    /// Restart now was chosen; the host opens the one-confirm dialog.
     restart_requested: bool,
 }
 
@@ -426,7 +426,7 @@ impl Page {
                     );
                     row(
                         "Restart now".into(),
-                        "Opens Update and restart; Enter lists sessions and saves them before restarting"
+                        "Lists the running sessions. Save and restart applies the pmux server in that step."
                             .into(),
                         Action::RestartNow,
                     );
@@ -1061,8 +1061,12 @@ mod tests {
             "org.moonbase.activity-monitor 1.0.0 → 1.1.0 · org.moonbase.activity-connector (new) 2.0.0"
         );
         assert_eq!(items[notice + 1].label, "Restart now");
+        assert_eq!(
+            items[notice + 1].detail,
+            "Lists the running sessions. Save and restart applies the pmux server in that step."
+        );
         assert!(!page.take_restart_request());
-        // Restart now asks the host to open Update and restart, once.
+        // Restart now asks the host for one confirm, once.
         assert!(page.activate(notice + 1));
         assert!(page.take_restart_request());
         assert!(!page.take_restart_request());

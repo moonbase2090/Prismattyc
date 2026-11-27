@@ -331,65 +331,6 @@ fn handoff_args(
     out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn strings(args: &[&str]) -> Vec<std::ffi::OsString> {
-        args.iter().map(Into::into).collect()
-    }
-
-    #[test]
-    fn the_record_flag_goes_before_the_first_pane_command() {
-        assert_eq!(
-            handoff_args(strings(&["--socket", "/s", "--", "/bin/sh", "-c", "x"]), 9),
-            strings(&[
-                "--socket",
-                "/s",
-                "--handoff-fd",
-                "9",
-                "--",
-                "/bin/sh",
-                "-c",
-                "x"
-            ])
-        );
-        assert_eq!(
-            handoff_args(strings(&["--socket", "/s"]), 9),
-            strings(&["--socket", "/s", "--handoff-fd", "9"])
-        );
-    }
-
-    #[test]
-    fn an_earlier_record_flag_is_replaced_but_a_command_argument_is_kept() {
-        assert_eq!(
-            handoff_args(
-                strings(&[
-                    "--socket",
-                    "/s",
-                    "--handoff-fd",
-                    "4",
-                    "--",
-                    "prog",
-                    "--handoff-fd",
-                    "x"
-                ]),
-                9
-            ),
-            strings(&[
-                "--socket",
-                "/s",
-                "--handoff-fd",
-                "9",
-                "--",
-                "prog",
-                "--handoff-fd",
-                "x"
-            ])
-        );
-    }
-}
-
 /// What a server started by a live update takes over.
 #[cfg(unix)]
 pub struct Adopted {
@@ -453,4 +394,63 @@ pub fn adopt(fd: i32, socket: &std::path::Path) -> anyhow::Result<Adopted> {
         resumes,
         from_version: record.from_version,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn strings(args: &[&str]) -> Vec<std::ffi::OsString> {
+        args.iter().map(Into::into).collect()
+    }
+
+    #[test]
+    fn the_record_flag_goes_before_the_first_pane_command() {
+        assert_eq!(
+            handoff_args(strings(&["--socket", "/s", "--", "/bin/sh", "-c", "x"]), 9),
+            strings(&[
+                "--socket",
+                "/s",
+                "--handoff-fd",
+                "9",
+                "--",
+                "/bin/sh",
+                "-c",
+                "x"
+            ])
+        );
+        assert_eq!(
+            handoff_args(strings(&["--socket", "/s"]), 9),
+            strings(&["--socket", "/s", "--handoff-fd", "9"])
+        );
+    }
+
+    #[test]
+    fn an_earlier_record_flag_is_replaced_but_a_command_argument_is_kept() {
+        assert_eq!(
+            handoff_args(
+                strings(&[
+                    "--socket",
+                    "/s",
+                    "--handoff-fd",
+                    "4",
+                    "--",
+                    "prog",
+                    "--handoff-fd",
+                    "x"
+                ]),
+                9
+            ),
+            strings(&[
+                "--socket",
+                "/s",
+                "--handoff-fd",
+                "9",
+                "--",
+                "prog",
+                "--handoff-fd",
+                "x"
+            ])
+        );
+    }
 }

@@ -2737,17 +2737,41 @@ mod handoff_tests {
         runtime.content(1).expect("pane").lines.join("\n")
     }
 
+    /// Block until pane `id`'s reader hands over its next chunk, and apply it.
+    /// False when nothing arrives before `deadline` or the reader is gone.
+    fn await_output(runtime: &mut LiveRuntime, id: u64, deadline: Instant) -> bool {
+        let pane = runtime.panes.get_mut(&id).expect("pane");
+        let left = deadline.saturating_duration_since(Instant::now());
+        match pane.from_pty_rx.recv_timeout(left) {
+            Ok(Ok(chunk)) if chunk.bytes.is_empty() => {
+                let _ = pane.observe_death(id);
+                true
+            }
+            Ok(Ok(chunk)) => {
+                let _ = pane.apply_pty_chunk(chunk);
+                true
+            }
+            Ok(Err(_)) => {
+                let _ = pane.observe_death(id);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
     fn wait_for(runtime: &mut LiveRuntime, needle: &str) -> String {
         let deadline = Instant::now() + Duration::from_secs(10);
-        while Instant::now() < deadline {
+        loop {
             let _ = runtime.drain();
             let text = text(runtime);
             if text.contains(needle) {
                 return text;
             }
-            thread::sleep(Duration::from_millis(5));
+            assert!(
+                await_output(runtime, 1, deadline),
+                "never saw {needle:?} in {text:?}"
+            );
         }
-        panic!("never saw {needle:?} in {:?}", text(runtime));
     }
 
     fn alive(pid: u32) -> bool {
@@ -2796,11 +2820,8 @@ mod handoff_tests {
         new.write(1, b"two\n".to_vec()).expect("write");
         wait_for(&mut new, "got:two");
 
+        // Closing the adopted pane ends and reaps its program before it returns.
         drop(new);
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while alive(pid) && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(10));
-        }
         assert!(
             !alive(pid),
             "closing the adopted pane did not end its program"
@@ -2818,7 +2839,17 @@ mod handoff_tests {
             .expect("quiesce");
         let panes = old.export_handoff().expect("export");
         drop(old);
-        thread::sleep(Duration::from_millis(600));
+        // Wait, with no server reading, until the program's output is in the PTY.
+        {
+            use std::os::fd::AsRawFd;
+            let mut ready = libc::pollfd {
+                fd: panes[0].1.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one valid pollfd entry.
+            assert_eq!(unsafe { libc::poll(&mut ready, 1, 10_000) }, 1, "no output");
+        }
         let (mut new, failed) = LiveRuntime::adopt_handoff(panes, None, PaneLogWatch::new());
         assert!(failed.is_empty());
         wait_for(&mut new, "written-in-the-gap");
@@ -2831,11 +2862,12 @@ mod handoff_tests {
         let mut old = one_pane("echo last-words");
         wait_for(&mut old, "last-words");
         let deadline = Instant::now() + Duration::from_secs(5);
-        while old.panes[&1].child_alive() && Instant::now() < deadline {
-            let _ = old.drain();
-            thread::sleep(Duration::from_millis(5));
+        while old.panes[&1].child_alive() {
+            assert!(
+                await_output(&mut old, 1, deadline),
+                "the program never ended"
+            );
         }
-        assert!(!old.panes[&1].child_alive());
         let new = hand_over(old);
         assert!(!new.panes[&1].child_alive());
         assert!(text(&new).contains("last-words"));
@@ -2881,16 +2913,11 @@ mod handoff_tests {
                 record.pid = None;
             }
         }
-        let (mut new, failed) = LiveRuntime::adopt_handoff(panes, None, PaneLogWatch::new());
+        let (new, failed) = LiveRuntime::adopt_handoff(panes, None, PaneLogWatch::new());
         assert_eq!(failed.iter().map(|(id, _)| *id).collect::<Vec<_>>(), [2]);
         assert!(new.has_pane(1) && !new.has_pane(2));
         assert!(text(&new).contains("one"));
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while alive(second) && Instant::now() < deadline {
-            // Its master closed, so the kernel hangs the program up.
-            let _ = new.drain();
-            thread::sleep(Duration::from_millis(10));
-        }
+        // Its master closed, so the kernel hangs the program up; wait for it.
         let mut status = 0;
         // SAFETY: reap the hung-up program, which is a child of this test.
         unsafe { libc::waitpid(second as libc::pid_t, &mut status, 0) };

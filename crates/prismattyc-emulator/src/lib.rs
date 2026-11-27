@@ -5333,7 +5333,7 @@ mod handoff_tests {
         let (master, released_pid) = first.release().expect("release");
         assert_eq!(released_pid, Some(pid));
         // Dropping the first session neither signalled cat nor sent it EOF.
-        std::thread::sleep(Duration::from_millis(200));
+        // cat also still echoes below.
         assert!(alive(pid), "cat ended when its session was released");
 
         let mut second = PtySession::adopt(master, pid, false).expect("adopt");

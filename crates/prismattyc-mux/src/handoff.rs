@@ -291,23 +291,102 @@ pub fn exec(
             keep_across_exec(master.as_raw_fd())?;
         }
         let mut command = std::process::Command::new(&prepared.binary);
-        let mut skip = false;
-        for arg in args {
-            if skip {
-                skip = false;
-                continue;
-            }
-            if arg == FD_ARG {
-                skip = true;
-                continue;
-            }
-            command.arg(arg);
-        }
-        command.arg(FD_ARG).arg(record_fd.as_raw_fd().to_string());
+        command.args(handoff_args(args, record_fd.as_raw_fd()));
         Ok(prismattyc_process::exec(&mut command))
     })();
     match result {
         Ok(error) | Err(error) => error,
+    }
+}
+
+/// The new server's arguments: this server's own, with the record descriptor
+/// in place of any earlier one, before a `--` that starts the first pane's
+/// command (after it, the flag would be that command's argument).
+fn handoff_args(
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+    record_fd: i32,
+) -> Vec<std::ffi::OsString> {
+    let mut out = Vec::new();
+    let mut args = args.into_iter();
+    let mut placed = false;
+    while let Some(arg) = args.next() {
+        if arg == "--" {
+            out.push(FD_ARG.into());
+            out.push(record_fd.to_string().into());
+            placed = true;
+            out.push(arg);
+            out.extend(args.by_ref());
+            break;
+        }
+        if arg == FD_ARG {
+            let _ = args.next();
+            continue;
+        }
+        out.push(arg);
+    }
+    if !placed {
+        out.push(FD_ARG.into());
+        out.push(record_fd.to_string().into());
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn strings(args: &[&str]) -> Vec<std::ffi::OsString> {
+        args.iter().map(Into::into).collect()
+    }
+
+    #[test]
+    fn the_record_flag_goes_before_the_first_pane_command() {
+        assert_eq!(
+            handoff_args(strings(&["--socket", "/s", "--", "/bin/sh", "-c", "x"]), 9),
+            strings(&[
+                "--socket",
+                "/s",
+                "--handoff-fd",
+                "9",
+                "--",
+                "/bin/sh",
+                "-c",
+                "x"
+            ])
+        );
+        assert_eq!(
+            handoff_args(strings(&["--socket", "/s"]), 9),
+            strings(&["--socket", "/s", "--handoff-fd", "9"])
+        );
+    }
+
+    #[test]
+    fn an_earlier_record_flag_is_replaced_but_a_command_argument_is_kept() {
+        assert_eq!(
+            handoff_args(
+                strings(&[
+                    "--socket",
+                    "/s",
+                    "--handoff-fd",
+                    "4",
+                    "--",
+                    "prog",
+                    "--handoff-fd",
+                    "x"
+                ]),
+                9
+            ),
+            strings(&[
+                "--socket",
+                "/s",
+                "--handoff-fd",
+                "9",
+                "--",
+                "prog",
+                "--handoff-fd",
+                "x"
+            ])
+        );
     }
 }
 

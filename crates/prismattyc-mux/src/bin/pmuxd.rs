@@ -376,7 +376,12 @@ fn main() -> Result<()> {
     )?;
     let activity_webhook =
         prismattyc_mux::activity_webhook::Worker::start(cli.socket.clone(), config_path)?;
-    println!("{}", server.path().display());
+    // The ready line for whoever started this server. After a live update the
+    // starter may have stopped reading, so a closed stdout is not an error.
+    {
+        use std::io::Write;
+        let _ = writeln!(std::io::stdout(), "{}", server.path().display());
+    }
     server.wait_shutdown();
     drop(activity_webhook);
     let handing_over = server.handoff_pending();

@@ -586,7 +586,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-core"
-version = "0.3.78"
+version = "0.3.79"
 dependencies = [
  "prismattyc-process",
  "serde",
@@ -595,7 +595,7 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-emulator"
-version = "0.3.78"
+version = "0.3.79"
 dependencies = [
  "anyhow",
  "flate2",
@@ -611,14 +611,14 @@ dependencies = [
 
 [[package]]
 name = "prismattyc-process"
-version = "0.3.78"
+version = "0.3.79"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "prismattyc-protocol"
-version = "0.3.78"
+version = "0.3.79"
 
 [[package]]
 name = "proc-macro2"

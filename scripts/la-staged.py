@@ -22,10 +22,10 @@ from pathlib import Path
 # runs. Keep in sync with ci.yml minus UNSTAGED_CI_JOBS.
 # Test: scripts/la-staged_test.py reads ci.yml and compares.
 #
-# phase3-rich stays in ci.yml for hand / --job dispatch. It is a frozen
+# phase3-transport stays in ci.yml for hand / --job dispatch. It is a
 # regression pin, not a required light gate. On GitHub it runs on every
 # push, including each commit to main.
-UNSTAGED_CI_JOBS: frozenset[str] = frozenset({"phase3-rich"})
+UNSTAGED_CI_JOBS: frozenset[str] = frozenset({"phase3-transport"})
 STAGES: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "light",

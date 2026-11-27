@@ -614,15 +614,9 @@ fn paint(
         sync_host_title(0, emulator.screen().max_view_scroll(), false);
     }
     let sel = if on_alt { None } else { selection.range() };
-    if sel.is_none() {
-        renderer
-            .render(emulator.screen())
-            .context("render classic fast path")?;
-    } else {
-        renderer
-            .render_composed(emulator.screen(), &[], sel)
-            .context("render classic with selection")?;
-    }
+    renderer
+        .render_scrolled(emulator.screen(), 0, true, sel)
+        .context("render classic grid")?;
     // Honor DECTCEM: show host caret only when the child has not hidden it.
     // Find mode owns the bottom row chrome and keeps the host caret hidden.
     if find.active {
@@ -2752,9 +2746,6 @@ impl Drop for TerminalGuard {
 mod tests {
     use super::*;
     use prismattyc_core::test_time_budget;
-    use prismattyc_protocol::{
-        encode_capability_query, CapabilityQuery, ProtocolVersion, RequestId,
-    };
     use prismattyc_render::PlainTextRenderer;
 
     #[test]
@@ -5208,7 +5199,7 @@ mod tests {
         assert!(selection.range().is_none());
     }
 
-    /// Host→child **control** path (capability, focus, mouse) must not block:
+    /// Host→child **control** path (focus, mouse) must not block:
     /// `try_send` drops when full. Keys use the 4 KiB / 250 ms burst queue
     /// (`key_burst_*`). Paste uses `PASTE_SEND_BUDGET` (`paste_*`).
     #[test]
@@ -5702,28 +5693,6 @@ mod tests {
             Some(value) => env::set_var(key, value),
             None => env::remove_var(key),
         }
-    }
-
-    #[test]
-    fn classic_status_task_paints_plain_output() {
-        let mut emulator = Emulator::new(20, 2, 10);
-        assert!(!emulator.collects_apc());
-        let events = emulator.feed(b"status:ok\r\n");
-        assert!(events.is_empty());
-        let text = PlainTextRenderer::render(emulator.screen());
-        assert!(text.contains("status:ok"));
-    }
-
-    #[test]
-    fn classic_host_ignores_capability_queries() {
-        let mut emulator = Emulator::new(40, 2, 10);
-        let query = encode_capability_query(CapabilityQuery {
-            request_id: RequestId::new(1).unwrap(),
-            max_version: ProtocolVersion::new(0, 1),
-        })
-        .unwrap();
-        let events = emulator.feed(&query);
-        assert!(events.is_empty());
     }
 
     #[test]

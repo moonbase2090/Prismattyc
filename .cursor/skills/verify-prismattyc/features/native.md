@@ -148,12 +148,6 @@ that obsolete offer without a reply; the client recovers to ANSI at its 200 ms
 setup bound, and the endpoint accepts a fresh offer. The socket test checks
 both a waiting HELLO and a writer receipt arriving just before resize.
 
-The real PTY native-handoff test also installs primary-screen cell-rect and
-viewport Rich overlays before discovery. Native discovery and its writer
-receipt reset the old Rich session. Require no Classic overlay during Native
-or after release; the retained ANSI cells recover without resurrecting the
-old Rich capability grant.
-
 ## Inspect the result
 
 Require suite and per-drive `result.json` to report PASS. Inspect the logs,
@@ -236,6 +230,4 @@ drive. Native has no scrollback; Classic scrollback remains readable.
 
 ## Experimental limits
 
-Negotiating Native ends the pane's Rich attachments. Release restores the
-retained ANSI grid without restoring those attachments. Applications that use
-both protocols must negotiate Rich again after release.
+Release restores the retained ANSI grid.

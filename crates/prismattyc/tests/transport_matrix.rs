@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use prismattyc_protocol::{
-    encode_apc, encode_attach_cell_rect, encode_capability_query, encode_tmux_passthrough,
-    AttachCellRect, CapabilityQuery, ProtocolVersion, RequestId,
+    encode_apc, encode_capability_query, encode_tmux_passthrough, CapabilityQuery, ProtocolVersion,
+    RequestId,
 };
 
 fn prism_bin() -> PathBuf {
@@ -195,15 +195,9 @@ fn query_and_attach() -> (Vec<u8>, Vec<u8>) {
         max_version: ProtocolVersion::new(0, 2),
     })
     .unwrap();
-    let attach = encode_attach_cell_rect(&AttachCellRect {
-        id: 1,
-        row: 0,
-        col: 0,
-        rows: 1,
-        cols: 4,
-        text: "STAT".into(),
-    })
-    .unwrap();
+    // An attachment from a client built for the removed rich mode.
+    let attach =
+        encode_apc("Prismattyc;attach;cell_rect;id=1;row=0;col=0;rows=1;cols=4;text=STAT").unwrap();
     (query, attach)
 }
 
@@ -307,10 +301,14 @@ fn t6_nested_prism_keeps_capability_messages_out_of_both_grids() {
     let qfile = write_payload(&query);
     let afile = write_payload(&attach);
     let inner = prism_bin();
+    // The inner host gets the removed flag. Taken as the program, it would
+    // fail to launch and T6DONE would never appear; accepted, it must leave
+    // the inner host classic.
     let out = run_prism_until(
         &[
             "--",
             inner.to_str().unwrap(),
+            "--experimental-rich",
             "--",
             "/bin/sh",
             "-c",

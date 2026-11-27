@@ -181,10 +181,7 @@ pub(crate) fn process_native_chunk(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use prismattyc_protocol::{
-        encode_attach_cell_rect, encode_capability_query, AttachCellRect, ProtocolVersion,
-        RequestId,
-    };
+    use prismattyc_protocol::{encode_apc, encode_capability_query, ProtocolVersion, RequestId};
 
     #[derive(Default)]
     struct Recorder {
@@ -235,15 +232,8 @@ mod tests {
         let mut bytes = b"ab".to_vec();
         bytes.extend(query(7, 4));
         bytes.extend(
-            encode_attach_cell_rect(&AttachCellRect {
-                id: 1,
-                row: 0,
-                col: 0,
-                rows: 1,
-                cols: 4,
-                text: "STAT".into(),
-            })
-            .unwrap(),
+            encode_apc("Prismattyc;attach;cell_rect;id=1;row=0;col=0;rows=1;cols=4;text=STAT")
+                .unwrap(),
         );
         bytes.extend(query(9, 3));
         bytes.extend(b"cd\x1b[6n");

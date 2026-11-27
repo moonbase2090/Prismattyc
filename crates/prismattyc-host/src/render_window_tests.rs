@@ -2902,6 +2902,16 @@ fn strip_close_and_detach_drop_the_saved_overlay() {
                 records.floats[0].window_slot, after,
                 "the saved overlay follows the tab"
             );
+            let pane = host
+                .mux
+                .floated_pane()
+                .expect("the overlay stays on the surviving tab");
+            assert!(host.mux.dock_float().unwrap());
+            assert!(
+                host.mux.restore_space_float("work", &records).unwrap(),
+                "reopening restores the same pane"
+            );
+            assert_eq!(host.mux.floated_pane(), Some(pane));
 
             self.completed = true;
             self.app.windows.clear();

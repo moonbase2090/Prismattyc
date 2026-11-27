@@ -1193,6 +1193,11 @@ impl LiveRuntime {
         Ok(())
     }
 
+    #[cfg(unix)]
+    pub(crate) fn has_pane(&self, pane_id: u64) -> bool {
+        self.panes.contains_key(&pane_id)
+    }
+
     pub(crate) fn remove_pane(&mut self, pane_id: u64) {
         if self.panes.remove(&pane_id).is_some() {
             self.watch.note();

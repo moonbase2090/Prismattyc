@@ -22,7 +22,7 @@ mod domain;
 pub mod executable;
 mod float_record;
 mod geometry;
-mod handoff;
+pub mod handoff;
 pub mod host_register;
 pub mod host_render_status;
 pub mod host_tabs;

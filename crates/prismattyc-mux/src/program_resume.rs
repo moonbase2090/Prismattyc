@@ -524,6 +524,7 @@ impl PaneResume {
         self.record.as_ref()
     }
 
+    #[cfg(unix)]
     /// Token, record and per-process report times, to hand to the next pmux
     /// server in a live update. The program keeps running, so its record keeps
     /// its owner, and the report times keep refusing a replayed report.
@@ -537,6 +538,7 @@ impl PaneResume {
         )
     }
 
+    #[cfg(unix)]
     /// The inverse of [`PaneResume::handoff_parts`].
     pub(crate) fn from_handoff(
         token: Option<String>,

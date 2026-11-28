@@ -400,14 +400,22 @@ mod windows {
         /// Bumped on each connection, so a stale grace timer does nothing.
         generation: AtomicU64,
         last_output: Mutex<Instant>,
+        /// The server asked to pause: output and the exit report wait for
+        /// the next trusted server.
+        paused: AtomicBool,
     }
 
     impl Link {
-        /// Write a frame to the connected server, waiting for one if needed.
-        /// A failed write drops the connection and waits for the next.
+        /// Write output or the exit report to the connected server, waiting
+        /// for one if needed and while paused. A failed write drops the
+        /// connection and waits for the next.
         fn send(&self, frame: &Frame) {
             let mut out = self.out.lock().unwrap_or_else(|e| e.into_inner());
             loop {
+                if self.paused.load(Ordering::Acquire) {
+                    out = self.connected.wait(out).unwrap_or_else(|e| e.into_inner());
+                    continue;
+                }
                 if let Some(pipe) = out.as_mut() {
                     if write_frame(pipe, frame).and_then(|()| pipe.flush()).is_ok() {
                         return;
@@ -415,6 +423,21 @@ mod windows {
                     *out = None;
                 }
                 out = self.connected.wait(out).unwrap_or_else(|e| e.into_inner());
+            }
+        }
+
+        /// Stop output and say so. Taking the pipe lock waits out any frame
+        /// being written, so `Paused` follows the last output sent.
+        fn pause(&self) {
+            self.paused.store(true, Ordering::Release);
+            let mut out = self.out.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(pipe) = out.as_mut() {
+                if write_frame(pipe, &Frame::Paused)
+                    .and_then(|()| pipe.flush())
+                    .is_err()
+                {
+                    *out = None;
+                }
             }
         }
     }
@@ -465,6 +488,7 @@ mod windows {
             grace_ms: AtomicU32::new(spec.grace_ms.max(1)),
             generation: AtomicU64::new(0),
             last_output: Mutex::new(Instant::now()),
+            paused: AtomicBool::new(false),
         });
 
         // Console output goes to the server only while one is connected; the
@@ -569,6 +593,8 @@ mod windows {
                 link.generation.fetch_add(1, Ordering::AcqRel);
                 link.grace_ms.store(spec.grace_ms.max(1), Ordering::Release);
                 *link.out.lock().unwrap_or_else(|e| e.into_inner()) = Some(out);
+                // A new trusted server takes over where a paused one stopped.
+                link.paused.store(false, Ordering::Release);
                 link.connected.notify_all();
             }
             // Serve this server until its pipe closes.
@@ -607,6 +633,12 @@ mod windows {
                     }
                     Ok(Some(Frame::Handoff { grace_ms })) => {
                         link.grace_ms.store(grace_ms.max(1), Ordering::Release);
+                    }
+                    Ok(Some(Frame::Pause)) => link.pause(),
+                    Ok(Some(Frame::Resume)) => {
+                        let _out = link.out.lock().unwrap_or_else(|e| e.into_inner());
+                        link.paused.store(false, Ordering::Release);
+                        link.connected.notify_all();
                     }
                     Ok(Some(_)) => {}
                     Ok(None) | Err(_) => break,

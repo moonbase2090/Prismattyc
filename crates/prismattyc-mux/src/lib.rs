@@ -101,8 +101,8 @@ pub use geometry::{
 };
 pub use host_register::{
     attach_pty_fallback, host_ack_path_from_socket, host_pane_nested, host_pid_path_from_socket,
-    live_host_pid, register_host_pid, route_seat_to_host, should_host_route_seat, touch_host_ack,
-    unregister_host_pid, wait_host_ack,
+    live_host_pid, register_host_pid, route_seat_to_host, seat_ownership, should_host_route_seat,
+    touch_host_ack, unregister_host_pid, wait_host_ack, SeatOwnership,
 };
 pub use ids::{ClientId, PaneId, SessionId, WindowId};
 pub use layout::{Axis, PaneLayout, Split};

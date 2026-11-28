@@ -1290,13 +1290,15 @@ fn join_space(socket: &Path, space: &str, session: &str) -> Result<()> {
                 .and_then(|me| prismattyc_mux::executable::sibling(&me, &["pmux"]))
         })
         .context("pmux not found beside pmux-attach")?;
-    let output = std::process::Command::new(pmux)
-        .arg("--socket")
-        .arg(socket)
-        .args(["space", "add", space, "--session", session])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .context("run pmux space add")?;
+    let output = prismattyc_process::spawn(
+        prismattyc_mux::platform::hidden_capture_command(pmux)
+            .arg("--socket")
+            .arg(socket)
+            .args(["space", "add", space, "--session", session])
+            .stdin(std::process::Stdio::null()),
+    )
+    .and_then(std::process::Child::wait_with_output)
+    .context("run pmux space add")?;
     if !output.status.success() {
         bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
     }

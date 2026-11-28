@@ -268,7 +268,7 @@ pub struct ConfigFile {
     /// Draw the bright "vehicle" box at the sweep's leading edge (default
     /// true); `false` leaves only the growing trail.
     pub focus_border_animation_head: Option<bool>,
-    /// Show the launch splash on a bare first window. Default true.
+    /// Show the launch splash on the first window. Default true.
     /// Startup only. `--no-splash` and `PRISMATTYC_NO_SPLASH` still hide it.
     pub splash: Option<bool>,
     /// Start the daemon at login and restore the saved workspace. An absent
@@ -546,7 +546,7 @@ impl ConfigFile {
         self.layout.unwrap_or_default()
     }
 
-    /// Show the launch splash on a bare first window. Default true.
+    /// Show the launch splash on the first window. Default true.
     pub fn splash(&self) -> bool {
         self.splash.unwrap_or(true)
     }

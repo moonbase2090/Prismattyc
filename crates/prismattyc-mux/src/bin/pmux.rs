@@ -2492,25 +2492,76 @@ fn try_host_route_seat(
     } else {
         sessions.first().cloned().context("no session to attach")?
     };
+    if live_host_pid(&host_pid_path_from_socket(&paths.socket)).is_none() {
+        return Ok(false);
+    }
+    // The app shows a Space's cache only when the Space owns every session
+    // in it, so the session joins the app's current Space first.
+    let cache_space = attach_tabs::load(&attach_tabs::layout_path_from_socket(&paths.socket))
+        .and_then(|file| file.space);
+    let owner = take_snapshot(&mut Client::connect(&paths.socket)?)?
+        .sessions
+        .into_iter()
+        .find(|session| session.id == id)
+        .and_then(|session| session.space_id);
+    let saved = space_definitions();
+    let joined = match prismattyc_mux::seat_ownership(
+        cache_space.as_deref(),
+        &name,
+        owner.as_deref(),
+        |space| {
+            saved
+                .iter()
+                .find(|(saved_name, _)| saved_name == space)
+                .and_then(|(_, saved)| saved.id.clone())
+        },
+        |owner| {
+            saved
+                .iter()
+                .find(|(_, saved)| saved.id.as_deref() == Some(owner))
+                .map(|(saved_name, _)| saved_name.clone())
+        },
+    ) {
+        prismattyc_mux::SeatOwnership::Unbound | prismattyc_mux::SeatOwnership::Owned => None,
+        prismattyc_mux::SeatOwnership::Adopt { space } => {
+            space_commands::add(
+                paths,
+                vec![space.clone(), "--session".into(), name.clone()],
+                false,
+            )?;
+            Some(space)
+        }
+        prismattyc_mux::SeatOwnership::Refuse(reason) => {
+            bail!("cannot open {name} in the app: {reason}")
+        }
+    };
     if !route_seat_to_host(&paths.socket, &id.to_string(), &name)? {
         return Ok(false);
     }
-    wait_host_seat_ack(paths);
-    println!("attached {name} in the host as a log replica");
+    // Without the app's acknowledgement nothing proves the session opened:
+    // fail, so a script or shell sees a nonzero exit instead of success.
+    prismattyc_mux::confirm_seat_route(&paths.socket, &name, Duration::from_secs(2))?;
+    match cache_space.as_deref() {
+        Some(space) if joined.is_some() => {
+            println!("opened {name} in the app; it joined the Space {space}")
+        }
+        Some(space) => println!("opened {name} in the app, in the Space {space}"),
+        None => println!("opened {name} in the app"),
+    }
     Ok(true)
 }
 
-/// Wait for `{stem}.host.ack` after a seat-route cache write.
-///
-/// Body/`()` mutants are follow-up coverage (PT-306 mux scrollbar/seat-route).
-#[mutants::skip]
-fn wait_host_seat_ack(paths: &Paths) {
-    let ack = host_ack_path_from_socket(&paths.socket);
-    let cache = attach_tabs::layout_path_from_socket(&paths.socket);
-    let since = std::fs::metadata(&cache)
-        .and_then(|meta| meta.modified())
-        .unwrap_or_else(|_| SystemTime::now());
-    let _ = wait_host_ack(&ack, since, Duration::from_secs(2));
+/// Saved Space files by name; unreadable files are skipped.
+fn space_definitions() -> Vec<(String, prismattyc_mux::SavedSpace)> {
+    list_spaces(&spaces_dir())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|entry| {
+            load_space(&spaces_dir(), &entry.name)
+                .ok()
+                .map(|space| (entry.name, space))
+        })
+        .collect()
 }
 
 fn exec_attach_session(paths: &Paths, session: &str, space: Option<&str>) -> Result<()> {

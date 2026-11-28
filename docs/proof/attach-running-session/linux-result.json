@@ -1,0 +1,14 @@
+{
+  "status": "PASS",
+  "platform": "linux",
+  "checks": [
+    "open: picker lists loose, other-Space and open sessions in their groups",
+    "pick: loose joined work and opened in a new focused tab",
+    "focus existing: picking an open session focused its tab",
+    "detach: the tab closed and loose kept running in work",
+    "reopen: loose opened again from IN THIS SPACE",
+    "move: build moved from release to work after a confirmation naming release",
+    "escape: the picker closes"
+  ],
+  "space_save_status_after_detach": "Save failed"
+}

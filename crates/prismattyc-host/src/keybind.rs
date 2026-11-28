@@ -57,6 +57,7 @@ pub enum Action {
     TerminalSwitcher,
     StartServer,
     StopServer,
+    AttachSession,
     AgentMessages,
     /// Open or focus the Activity Monitor Space.
     ActivityMonitor,
@@ -204,6 +205,7 @@ impl Action {
             Action::TerminalSwitcher,
             Action::StartServer,
             Action::StopServer,
+            Action::AttachSession,
             Action::AgentMessages,
             Action::ActivityMonitor,
             Action::JumpNeedsYou,
@@ -306,6 +308,7 @@ impl Action {
             Action::TerminalSwitcher => "terminal_switcher".into(),
             Action::StartServer => "start_server".into(),
             Action::StopServer => "stop_server".into(),
+            Action::AttachSession => "attach_session".into(),
             Action::AgentMessages => "agent_messages".into(),
             Action::ActivityMonitor => "activity_monitor".into(),
             Action::JumpNeedsYou => "jump_needs_you".into(),
@@ -408,6 +411,9 @@ impl Action {
             Action::TerminalSwitcher => "find a terminal across Spaces".into(),
             Action::StartServer => "start the pmux server and restore saved sessions".into(),
             Action::StopServer => "save every session, then stop the pmux server".into(),
+            Action::AttachSession => {
+                "Attach running session: bring a live session into this Space".into()
+            }
             Action::AgentMessages => "view pending mail and pane input queue receipts".into(),
             Action::ActivityMonitor => "open the Activity Monitor Space".into(),
             Action::JumpNeedsYou => "focus the next pane that needs your attention".into(),
@@ -588,6 +594,7 @@ impl Action {
             | Action::TerminalSwitcher
             | Action::StartServer
             | Action::StopServer
+            | Action::AttachSession
             | Action::OpenSpace
             | Action::DeleteSpace
             | Action::MovePaneToSpace
@@ -1225,6 +1232,7 @@ pub(crate) fn default_chords(action: Action) -> Vec<&'static str> {
         Action::AgentMessages
         | Action::StartServer
         | Action::StopServer
+        | Action::AttachSession
         | Action::ActivityMonitor
         | Action::UpdateRestart
         | Action::PluginsCheck
@@ -1645,6 +1653,7 @@ mod tests {
             Action::AgentMessages
                 | Action::StartServer
                 | Action::StopServer
+                | Action::AttachSession
                 | Action::ActivityMonitor
                 | Action::UpdateRestart
                 | Action::PluginsCheck

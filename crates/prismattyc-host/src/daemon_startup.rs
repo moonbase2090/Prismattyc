@@ -32,9 +32,43 @@ pub(crate) fn ensure_pmuxd_started(pmux: &Path, socket: &Path) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum StartMode {
+    /// Sessions saved by Save and stop come back with the server.
+    Restore,
+    Plain,
+}
+
+/// A saved workspace that exists but cannot be read stops the start: starting
+/// without it would look like a clean start with every session gone.
+fn start_mode(saved: &Path) -> Result<StartMode> {
+    match prismattyc_mux::workspace::load_from(saved) {
+        Ok(Some(_)) => Ok(StartMode::Restore),
+        Ok(None) => Ok(StartMode::Plain),
+        Err(error) => Err(error.context(format!(
+            "saved sessions could not be read, so nothing was started; run `pmux up` to \
+             start without them, or fix or move {}",
+            saved.display()
+        ))),
+    }
+}
+
+/// Start the server from the app (the card, Update and restart, the palette),
+/// restoring the sessions a Save and stop recorded.
+pub(crate) fn start_server(pmux: &Path, socket: &Path) -> Result<()> {
+    start_server_with(pmux, socket, &prismattyc_mux::workspace::path(socket))
+}
+
+fn start_server_with(pmux: &Path, socket: &Path, saved: &Path) -> Result<()> {
+    match start_mode(saved)? {
+        StartMode::Restore => start_restoring(pmux, socket),
+        StartMode::Plain => ensure_pmuxd_started(pmux, socket),
+    }
+}
+
 /// `pmux up --restore-workspace`: start the server with the sessions a
 /// Save and stop recorded.
-pub(crate) fn start_restoring(pmux: &Path, socket: &Path) -> Result<()> {
+fn start_restoring(pmux: &Path, socket: &Path) -> Result<()> {
     let output = prismattyc_process::spawn(
         prismattyc_mux::platform::hidden_capture_command(pmux)
             .args(["up", "--restore-workspace"])
@@ -57,6 +91,41 @@ mod tests {
     use super::*;
 
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn an_unreadable_saved_workspace_stops_the_start_with_its_reason() {
+        let root = std::env::temp_dir().join(format!(
+            "pds-start-mode-{}-{}",
+            std::process::id(),
+            NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let socket = root.join("pmux.sock");
+        let saved = root.join("workspace.json");
+
+        assert_eq!(start_mode(&saved).unwrap(), StartMode::Plain);
+
+        std::fs::write(&saved, b"{ not a workspace").unwrap();
+        let error = format!("{:#}", start_mode(&saved).unwrap_err());
+        assert!(error.contains("could not be read"), "{error}");
+        assert!(error.contains("parse saved workspace"), "{error}");
+        // The app reports it and starts nothing: with no pmux to run, the
+        // error is still the unreadable file, not a failed spawn.
+        let error = format!(
+            "{:#}",
+            start_server_with(&root.join("no-such-pmux"), &socket, &saved).unwrap_err()
+        );
+        assert!(error.contains("could not be read"), "{error}");
+        assert!(!error.contains("start pmuxd using"), "{error}");
+
+        std::fs::write(&saved, br#"{"version": 2}"#).unwrap();
+        assert!(
+            start_mode(&saved).is_err(),
+            "unknown versions are not dropped"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(0);
 

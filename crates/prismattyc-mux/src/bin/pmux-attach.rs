@@ -41,13 +41,12 @@ use prismattyc_core::{
 };
 use prismattyc_mux::{
     attach_pty_fallback, attach_tabs, classify_control_request_id, default_socket_path,
-    diagnose_runtime_dir_miss_from_env, expand_empty_bracketed_paste, host_ack_path_from_socket,
-    list_spaces, load_space, next_stale_skip, prism_config_path, probe_socket_liveness,
-    route_seat_to_host, should_host_route_seat, space_sessions_in_tab_order, spaces_dir,
-    wait_host_ack, ArrangementWire, ColorWire, ControlError, ControlErrorCode, ControlIdMatch,
-    ControlRequest, ControlResponse, ControlResponseBody, ControlResponseData, Event, OverlayKind,
-    PaneContent, PaneOverlay, PaneStyled, Snapshot, SocketLiveness, SpawnSpec, StyleRun,
-    PROTOCOL_VERSION,
+    diagnose_runtime_dir_miss_from_env, expand_empty_bracketed_paste, list_spaces, load_space,
+    next_stale_skip, prism_config_path, probe_socket_liveness, route_seat_to_host,
+    should_host_route_seat, space_sessions_in_tab_order, spaces_dir, ArrangementWire, ColorWire,
+    ControlError, ControlErrorCode, ControlIdMatch, ControlRequest, ControlResponse,
+    ControlResponseBody, ControlResponseData, Event, OverlayKind, PaneContent, PaneOverlay,
+    PaneStyled, Snapshot, SocketLiveness, SpawnSpec, StyleRun, PROTOCOL_VERSION,
 };
 #[cfg(unix)]
 use rustix::{
@@ -322,8 +321,13 @@ impl Client {
 
     fn read_response(&mut self) -> Result<ControlResponse> {
         let mut line = String::new();
-        if self.reader.read_line(&mut line)? == 0 {
-            bail!("server closed the attach connection");
+        self.reader.read_line(&mut line)?;
+        if !line.ends_with('\n') {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "server closed the attach connection",
+            )
+            .into());
         }
         Ok(serde_json::from_str(&line)?)
     }
@@ -355,10 +359,39 @@ impl Client {
     }
 
     fn request(&mut self, make: impl FnOnce(u64) -> ControlRequest) -> Result<ControlResponseData> {
-        let request_id = self.send(make)?;
-        let response = self.read_matching(request_id)?;
+        let response = self
+            .send(make)
+            .and_then(|id| self.read_matching(id))
+            .map_err(|err| {
+                let kind = err
+                    .downcast_ref::<io::Error>()
+                    .map(io::Error::kind)
+                    .or_else(|| {
+                        err.downcast_ref::<serde_json::Error>()
+                            .and_then(|e| e.io_error_kind())
+                    });
+                if matches!(
+                    kind,
+                    Some(
+                        io::ErrorKind::UnexpectedEof
+                            | io::ErrorKind::BrokenPipe
+                            | io::ErrorKind::ConnectionReset
+                            | io::ErrorKind::ConnectionAborted
+                    )
+                ) {
+                    err.context(AttachDisconnected)
+                } else {
+                    err
+                }
+            })?;
         match response.body {
             ControlResponseBody::Ok { response } => Ok(response),
+            ControlResponseBody::Error { error }
+                if error.code == ControlErrorCode::InvalidRequest
+                    && error.message == "daemon is shutting down" =>
+            {
+                Err(anyhow::Error::new(error).context(AttachDisconnected))
+            }
             ControlResponseBody::Error { error } => Err(anyhow::Error::new(error)),
         }
     }
@@ -1216,17 +1249,87 @@ fn try_host_route_after_resolve(cli: &Cli, snapshot: &Snapshot, pane_id: u64) ->
         return Ok(false);
     };
     let name = pane_session_name(snapshot, pane_id).unwrap_or("session");
+    // The app shows a Space's cache only when the Space owns every session
+    // in it, so the session joins the app's current Space first.
+    let cache_space = attach_tabs::load(&attach_tabs::layout_path_from_socket(&cli.socket))
+        .and_then(|file| file.space);
+    let owner = snapshot
+        .sessions
+        .iter()
+        .find(|session| session.id == session_id)
+        .and_then(|session| session.space_id.clone());
+    let saved: Vec<_> = list_spaces(&spaces_dir())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|entry| {
+            load_space(&spaces_dir(), &entry.name)
+                .ok()
+                .map(|space| (entry.name, space))
+        })
+        .collect();
+    match prismattyc_mux::seat_ownership(
+        cache_space.as_deref(),
+        name,
+        owner.as_deref(),
+        |space| {
+            saved
+                .iter()
+                .find(|(saved_name, _)| saved_name == space)
+                .and_then(|(_, saved)| saved.id.clone())
+        },
+        |owner| {
+            saved
+                .iter()
+                .find(|(_, saved)| saved.id.as_deref() == Some(owner))
+                .map(|(saved_name, _)| saved_name.clone())
+        },
+    ) {
+        prismattyc_mux::SeatOwnership::Unbound | prismattyc_mux::SeatOwnership::Owned => {}
+        prismattyc_mux::SeatOwnership::Adopt { space } => {
+            if let Err(error) = join_space(&cli.socket, &space, name) {
+                eprintln!("pmux-attach: {name} could not join the Space {space}: {error:#}; attaching here instead");
+                return Ok(false);
+            }
+        }
+        prismattyc_mux::SeatOwnership::Refuse(reason) => {
+            eprintln!("pmux-attach: {reason}; attaching here instead");
+            return Ok(false);
+        }
+    }
     if !route_seat_to_host(&cli.socket, &session_id.to_string(), name)? {
         return Ok(false);
     }
-    let ack = host_ack_path_from_socket(&cli.socket);
-    let cache = attach_tabs::layout_path_from_socket(&cli.socket);
-    let since = std::fs::metadata(&cache)
-        .and_then(|meta| meta.modified())
-        .unwrap_or_else(|_| SystemTime::now());
-    let _ = wait_host_ack(&ack, since, Duration::from_secs(2));
-    eprintln!("attached {name} in the host as a log replica");
+    // Without the app's acknowledgement nothing proves the session opened:
+    // fail, so a script or shell sees a nonzero exit instead of success.
+    prismattyc_mux::confirm_seat_route(&cli.socket, name, Duration::from_secs(2))?;
+    eprintln!("opened {name} in the app");
     Ok(true)
+}
+
+/// `pmux space add SPACE --session NAME`, through the pmux beside this binary.
+fn join_space(socket: &Path, space: &str, session: &str) -> Result<()> {
+    let pmux = std::env::var_os("PMUX")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|me| prismattyc_mux::executable::sibling(&me, &["pmux"]))
+        })
+        .context("pmux not found beside pmux-attach")?;
+    let output = prismattyc_process::spawn(
+        prismattyc_mux::platform::hidden_capture_command(pmux)
+            .arg("--socket")
+            .arg(socket)
+            .args(["space", "add", space, "--session", session])
+            .stdin(std::process::Stdio::null()),
+    )
+    .and_then(std::process::Child::wait_with_output)
+    .context("run pmux space add")?;
+    if !output.status.success() {
+        bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    Ok(())
 }
 
 fn control_code(err: &anyhow::Error) -> Option<ControlErrorCode> {
@@ -2664,6 +2767,7 @@ fn drain_events(
                 )?;
                 break;
             }
+            Err(err) if err.is::<AttachDisconnected>() => return Err(err),
             Ok(_) | Err(_) => break,
         }
     }
@@ -3743,9 +3847,10 @@ fn handle_idle_escape(
 fn run_interactive(
     client: &mut Client,
     client_id: u64,
-    mut pane_id: u64,
+    pane_id: &mut u64,
     mut window_id: u64,
     opts: InteractiveOpts,
+    on_first_paint: impl FnOnce(),
 ) -> Result<(AttachEnd, Option<String>, u64)> {
     // Do not grab the lease on attach. InjectMail must AcquireLease
     // on an idle unfocused pane; a sticky attach lease made every live
@@ -3793,7 +3898,7 @@ fn run_interactive(
     let mut log_wake = if poll_fallback {
         None
     } else {
-        match LogPaintWake::start(opts.socket.clone(), pane_id) {
+        match LogPaintWake::start(opts.socket.clone(), *pane_id) {
             Ok(wake) => Some(wake),
             Err(error) => {
                 eprintln!(
@@ -3805,7 +3910,7 @@ fn run_interactive(
     };
     let mut toast_until = Instant::now() + ATTACH_TOAST_LINGER;
     let mut toast_was_live = true;
-    let raw = RawTerminal::enter()?;
+
     // Disable wrap before the first paint so a full-width first frame cannot
     // trip the outer terminal.
     {
@@ -3831,16 +3936,15 @@ fn run_interactive(
         ..ScrollState::default()
     };
     let mut previous = {
-        let frame = read_frame(client, client_id, pane_id, None)?;
+        let frame = read_frame(client, client_id, *pane_id, None)?;
         if !frame.content.child_alive {
-            drop(raw);
-            return Ok((AttachEnd::ChildExited, session_name, pane_id));
+            return Ok((AttachEnd::ChildExited, session_name, *pane_id));
         }
         scroll.apply_frame_flags(&frame);
         if let Some(size) = last_size {
             if keep_request_ok(
                 "Resize",
-                pane_id,
+                *pane_id,
                 session_name.as_deref(),
                 client.request(|request_id| {
                     resize_request(request_id, window_id, size, client_id, opts.fit, false)
@@ -3858,7 +3962,7 @@ fn run_interactive(
         scroll.anchor_to(frame.max_view_scroll);
         let _ = drain_events(
             client,
-            pane_id,
+            *pane_id,
             window_id,
             client_id,
             &mut event_seq,
@@ -3897,6 +4001,7 @@ fn run_interactive(
         )?;
         Some(frame)
     };
+    on_first_paint();
     let mut prev_mail = Some(mail_depth);
     // --write then interactive starts already holding the lease. Seed the
     // idle timer so InjectMail is not blocked until the first key.
@@ -3909,7 +4014,7 @@ fn run_interactive(
     let native_input = windows_terminal::Input::new()?;
     let mut host_focus = prismattyc_mux::attach_focus::Reporter::new(&opts.socket);
     let end = loop {
-        if host_focus.update(pane_id) {
+        if host_focus.update(*pane_id) {
             break AttachEnd::Detached;
         }
         #[cfg(unix)]
@@ -3962,7 +4067,7 @@ fn run_interactive(
                         &mut loop_input_ctx(
                             client,
                             client_id,
-                            pane_id,
+                            *pane_id,
                             window_id,
                             session_name.as_deref(),
                             &mut sync_input,
@@ -3996,7 +4101,7 @@ fn run_interactive(
                             match retarget_interactive(
                                 client,
                                 client_id,
-                                &mut pane_id,
+                                pane_id,
                                 &mut window_id,
                                 &mut session_name,
                                 &mut controller,
@@ -4025,7 +4130,7 @@ fn run_interactive(
                                     previous = None;
                                     if !poll_fallback {
                                         log_wake =
-                                            LogPaintWake::start(opts.socket.clone(), pane_id).ok();
+                                            LogPaintWake::start(opts.socket.clone(), *pane_id).ok();
                                     }
                                 }
                                 Err(error) => {
@@ -4039,7 +4144,7 @@ fn run_interactive(
                                     &mut loop_input_ctx(
                                         client,
                                         client_id,
-                                        pane_id,
+                                        *pane_id,
                                         window_id,
                                         session_name.as_deref(),
                                         &mut sync_input,
@@ -4073,7 +4178,7 @@ fn run_interactive(
                         if let Some(size) = last_size {
                             if keep_request_ok(
                                 "Resize",
-                                pane_id,
+                                *pane_id,
                                 session_name.as_deref(),
                                 client.request(|request_id| {
                                     resize_request(
@@ -4105,7 +4210,7 @@ fn run_interactive(
         handle_idle_escape(
             client,
             client_id,
-            pane_id,
+            *pane_id,
             window_id,
             session_name.as_deref(),
             got_input,
@@ -4125,7 +4230,7 @@ fn run_interactive(
         maybe_idle_release_lease(
             client,
             client_id,
-            pane_id,
+            *pane_id,
             session_name.as_deref(),
             &mut controller,
             got_input,
@@ -4136,7 +4241,7 @@ fn run_interactive(
         apply_local_winsize(
             client,
             client_id,
-            pane_id,
+            *pane_id,
             window_id,
             session_name.as_deref(),
             &mut last_size,
@@ -4147,7 +4252,7 @@ fn run_interactive(
 
         let event_changed = drain_events(
             client,
-            pane_id,
+            *pane_id,
             window_id,
             client_id,
             &mut event_seq,
@@ -4191,7 +4296,7 @@ fn run_interactive(
         } else {
             None
         };
-        let frame = read_frame(client, client_id, pane_id, request_offset)?;
+        let frame = read_frame(client, client_id, *pane_id, request_offset)?;
         if !frame.content.child_alive {
             cycle_names.retain(|name| Some(name.as_str()) != session_name.as_deref());
             if let Some(target) =
@@ -4205,7 +4310,7 @@ fn run_interactive(
                 let _ = retarget_interactive(
                     client,
                     client_id,
-                    &mut pane_id,
+                    pane_id,
                     &mut window_id,
                     &mut session_name,
                     &mut controller,
@@ -4229,7 +4334,7 @@ fn run_interactive(
                 );
                 previous = None;
                 if !poll_fallback {
-                    log_wake = LogPaintWake::start(opts.socket.clone(), pane_id).ok();
+                    log_wake = LogPaintWake::start(opts.socket.clone(), *pane_id).ok();
                 }
                 continue;
             }
@@ -4246,7 +4351,7 @@ fn run_interactive(
         let offset_changed = prior_offset != scroll.offset || prior_active != scroll.active;
         // Re-read if anchoring moved the window so we paint the stable view.
         let mut frame = if offset_changed && scroll.active {
-            let frame = read_frame(client, client_id, pane_id, Some(scroll.offset))?;
+            let frame = read_frame(client, client_id, *pane_id, Some(scroll.offset))?;
             scroll.apply_frame_flags(&frame);
             frame
         } else {
@@ -4257,7 +4362,7 @@ fn run_interactive(
             scroll.pending_clipboard = Some(text);
             scroll.leave();
             previous = None;
-            frame = read_frame(client, client_id, pane_id, None)?;
+            frame = read_frame(client, client_id, *pane_id, None)?;
             scroll.apply_frame_flags(&frame);
         }
         if event_changed
@@ -4267,7 +4372,7 @@ fn run_interactive(
                     || offset_changed
             })
         {
-            if host_focus.update(pane_id) {
+            if host_focus.update(*pane_id) {
                 break AttachEnd::Detached;
             }
             let toast = toast_live.then(|| {
@@ -4307,20 +4412,19 @@ fn run_interactive(
     if controller {
         let _ = keep_request_ok(
             "ReleaseLease",
-            pane_id,
+            *pane_id,
             session_name.as_deref(),
             client.request(|request_id| ControlRequest::ReleaseLease {
                 version: PROTOCOL_VERSION,
                 request_id,
                 client_id,
-                pane_id,
+                pane_id: *pane_id,
             }),
         );
     }
     drop(log_wake);
-    drop(raw);
     flush_read_frame_count();
-    Ok((end, session_name, pane_id))
+    Ok((end, session_name, *pane_id))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5313,6 +5417,140 @@ fn dump_styled_json(client: &mut Client, client_id: u64, pane_id: u64, watch: bo
     Ok(())
 }
 
+#[derive(Debug)]
+struct AttachDisconnected;
+
+impl std::fmt::Display for AttachDisconnected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("attach control connection lost")
+    }
+}
+
+// A live update execs in place. Compare the connected socket peers before
+// registering: a replacement daemon at this path can reuse numeric pane IDs.
+#[cfg(target_os = "linux")]
+fn peer_pid(stream: &UnixStream) -> Option<i32> {
+    rustix::net::sockopt::socket_peercred(stream)
+        .ok()
+        .map(|cred| cred.pid.as_raw_nonzero().get())
+}
+
+#[cfg(target_os = "macos")]
+fn peer_pid(stream: &UnixStream) -> Option<i32> {
+    use std::os::fd::AsRawFd;
+    let mut pid: libc::pid_t = 0;
+    let mut len = std::mem::size_of_val(&pid) as libc::socklen_t;
+    // SAFETY: the socket is live and both output pointers refer to sized locals.
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERPID,
+            (&mut pid as *mut libc::pid_t).cast(),
+            &mut len,
+        )
+    };
+    (result == 0 && pid > 0).then_some(pid)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn peer_pid(_: &UnixStream) -> Option<i32> {
+    None
+}
+
+fn reconnect_once(socket: &PathBuf, pid: i32, pane_id: u64) -> Result<(Client, u64, Snapshot)> {
+    let mut client = Client::connect(socket)?;
+    if peer_pid(&client.writer) != Some(pid) {
+        bail!("attach server was replaced");
+    }
+    let id = client.register()?;
+    let snapshot = take_snapshot(&mut client)?;
+    let session_id =
+        pane_session_id(&snapshot, pane_id).context("attached pane no longer exists")?;
+    client.request(|request_id| ControlRequest::SwitchSession {
+        version: PROTOCOL_VERSION,
+        request_id,
+        client_id: id,
+        session_id,
+    })?;
+    Ok((client, id, snapshot))
+}
+
+fn reconnect_attach(socket: &PathBuf, pid: i32, pane_id: u64) -> Result<(Client, u64, Snapshot)> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match reconnect_once(socket, pid, pane_id) {
+            Err(err) if Instant::now() < deadline && reconnect_pending(&err) => {
+                thread::sleep(Duration::from_millis(50));
+            }
+            result => return result.with_context(|| format!("reattach to pane {pane_id}")),
+        }
+    }
+}
+
+fn reconnect_pending(err: &anyhow::Error) -> bool {
+    err.is::<AttachDisconnected>()
+        || err.downcast_ref::<io::Error>().is_some_and(|e| {
+            matches!(
+                e.kind(),
+                io::ErrorKind::ConnectionRefused
+                    | io::ErrorKind::NotFound
+                    | io::ErrorKind::TimedOut
+                    | io::ErrorKind::WouldBlock
+            )
+        })
+}
+
+fn attach_interactive(
+    mut client: Client,
+    mut client_id: u64,
+    mut snapshot: Snapshot,
+    mut pane_id: u64,
+    cli: &Cli,
+    mut wrote: bool,
+) -> Result<(AttachEnd, Option<String>, u64)> {
+    let pid = peer_pid(&client.writer);
+    let _raw = RawTerminal::enter()?;
+    let mut can_reconnect = true;
+    loop {
+        let window_id = pane_window(&snapshot, pane_id)
+            .context("selected pane has no window in the snapshot")?;
+        let options = InteractiveOpts {
+            socket: cli.socket.clone(),
+            already_controller: wrote,
+            mail_depth: pane_mail_depth(&snapshot, pane_id),
+            attention: pane_attention(&snapshot, pane_id),
+            sync_input: pane_sync_input(&snapshot, pane_id).unwrap_or(false),
+            pane_status: pane_guest_status(&snapshot, pane_id),
+            event_seq: snapshot.sequence,
+            session_name: pane_session_name(&snapshot, pane_id).map(str::to_string),
+            space_name: cli.space.clone(),
+            read_only: cli.read_only,
+            lease_held: pane_controller_id(&snapshot, pane_id).is_some_and(|id| id != client_id),
+            fit: cli.fit,
+        };
+
+        match run_interactive(
+            &mut client,
+            client_id,
+            &mut pane_id,
+            window_id,
+            options,
+            || can_reconnect = true,
+        ) {
+            Err(err) if can_reconnect && err.is::<AttachDisconnected>() => {
+                let Some(pid) = pid else { return Err(err) };
+                (client, client_id, snapshot) = reconnect_attach(&cli.socket, pid, pane_id)?;
+                // Registration can succeed while the first frame still fails.
+                // Only a usable connection earns another recovery attempt.
+                can_reconnect = false;
+                wrote = false;
+            }
+            result => return result,
+        }
+    }
+}
+
 fn main() -> Result<()> {
     prismattyc_mux::release_update::forward_installed("pmux-attach")?;
     let cli = Cli::parse(std::env::args().skip(1))?;
@@ -5415,30 +5653,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
     if interactive {
-        let window_id = pane_window(&snapshot, pane_id)
-            .context("selected pane has no window in the snapshot")?;
-        let session_name = pane_session_name(&snapshot, pane_id).map(str::to_string);
-        match run_interactive(
-            &mut client,
-            client_id,
-            pane_id,
-            window_id,
-            InteractiveOpts {
-                socket: cli.socket.clone(),
-                already_controller: wrote,
-                mail_depth: pane_mail_depth(&snapshot, pane_id),
-                attention: pane_attention(&snapshot, pane_id),
-                sync_input: pane_sync_input(&snapshot, pane_id).unwrap_or(false),
-                pane_status: pane_guest_status(&snapshot, pane_id),
-                event_seq: snapshot.sequence,
-                session_name: session_name.clone(),
-                space_name: cli.space.clone(),
-                read_only: cli.read_only,
-                lease_held: pane_controller_id(&snapshot, pane_id)
-                    .is_some_and(|id| id != client_id),
-                fit: cli.fit,
-            },
-        )? {
+        match attach_interactive(client, client_id, snapshot, pane_id, &cli, wrote)? {
             (AttachEnd::Detached, name, pane) => match name.as_deref() {
                 Some(name) => {
                     eprintln!("[detached] session {name}; pane {pane} still running")
@@ -5807,6 +6022,11 @@ mod tests {
                 !try_host_route_after_resolve(&interactive, &snapshot, 1).unwrap(),
                 "unknown pane"
             );
+            // A live host that never acknowledges: the route is an error,
+            // not a success, so the command exits nonzero.
+            let error = try_host_route_after_resolve(&interactive, &snapshot, 42)
+                .expect_err("a missing acknowledgement must fail");
+            assert!(error.to_string().contains("did not confirm"), "{error:#}");
             prismattyc_mux::unregister_host_pid(
                 &prismattyc_mux::host_pid_path_from_socket(&socket),
                 live,

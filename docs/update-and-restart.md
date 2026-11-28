@@ -128,8 +128,9 @@ hand its sessions to the new one. The new pmux server takes over each pane's
 terminal in the same process, so the programs in your panes keep running with
 their screens, scrollback and unsaved state. Nothing is restarted, and the
 result reports the server as updated live. App windows reconnect to their
-panes by themselves. A `pmux attach` running in another terminal ends when the
-server changes; attach again to continue.
+panes by themselves. An interactive `pmux attach` in another terminal also reconnects
+to its current pane, repaints the screen, and accepts input again. If the
+server process is replaced or the pane no longer exists, the attach ends.
 
 The old server checks first that the new one can take its sessions. If it
 cannot (an older release on either side, or a pane that does not pause in

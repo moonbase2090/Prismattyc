@@ -67,6 +67,44 @@ fn openpty(size: PtySize) -> anyhow::Result<(UnixMasterPty, UnixSlavePty)> {
     Ok((master, slave))
 }
 
+/// Adopt an open PTY master descriptor, such as one kept across an exec of the
+/// process that opened it (local patch 3). The descriptor is made close-on-exec
+/// and is closed when the returned master is dropped.
+pub fn adopt_master(fd: std::os::fd::OwnedFd) -> anyhow::Result<Box<dyn MasterPty + Send>> {
+    use std::os::fd::IntoRawFd;
+
+    let raw = fd.into_raw_fd();
+    let master = UnixMasterPty {
+        fd: PtyFd(unsafe { FileDescriptor::from_raw_fd(raw) }),
+        took_writer: RefCell::new(false),
+        tty_name: slave_name(raw),
+    };
+    cloexec(raw)?;
+    Ok(Box::new(master))
+}
+
+/// The slave device path of a PTY master.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn slave_name(master: RawFd) -> Option<PathBuf> {
+    let mut buf = [0 as std::ffi::c_char; 128];
+    if unsafe { libc::ioctl(master, libc::TIOCPTYGNAME as _, buf.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    let cstr = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) };
+    Some(PathBuf::from(OsStr::from_bytes(cstr.to_bytes())))
+}
+
+/// The slave device path of a PTY master.
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+fn slave_name(master: RawFd) -> Option<PathBuf> {
+    let mut buf = [0 as std::ffi::c_char; 128];
+    if unsafe { libc::ptsname_r(master, buf.as_mut_ptr(), buf.len()) } != 0 {
+        return None;
+    }
+    let cstr = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) };
+    Some(PathBuf::from(OsStr::from_bytes(cstr.to_bytes())))
+}
+
 impl PtySystem for UnixPtySystem {
     fn openpty(&self, size: PtySize) -> anyhow::Result<PtyPair> {
         let (master, slave) = openpty(size)?;

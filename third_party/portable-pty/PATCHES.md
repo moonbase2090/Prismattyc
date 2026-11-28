@@ -9,3 +9,7 @@ The original license is in LICENSE.md.
    applied with `dup2` (or a clear of close-on-exec when source and target are the
    same). This happens before `close_random_fds`, and that close keeps the target
    numbers open. The existing spawn path is unchanged when no mapping is given.
+3. `unix::adopt_master(fd)` (unix only). Wraps an already open PTY master
+   descriptor, for example one a process kept across its own exec, in the same
+   master type `openpty` returns. It sets close-on-exec and reads the slave path
+   with `TIOCPTYGNAME` (macOS) or `ptsname_r` (other unix).

@@ -40,6 +40,20 @@ impl DaemonLock {
     /// A starter can own the instance before its socket is ready. Callers
     /// must wait for that owner instead of reporting their losing child as
     /// a failed startup. The probe never creates or removes the lock file.
+    /// The lock file's descriptor, for a live update to keep across its exec.
+    #[cfg(unix)]
+    pub(crate) fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        use std::os::fd::AsRawFd;
+        self.0.as_raw_fd()
+    }
+
+    /// The lock a previous server kept across a live update. Its flock is
+    /// already held by this process.
+    #[cfg(unix)]
+    pub(crate) fn inherited(fd: std::os::fd::OwnedFd) -> Self {
+        Self(File::from(fd))
+    }
+
     pub fn is_held(socket: &Path) -> io::Result<bool> {
         let file = match File::options()
             .read(true)

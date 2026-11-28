@@ -31,6 +31,11 @@ The daemon-exit case observes the real watcher's socket before stopping its
 owned daemon. Linux reads `/proc`; macOS reads the process FD list with
 `proc_pidinfo` and does not require a `/proc` mount.
 
+For interactive attach across a live server update on macOS or Linux, run
+`python3 tests/native/login-restore-e2e.py --bins "$verify_bins" --case live-update-attach`.
+It drives a real terminal, updates the private daemon, observes a fresh paint,
+and sends input through the original attach process to the surviving shell.
+
 ## Linux test portability
 
 When changing fake foreground-process metadata or the Linux CI runner, run:

@@ -1,6 +1,36 @@
 //! Complete render guard diagnostics. The legacy reason keeps its priority order.
-use super::{App, Duration, Instant, TransientOverlayState};
+use super::{App, Duration, HostState, Instant, TransientOverlayState};
 use std::fmt;
+
+fn settings_details(host: &HostState) -> Option<serde_json::Value> {
+    let panel = host.settings.as_ref()?;
+    let (title, rows) = panel.rows();
+    let status = rows
+        .iter()
+        .find(|row| matches!(row.kind, crate::palette::RowKind::Status(_)))
+        .map(|row| &row.name);
+    let actions: Vec<_> = rows
+        .iter()
+        .filter(|row| row.kind.focusable())
+        .enumerate()
+        .map(|(index, row)| {
+            let hit = host.palette_layout.as_ref().and_then(|layout| {
+                let row = layout.rows.iter().find(|row| row.global == index)?;
+                Some([
+                    layout.panel_x + layout.panel_w / 2,
+                    row.y + layout.geom.row_pitch_px / 2,
+                ])
+            });
+            serde_json::json!({"label": row.name, "detail": row.describe, "hit": hit})
+        })
+        .collect();
+    Some(serde_json::json!({
+        "title": title,
+        "selected": panel.selected(),
+        "rows": actions,
+        "status": status,
+    }))
+}
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn thread_cpu_time() -> Option<Duration> {
@@ -427,6 +457,10 @@ impl App {
                 "native_transport": native_transport_status(),
             });
             if let Some(status) = status.as_object_mut() {
+                status.insert(
+                    "settings_details".into(),
+                    settings_details(host).unwrap_or(serde_json::Value::Null),
+                );
                 status.insert("pump".into(), pump.clone());
                 status.insert("sidebar_rows".into(), serde_json::Value::Array(sidebar_rows));
                 status.insert("last_raster".into(), last_raster);

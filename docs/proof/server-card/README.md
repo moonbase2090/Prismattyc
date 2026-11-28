@@ -17,3 +17,6 @@ Checks, in order:
 3. Stop: `pmux stop` with the Space `work` open; after the grace, one card replaces the attached pane.
 4. Start: Enter starts the server; the card goes away and `work` stays current.
 5. Local shell: after another stop, the new-tab key opens a local shell; the card steps aside while the server stays stopped.
+
+`macos-5-local-shell.png` was captured again at efe4356c, with the test's
+neutral shell prompt.

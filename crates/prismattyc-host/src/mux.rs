@@ -1124,6 +1124,10 @@ pub(crate) struct PaneRuntime {
     visibility_storm: VisibilityStorm,
     /// Unfocused pane was streaming when focus left; badge once it goes quiet.
     finish_watch: bool,
+    /// Until then, content changes are the host's own doing (a resize it
+    /// asked for and the program's redraw, or the catch-up replay of an
+    /// attach), not new output: they do not badge the pane.
+    output_quiet_until: Option<Instant>,
     /// Latest agent-attention message for this pane until it is focused.
     pub(crate) attention: Option<String>,
     /// Server-reported size owner for the chip (PT-202).
@@ -1804,6 +1808,7 @@ impl PaneRuntime {
             self.cell_h,
         );
         self.log = Some(log);
+        self.output_quiet_until = Some(Instant::now() + QUIET_GAP);
         self.restore_state_seq = None;
         self.log_exit_reason = None;
         self.log_write_notice = None;
@@ -1900,6 +1905,7 @@ impl PaneRuntime {
             last_output_at: None,
             visibility_storm: VisibilityStorm::new(),
             finish_watch: false,
+            output_quiet_until: None,
             attention: None,
             size_owner: None,
             cell_w,
@@ -1995,6 +2001,7 @@ impl PaneRuntime {
     }
 
     fn resize_guest(&mut self, cols: usize, rows: usize) -> Result<()> {
+        self.output_quiet_until = Some(Instant::now() + QUIET_GAP);
         // AC4: a log-backed pane owns no PTY. Host geometry goes to the
         // server as `Resize`; the server logs it at its byte position and
         // the replica emulator follows when that event arrives, so the
@@ -4918,13 +4925,14 @@ impl MuxRuntime {
                         toasts.push((pane, label));
                     }
                     let prior_unseen = runtime.unseen_output;
+                    let host_caused = runtime.output_quiet_until.is_some_and(|until| now < until);
                     apply_unseen_v2(
                         &mut runtime.unseen_output,
                         &mut runtime.last_output_at,
                         &mut runtime.finish_watch,
                         now,
                         pane == focused,
-                        content_changed,
+                        content_changed && !host_caused,
                         bell,
                     );
                     dirty |= pane_dirty || runtime.unseen_output != prior_unseen;
@@ -9870,6 +9878,42 @@ mod tests {
         assert!(runtime.focus(second));
         assert!(!runtime.panes[&second].unseen_output);
         assert_eq!(runtime.unseen_count(), 0);
+    }
+
+    /// Output the host itself causes (a resize it asked for, as when a saved
+    /// floating pane is laid out again on reopen) does not badge a hidden pane;
+    /// real output after the quiet window still does.
+    #[cfg(unix)]
+    #[test]
+    fn a_resize_echo_does_not_badge_but_later_output_does() {
+        let mut runtime = MuxRuntime::spawn("/bin/sh", &[], 80, 24).unwrap();
+        let first = runtime.focused_id();
+        let second = runtime
+            .split_focused("/bin/sh", &[], Axis::Horizontal, 0.5)
+            .unwrap();
+        runtime.focus(first);
+        let pane = runtime.panes.get_mut(&second).unwrap();
+        pane.unseen_output = false;
+        pane.last_output_at = Some(Instant::now() - QUIET_GAP - Duration::from_millis(20));
+        pane.resize_guest(30, 20).unwrap();
+        pane.send_bytes(b"printf 'AFTER_RESIZE\n'\n".to_vec())
+            .unwrap();
+        drain_until(&mut runtime, "AFTER_RESIZE");
+        assert!(
+            !runtime.panes[&second].unseen_output,
+            "the host's own resize must not read as new output"
+        );
+
+        let pane = runtime.panes.get_mut(&second).unwrap();
+        pane.output_quiet_until = Some(Instant::now() - Duration::from_millis(1));
+        pane.last_output_at = Some(Instant::now() - QUIET_GAP - Duration::from_millis(20));
+        pane.send_bytes(b"printf 'REAL_OUTPUT\n'\n".to_vec())
+            .unwrap();
+        drain_until(&mut runtime, "REAL_OUTPUT");
+        assert!(
+            runtime.panes[&second].unseen_output,
+            "real output still badges"
+        );
     }
 
     #[test]

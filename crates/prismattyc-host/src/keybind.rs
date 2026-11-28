@@ -118,6 +118,9 @@ pub enum Action {
     /// Toggle the focused pane between its split slot and the whole tab
     /// (client-local view, PT-57).
     ZoomPane,
+    /// Lift the focused pane into a floating overlay, or dock the floating
+    /// pane back into its tile.
+    FloatPane,
     NewWindow,
     Quit,
     /// Open the host config in the user's editor. Unbound by default (PT-179).
@@ -241,6 +244,7 @@ impl Action {
             Action::ArrangeSplit,
             Action::ArrangeGrid,
             Action::ZoomPane,
+            Action::FloatPane,
             Action::NewWindow,
             Action::Quit,
             Action::OpenConfig,
@@ -340,6 +344,7 @@ impl Action {
             Action::ArrangeSplit => "arrange_split".into(),
             Action::ArrangeGrid => "arrange_grid".into(),
             Action::ZoomPane => "zoom_pane".into(),
+            Action::FloatPane => "float_pane".into(),
             Action::NewWindow => "new_window".into(),
             Action::Quit => "quit".into(),
             Action::OpenConfig => "open_config".into(),
@@ -463,6 +468,7 @@ impl Action {
             Action::ZoomPane => {
                 "zoom the focused pane to the whole tab; again restores the split".into()
             }
+            Action::FloatPane => "float the focused pane over its tile; again docks it back".into(),
             Action::NewWindow => "open a new OS window".into(),
             Action::Quit => "quit Prismattyc".into(),
             Action::OpenConfig => "edit the config file".into(),
@@ -558,6 +564,7 @@ impl Action {
             | Action::RotatePanesBack
             | Action::FocusLastPane
             | Action::ZoomPane
+            | Action::FloatPane
             | Action::MovePanePrevTab
             | Action::MovePaneNextTab
             | Action::BreakPane
@@ -641,6 +648,9 @@ impl Action {
             Action::ClosePane => Some("The last pane in a tab closes the tab."),
             Action::Detach => Some("The mux session keeps running; reattach later."),
             Action::ZoomPane => Some("Any split, move, or close leaves zoom."),
+            Action::FloatPane => {
+                Some("Docks the floating pane whichever pane has focus. A single pane stays tiled.")
+            }
             Action::SwapPanePrev | Action::SwapPaneNext => {
                 Some("Panes trade places; splits and ratios stay; focus follows the pane.")
             }
@@ -1261,6 +1271,7 @@ pub(crate) fn default_chords(action: Action) -> Vec<&'static str> {
         Action::BreakPane | Action::JoinPane => vec![],
         Action::MoveTabLeft | Action::MoveTabRight => vec![],
         Action::ZoomPane => vec!["ctrl+shift+z"],
+        Action::FloatPane => vec!["ctrl+alt+shift+f"],
         Action::PresetSingle
         | Action::PresetSplitH
         | Action::PresetSplitV
@@ -1633,6 +1644,15 @@ mod tests {
     }
 
     use super::*;
+
+    /// Float/Dock has a default chord and a config name, so it is listed with
+    /// the other bindings and on the pane menu row.
+    #[test]
+    fn float_pane_has_a_default_chord_and_name() {
+        assert_eq!(default_chords(Action::FloatPane), vec!["ctrl+alt+shift+f"]);
+        assert_eq!(Action::FloatPane.name(), "float_pane");
+        assert!(Action::all().contains(&Action::FloatPane));
+    }
 
     fn mods(ctrl: bool, shift: bool, alt: bool, sup: bool) -> ModifiersState {
         let mut m = ModifiersState::empty();

@@ -1463,6 +1463,28 @@ pub(crate) struct PaneHeader<'a> {
     /// The header handle (dot and name) is hovered: fill behind it and
     /// outline the pane (issue #109).
     pub handle_hover: bool,
+    /// The pane floats over its tile: a Dock button sits at the right of the
+    /// title row ([`pane_dock_rect`]).
+    pub dock: bool,
+}
+
+/// The label on a floating pane's Dock button.
+pub(crate) const DOCK_LABEL: &str = "Dock";
+
+/// Where a floating pane's Dock button sits in its title row, for painting
+/// and hit-testing alike. None when the pane is too narrow for it.
+pub(crate) fn pane_dock_rect(chrome: ChromeGeom, slot: Rect) -> Option<Rect> {
+    let s = |d: f32| d * chrome.scale_milli as f32 / 1000.0;
+    let head_h = chrome.px(PANE_HEADER_H).min(slot.h);
+    let w =
+        (text_width(Face::SemiBold, s(HEADER_TEXT), DOCK_LABEL) + s(10.0) * 2.0).ceil() as usize;
+    let h = head_h.saturating_sub(chrome.px(8.0));
+    if h == 0 || slot.w < w + chrome.px(120.0) {
+        return None;
+    }
+    let x = slot.right().saturating_sub(chrome.px(HEADER_PAD_X) / 2 + w);
+    let y = slot.y + head_h.saturating_sub(h) / 2;
+    Some(Rect::new(x, y, w, h))
 }
 
 // ---------------------------------------------------------------------------
@@ -1625,9 +1647,12 @@ pub(crate) fn paint_pane_chrome(
     x += s(HEADER_DOT) + s(INNER_GAP);
     let px = s(HEADER_TEXT);
     let status_w = status_width(chrome, header.status);
+    let dock = header.dock.then(|| pane_dock_rect(chrome, slot)).flatten();
+    // The Dock button takes the right end; status and name move left of it.
+    let dock_reserve = dock.map_or(0, |rect| slot.right() - rect.x + p(INNER_GAP));
     let text_end = slot
         .right()
-        .saturating_sub(p(HEADER_PAD_X) + status_w.ceil() as usize + p(INNER_GAP));
+        .saturating_sub(p(HEADER_PAD_X) + status_w.ceil() as usize + p(INNER_GAP) + dock_reserve);
     let (face, name_ink) = if focus_row {
         (Face::SemiBold, tok.text_strong)
     } else {
@@ -1658,8 +1683,24 @@ pub(crate) fn paint_pane_chrome(
             text_end,
         );
     }
-    // Status on the right.
-    let mut sx = slot.right() as f32 - s(HEADER_PAD_X) - status_w;
+    if let Some(rect) = dock {
+        fill_round_rect(buffer, stride, rect, s(6.0), tok.title_hover, 0xff);
+        let label_w = text_width(Face::SemiBold, px, DOCK_LABEL);
+        draw_text(
+            buffer,
+            stride,
+            rect.x as f32 + (rect.w as f32 - label_w) / 2.0,
+            cy,
+            Face::SemiBold,
+            px,
+            DOCK_LABEL,
+            tok.text_strong,
+            rect.x,
+            rect.right(),
+        );
+    }
+    // Status on the right (left of a Dock button).
+    let mut sx = slot.right() as f32 - s(HEADER_PAD_X) - status_w - dock_reserve as f32;
     let muted = if focus_row {
         tok.muted_focus
     } else {
@@ -4957,6 +4998,7 @@ mod tests {
                     status: PaneStatus::Focused,
                     focused: true,
                     handle_hover: false,
+                    dock: false,
                 },
                 true,
                 cycle,
@@ -5025,6 +5067,7 @@ mod tests {
                         status: PaneStatus::Focused,
                         focused: true,
                         handle_hover: false,
+                        dock: false,
                     },
                     true,
                     progress,
@@ -5072,6 +5115,7 @@ mod tests {
                     status: PaneStatus::decide(false, 0, false, false, focused),
                     focused,
                     handle_hover: false,
+                    dock: false,
                 },
                 true,
                 None,
@@ -5427,6 +5471,7 @@ mod tests {
                     status,
                     focused,
                     handle_hover: false,
+                    dock: false,
                 },
                 true,
                 None,
@@ -5814,6 +5859,7 @@ mod tests {
                     status: PaneStatus::Quiet,
                     focused: false,
                     handle_hover,
+                    dock: false,
                 },
                 false,
                 None,
@@ -5830,6 +5876,62 @@ mod tests {
             "hover outline reaches the frame"
         );
         assert!(!rest.contains(&outline), "rest keeps the hairline");
+    }
+
+    /// A floating pane's title row carries a Dock button at its right end,
+    /// where hit-testing finds it; other panes and narrow panes have none.
+    #[test]
+    fn a_floating_pane_title_row_carries_a_dock_button() {
+        let chrome = scale(1000);
+        let (w, h) = (400usize, 200usize);
+        let slot = Rect::new(20, 20, 360, 160);
+        let paint = |dock: bool| {
+            let mut buffer = vec![crate::raster::pack_argb(0xff, DARK.ground); w * h];
+            paint_pane_chrome(
+                &mut buffer,
+                w,
+                chrome,
+                &DARK,
+                rgb(0x5aa2ff),
+                slot,
+                rgb(0x121214),
+                &PaneHeader {
+                    name: "notes",
+                    meta: None,
+                    dot: Dot::Idle,
+                    status: PaneStatus::Running,
+                    focused: false,
+                    handle_hover: false,
+                    dock,
+                },
+                false,
+                None,
+                false,
+            );
+            buffer
+        };
+        let tiled = paint(false);
+        let floating = paint(true);
+        let button = pane_dock_rect(chrome, slot).expect("room for the button");
+        let head_h = chrome.px(PANE_HEADER_H);
+        assert!(button.y >= slot.y && button.y + button.h <= slot.y + head_h);
+        assert!(button.right() <= slot.right() && button.x > slot.x + slot.w / 2);
+        let fill = crate::raster::pack_argb(0xff, DARK.title_hover);
+        let inside = |buffer: &[u32]| {
+            (button.y..button.y + button.h)
+                .flat_map(|y| (button.x..button.right()).map(move |x| buffer[y * w + x]))
+                .filter(|pixel| *pixel == fill)
+                .count()
+        };
+        assert!(
+            inside(&floating) > button.w * button.h / 2,
+            "the button is painted where it is hit"
+        );
+        assert_eq!(inside(&tiled), 0, "a tiled pane has no Dock button");
+        assert!(
+            pane_dock_rect(chrome, Rect::new(0, 0, 90, 160)).is_none(),
+            "a narrow pane has no room for it"
+        );
     }
 
     #[test]

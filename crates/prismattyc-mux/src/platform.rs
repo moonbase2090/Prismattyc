@@ -1026,8 +1026,11 @@ pub fn spawn_detached(command: &mut std::process::Command) -> io::Result<std::pr
     }
 }
 
+/// Start `command` without handing it this process's own standard handles.
+/// A Windows child otherwise inherits every inheritable handle, so a
+/// long-lived child would keep this process's log file open after it exits.
 #[cfg(windows)]
-fn spawn_without_parent_stdio(
+pub(crate) fn spawn_without_parent_stdio(
     command: &mut std::process::Command,
 ) -> io::Result<std::process::Child> {
     use std::sync::Mutex;

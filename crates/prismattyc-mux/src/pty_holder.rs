@@ -867,12 +867,16 @@ mod windows {
             .stderr(Stdio::null());
         // Leave this server's job when allowed, so the holder can outlive it.
         let base_flags = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP;
+        // A holder outlives this server, so it must not inherit the server's
+        // standard handles (its log file, say) and keep them open.
         command.creation_flags(base_flags | CREATE_BREAKAWAY_FROM_JOB);
-        let mut holder = match prismattyc_process::spawn(&mut command) {
+        let mut holder = match crate::platform::spawn_without_parent_stdio(&mut command) {
             Ok(holder) => holder,
             // A job that forbids breakaway: start inside it.
-            Err(_) => prismattyc_process::spawn(command.creation_flags(base_flags))
-                .context("start pane holder")?,
+            Err(_) => {
+                crate::platform::spawn_without_parent_stdio(command.creation_flags(base_flags))
+                    .context("start pane holder")?
+            }
         };
         let holder_pid = holder.id();
         {

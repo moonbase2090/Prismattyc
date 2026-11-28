@@ -132,6 +132,19 @@ panes by themselves. An interactive `pmux attach` in another terminal also recon
 to its current pane, repaints the screen, and accepts input again. If the
 server process is replaced or the pane no longer exists, the attach ends.
 
+How an interactive attach recovers from a lost connection:
+
+- It retries for 5 seconds, counted from the moment it sees the connection
+  drop. Each try must reach the same server process (the update keeps its
+  process ID) and find the same pane.
+- A different server at the same socket ends the attach at once with
+  `attach server was replaced`, even if it reuses the pane's number. Keys
+  typed into that attach never reach the new server.
+- After one recovery, the attach must paint a frame before it can recover
+  again. A connection that registers but cannot paint ends the attach. A
+  server that paints and then drops again is followed again each time, still
+  only while it is the same process.
+
 The old server checks first that the new one can take its sessions. If it
 cannot (an older release on either side, or a pane that does not pause in
 time), nothing changes and the restart below runs instead. If the new server

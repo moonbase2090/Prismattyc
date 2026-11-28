@@ -953,6 +953,16 @@ pub enum ControlRequest {
         /// Registered client identity; same tier as session verbs (no pane lease).
         client_id: u64,
     },
+    /// Live update: hand every pane to `binary`, a newer pmuxd, which this
+    /// server then execs in its own process. The programs keep running.
+    /// Refused, with the server carrying on unchanged, when `binary` cannot
+    /// read this server's record or a pane does not stop in time. Unix only.
+    HandoffUpgrade {
+        version: u16,
+        request_id: u64,
+        client_id: u64,
+        binary: PathBuf,
+    },
     /// Atomically stop an empty daemon and reject later mutations.
     /// Separate verb so older daemons fail closed instead of ignoring a flag.
     ShutdownIdle {
@@ -1216,6 +1226,11 @@ impl ControlRequest {
                 request_id,
                 ..
             }
+            | Self::HandoffUpgrade {
+                version,
+                request_id,
+                ..
+            }
             | Self::CreateWindow {
                 version,
                 request_id,
@@ -1390,6 +1405,7 @@ impl ControlRequest {
             | Self::SwitchSession { client_id, .. }
             | Self::ShutdownIdle { client_id, .. }
             | Self::ShutdownServer { client_id, .. }
+            | Self::HandoffUpgrade { client_id, .. }
             | Self::SwitchWindow { client_id, .. }
             | Self::ReportFocus { client_id, .. }
             | Self::RaiseAttention { client_id, .. }
@@ -2334,6 +2350,12 @@ struct SessionAgentBinding {
 pub struct ControlPlane {
     activity: Option<crate::activity::ActivityFeed>,
     shutdown_pending: bool,
+    /// Panes given up for a live update, waiting for the exec.
+    #[cfg(unix)]
+    pending_handoff: Option<crate::handoff::PreparedHandoff>,
+    /// A live update took the panes. The pane-log checkpoint written just
+    /// before must not be replaced by the now empty runtime.
+    handed_over: bool,
     domain: Domain,
     active_clients: HashSet<ClientId>,
     client_spaces: HashMap<ClientId, String>,
@@ -2487,6 +2509,9 @@ impl ControlPlane {
         Ok(Self {
             activity: None,
             shutdown_pending: false,
+            #[cfg(unix)]
+            pending_handoff: None,
+            handed_over: false,
             domain,
             active_clients: HashSet::new(),
             client_spaces: HashMap::new(),
@@ -2819,6 +2844,51 @@ impl ControlPlane {
         plane.live = Some(live);
         plane.supervisor = hive_supervisor_from_env();
         Ok(plane)
+    }
+
+    /// The plane a live update hands over: the previous server's sessions,
+    /// with each pane's running program adopted from `panes`. A pane that
+    /// cannot be adopted starts its launch command again, as after a restart;
+    /// its id is returned so its program resume can run.
+    #[cfg(unix)]
+    pub(crate) fn new_adopted(
+        domain: Domain,
+        window_bounds: impl IntoIterator<Item = WindowBounds>,
+        pane_spawns: impl IntoIterator<Item = (u64, SpawnSpec)>,
+        mux_socket: PathBuf,
+        panes: Vec<(crate::handoff::PaneHandoff, std::os::fd::OwnedFd)>,
+    ) -> Result<(Self, Vec<u64>), ControlError> {
+        let mut plane = Self::new(domain, window_bounds, None)?;
+        plane.mux_socket = Some(mux_socket);
+        let mut spawns = HashMap::new();
+        for (pane_raw, spawn) in pane_spawns {
+            spawn.validate()?;
+            spawns.insert(pane_raw, spawn);
+        }
+        let (mut live, failed) = LiveRuntime::adopt_handoff(
+            panes,
+            plane.mux_socket.clone(),
+            std::sync::Arc::clone(&plane.pane_log_watch),
+        );
+        for (id, error) in failed {
+            eprintln!("pmuxd: pane {id} was not taken over ({error:#}); starting it again");
+        }
+        let mut respawned = Vec::new();
+        for pane in plane.all_geometry()? {
+            if live.has_pane(pane.pane_id) {
+                continue;
+            }
+            let spawn = spawns
+                .get(&pane.pane_id)
+                .ok_or_else(|| stale_id("pane", pane.pane_id))?;
+            live.spawn_pane(pane, spawn, None, None)
+                .map_err(live_internal_error)?;
+            respawned.push(pane.pane_id);
+        }
+        plane.spawn = spawns;
+        plane.live = Some(live);
+        plane.supervisor = hive_supervisor_from_env();
+        Ok((plane, respawned))
     }
 
     pub fn is_live(&self) -> bool {
@@ -3203,6 +3273,9 @@ impl ControlPlane {
     pub(crate) fn flush_pane_logs(&mut self) {
         // Shutdown must finish the older write before publishing the final state.
         self.pane_log_worker.take();
+        if self.handed_over {
+            return;
+        }
         self.pane_log_pending_mark = None;
         self.pane_log_capture = None;
         let Some(path) = self.pane_log_path.clone() else {
@@ -4458,6 +4531,89 @@ impl ControlPlane {
         crate::workspace::Workspace::capture(self, self.domain.next_ids())
     }
 
+    /// Stop every pane and give it up for a live update to `binary`. On any
+    /// failure the panes keep running here and the error says why.
+    #[cfg(unix)]
+    fn prepare_handoff(&mut self, binary: &Path) -> Result<(), ControlError> {
+        let refuse = |message: String| ControlError::new(ControlErrorCode::InvalidRequest, message);
+        if self.live.is_none() {
+            return Err(refuse("this server has no live panes to hand over".into()));
+        }
+        let probe = crate::handoff::probe(binary)
+            .map_err(|error| refuse(format!("live update refused: {error}")))?;
+        if !probe
+            .handoff_formats
+            .contains(&crate::handoff::HANDOFF_FORMAT)
+        {
+            return Err(refuse(format!(
+                "live update refused: pmuxd {} cannot read this server's record",
+                probe.package_version
+            )));
+        }
+        let live = self.live.as_mut().expect("checked above");
+        if let Err(error) = live.quiesce_for_handoff(crate::handoff::QUIESCE_TIMEOUT) {
+            let resumed = live.resume_after_handoff();
+            return Err(refuse(format!(
+                "live update refused: {error}{}",
+                resumed
+                    .err()
+                    .map(|error| format!("; reading did not resume: {error}"))
+                    .unwrap_or_default()
+            )));
+        }
+        let workspace = match self.saved_workspace() {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                let _ = self.live.as_mut().map(LiveRuntime::resume_after_handoff);
+                return Err(refuse(format!("live update refused: {error:#}")));
+            }
+        };
+        // The last checkpoint of every pane, written while the runtime still
+        // has them: if the new server never starts, the restore brings back
+        // this scrollback.
+        self.flush_pane_logs();
+        let live = self.live.as_mut().expect("checked above");
+        let panes = match live.export_handoff() {
+            Ok(panes) => panes,
+            Err(error) => {
+                let _ = live.resume_after_handoff();
+                // The flush above stopped the checkpoint worker; the panes stay
+                // here, so start it again (without reading the file back).
+                if self.pane_log_path.is_some() {
+                    self.pane_log_captured.clear();
+                    match PersistWorker::start() {
+                        Ok(worker) => self.pane_log_worker = Some(worker),
+                        Err(restart) => {
+                            eprintln!("pmuxd: pane-log checkpoints did not restart: {restart}")
+                        }
+                    }
+                }
+                return Err(refuse(format!("live update refused: {error:#}")));
+            }
+        };
+        self.handed_over = true;
+        self.pending_handoff = Some(crate::handoff::PreparedHandoff {
+            binary: binary.to_owned(),
+            workspace,
+            panes,
+        });
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn prepare_handoff(&mut self, _binary: &Path) -> Result<(), ControlError> {
+        Err(ControlError::new(
+            ControlErrorCode::InvalidRequest,
+            "live updates are not available on this platform",
+        ))
+    }
+
+    /// The panes given up by an accepted live update, once.
+    #[cfg(unix)]
+    pub(crate) fn take_handoff(&mut self) -> Option<crate::handoff::PreparedHandoff> {
+        self.pending_handoff.take()
+    }
+
     pub fn handle(&mut self, request: ControlRequest) -> ControlResponse {
         let (version, request_id) = request.header();
         if request_id == 0 {
@@ -5314,6 +5470,15 @@ impl ControlPlane {
                 ..
             } => {
                 let _ = self.require_active_client(client_raw)?;
+                Ok(ControlResponseData::ShutdownAccepted)
+            }
+            ControlRequest::HandoffUpgrade {
+                client_id, binary, ..
+            } => {
+                let _ = self.require_active_client(client_id)?;
+                self.prepare_handoff(&binary)?;
+                // Every later request is refused until the exec.
+                self.shutdown_pending = true;
                 Ok(ControlResponseData::ShutdownAccepted)
             }
             ControlRequest::CreateWindow {
@@ -7380,6 +7545,11 @@ impl ShutdownGate {
 /// control-plane mutex is released before any potentially blocking write.
 pub struct ControlServer {
     path: PathBuf,
+    /// A duplicate of the listening socket, for a live update to keep.
+    #[cfg(unix)]
+    listener_keep: Option<std::os::fd::OwnedFd>,
+    /// Set by a live update: the next server takes over the socket path.
+    keep_socket: bool,
     stop: Arc<AtomicBool>,
     shutdown: Arc<ShutdownGate>,
     accept_thread: Option<thread::JoinHandle<()>>,
@@ -7392,7 +7562,6 @@ pub struct ControlServer {
 impl ControlServer {
     pub fn bind(path: impl AsRef<Path>, plane: ControlPlane) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
-        let has_live_runtime = plane.is_live();
         #[cfg(windows)]
         crate::platform::require_private_directory(
             path.parent().unwrap_or_else(|| Path::new(".")),
@@ -7403,6 +7572,30 @@ impl ControlServer {
             let _ = fs::remove_file(&path);
             return Err(error);
         }
+        Self::serve(path, listener, plane)
+    }
+
+    /// Serve on a listener the previous server kept across a live update. The
+    /// socket path and its mode are already in place.
+    #[cfg(unix)]
+    pub fn bind_inherited(
+        path: PathBuf,
+        listener: std::os::unix::net::UnixListener,
+        plane: ControlPlane,
+    ) -> io::Result<Self> {
+        Self::serve(path, listener, plane)
+    }
+
+    fn serve(path: PathBuf, listener: UnixListener, plane: ControlPlane) -> io::Result<Self> {
+        let has_live_runtime = plane.is_live();
+        #[cfg(unix)]
+        let listener_keep = match listener.try_clone() {
+            Ok(keep) => Some(std::os::fd::OwnedFd::from(keep)),
+            Err(error) => {
+                let _ = fs::remove_file(&path);
+                return Err(error);
+            }
+        };
         if let Err(error) = listener.set_nonblocking(true) {
             let _ = fs::remove_file(&path);
             return Err(error);
@@ -7473,6 +7666,9 @@ impl ControlServer {
         };
         Ok(Self {
             path,
+            #[cfg(unix)]
+            listener_keep,
+            keep_socket: false,
             stop,
             shutdown,
             accept_thread: Some(accept_thread),
@@ -7500,6 +7696,41 @@ impl ControlServer {
     /// Block until a flushed `ShutdownAccepted` has requested process exit.
     pub fn wait_shutdown(&self) {
         self.shutdown.wait();
+    }
+
+    /// Whether the shutdown that ended [`ControlServer::wait_shutdown`] was an
+    /// accepted live update.
+    pub fn handoff_pending(&self) -> bool {
+        #[cfg(unix)]
+        {
+            self.plane
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .pending_handoff
+                .is_some()
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+
+    /// After a shutdown: when it was an accepted live update, stop serving
+    /// without removing the socket, and return the panes given up and the
+    /// listening socket for the next server. `None` for a plain shutdown.
+    #[cfg(unix)]
+    pub fn finish_for_handoff(
+        mut self,
+    ) -> Option<(crate::handoff::PreparedHandoff, std::os::fd::OwnedFd)> {
+        let handoff = self
+            .plane
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take_handoff()?;
+        let listener = self.listener_keep.take()?;
+        self.keep_socket = true;
+        drop(self);
+        Some((handoff, listener))
     }
 }
 
@@ -7542,7 +7773,9 @@ impl Drop for ControlServer {
         #[cfg(windows)]
         plane.close_live_panes();
         drop(plane);
-        remove_owned_socket(&self.path);
+        if !self.keep_socket {
+            remove_owned_socket(&self.path);
+        }
     }
 }
 
@@ -8351,14 +8584,14 @@ fn handle_client_loop(
         ) {
             state.snapshot_established = false;
         }
-        write_response(writer, &response, stop)?;
-        if matches!(
+        let accepted_shutdown = matches!(
             &response.body,
             ControlResponseBody::Ok {
                 response: ControlResponseData::ShutdownAccepted
             }
-        ) {
-            shutdown.request();
+        );
+        let written = write_response(writer, &response, stop);
+        if after_reply(written, accepted_shutdown, shutdown)? {
             return Ok(());
         }
     }
@@ -8448,6 +8681,23 @@ fn read_frame(reader: &mut BufReader<UnixStream>, frame: &mut Vec<u8>) -> io::Re
             }
             return Ok(true);
         }
+    }
+}
+
+/// What a connection does once a reply has been written (or failed). Returns
+/// true when the connection ends because the server is stopping. An accepted
+/// shutdown (or live update) has already committed the plane, so the process
+/// must go on even when the caller is gone and the reply could not be written.
+fn after_reply(
+    written: io::Result<()>,
+    accepted_shutdown: bool,
+    shutdown: &ShutdownGate,
+) -> io::Result<bool> {
+    if accepted_shutdown {
+        shutdown.request();
+        written.map(|()| true)
+    } else {
+        written.map(|()| false)
     }
 }
 
@@ -11651,6 +11901,35 @@ function Read-Exact([int]$Count) {
         );
         drop(server);
         assert!(!path.exists(), "server Drop must remove the owned socket");
+    }
+
+    /// An accepted shutdown (or live update) has already committed the plane,
+    /// so the server must stop even when the caller is gone and the
+    /// acknowledgement cannot be written.
+    #[test]
+    fn an_accepted_shutdown_proceeds_when_the_acknowledgement_cannot_be_written() {
+        let gate = ShutdownGate {
+            flag: Mutex::new(false),
+            cvar: Condvar::new(),
+        };
+        let broken = || Err(io::Error::from(io::ErrorKind::BrokenPipe));
+        assert!(after_reply(broken(), true, &gate).is_err());
+        assert!(
+            *gate.flag.lock().unwrap(),
+            "the server was not told to stop"
+        );
+
+        let quiet = ShutdownGate {
+            flag: Mutex::new(false),
+            cvar: Condvar::new(),
+        };
+        assert!(after_reply(broken(), false, &quiet).is_err());
+        assert!(
+            !*quiet.flag.lock().unwrap(),
+            "an ordinary reply stopped the server"
+        );
+        assert!(!after_reply(Ok(()), false, &quiet).unwrap());
+        assert!(after_reply(Ok(()), true, &quiet).unwrap());
     }
 
     #[test]

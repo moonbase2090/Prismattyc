@@ -6,6 +6,7 @@
 
 ### Added
 
+- On macOS and Linux, **Save and restart** keeps the programs in your sessions running through a pmux server update. The new pmux server takes over every pane in the same process, with its screen and scrollback, and app windows reconnect to it. If the new server cannot take the sessions, or does not start, the update restarts them as before and they come back from the saved workspace. `live_update = false` in `[mux]` turns this off. A `pmux attach` in another terminal still ends when the server changes. Windows is unchanged.
 - A pane can be lifted into a floating overlay from its menu and dragged inside the window. Dock puts it back in the tile. The overlay is saved with the space and shown again the first time that space's layout opens; a later move stays where it is. One pane stays tiled. The server's pane tree is unchanged.
 
 ### Removed

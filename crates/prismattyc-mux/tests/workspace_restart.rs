@@ -84,3 +84,28 @@ fn cli_only_install_stays_opted_out_after_saving_a_space_and_restarting() {
     assert_eq!(proof["first_space"], "still opted out");
     assert_eq!(proof["restart"], "still opted out");
 }
+
+#[test]
+fn a_live_update_keeps_running_programs_their_screens_and_input() {
+    let proof = run("live-update");
+    assert_eq!(proof["program"], "kept");
+    assert_eq!(proof["screen"], "kept");
+    assert_eq!(proof["restart"], "updated_live");
+}
+
+#[test]
+fn a_failed_live_update_leaves_the_server_or_restores_the_sessions() {
+    let proof = run("live-update-fallbacks");
+    assert_eq!(proof["probe_refused"], "unchanged");
+    assert_eq!(proof["exec_failed"], "restored");
+    assert_eq!(proof["import_failed"], "restored");
+}
+
+#[test]
+fn a_live_update_keeps_the_first_pane_with_either_launch_form() {
+    let proof = run("live-update-launch-forms");
+    assert_eq!(
+        proof["kept"],
+        serde_json::json!(["/bin/sh -i", "-- /bin/sh -i"])
+    );
+}

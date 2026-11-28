@@ -1635,6 +1635,18 @@ echo note >&2"#,
     }
 
     #[test]
+    fn a_captured_live_receipt_reads_as_kept_running() {
+        // Printed by `pmux restart --daemon --stop-sessions --consented-config
+        // ... --worker --json` after a live hand-over (live-update-result-e2e.py).
+        let receipt = r#"{"components":[{"component":"daemon","status":"updated_live","version":"0.3.81"},{"component":"sessions","lost":[],"restored":["default","alpha","beta"],"status":"restored"},{"changed":[],"component":"plugins","failures":[],"status":"reconciled"}],"status":"restart_results"}"#;
+        assert!(updated_live(receipt));
+        assert_eq!(
+            Restored::from_report(receipt).unwrap().summary(),
+            "3 sessions kept running through the update: default, alpha, beta."
+        );
+    }
+
+    #[test]
     fn a_live_resume_round_trips_and_an_older_resume_reads_as_restarted() {
         let kept = Restored {
             restored: vec!["work".into()],

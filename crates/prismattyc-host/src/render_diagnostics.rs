@@ -391,6 +391,7 @@ impl App {
                 "space_rail_position": host.spacing.space_rail.as_str(),
                 "space_undo_available": host.space_polish.undo.is_some(),
                 "space_picker_open": host.space_picker.is_some(),
+                "attach_picker": crate::attach_picker::status(host),
                 "space_open_pending": host.space_opens.busy(),
                 "last_space_open": host.last_space_open,
                 "space_chips": chips,

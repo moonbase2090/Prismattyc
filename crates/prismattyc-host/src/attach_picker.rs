@@ -205,6 +205,47 @@ pub(super) fn entry<'a>(host: &'a HostState, label: &str) -> Option<&'a Entry> {
         .find(|entry| entry.label == label)
 }
 
+/// The open picker as render-status reports it: rows in display order with
+/// their group, the selected row, the row awaiting a move confirmation, and
+/// the target Space. `None` when the picker is closed.
+pub(super) fn status(host: &HostState) -> Option<serde_json::Value> {
+    let picker = host
+        .space_picker
+        .as_ref()
+        .filter(|picker| picker.kind == SpacePickerKind::Attach)?;
+    let attach = host.attach_picker.as_ref()?;
+    let rows = rows(host);
+    let ranked = picker.ranked(&rows);
+    let listed: Vec<_> = ranked
+        .iter()
+        .filter_map(|row| entry(host, &row.name))
+        .map(|entry| {
+            serde_json::json!({
+                "name": entry.name,
+                "session": entry.session,
+                "group": entry.group.header(),
+                "action": entry.group.chord(),
+                "describe": entry.describe,
+            })
+        })
+        .collect();
+    let selected = ranked
+        .get(picker.selected)
+        .and_then(|row| entry(host, &row.name))
+        .map(|entry| entry.name.clone());
+    let confirm = picker
+        .confirm
+        .as_deref()
+        .and_then(|label| entry(host, label))
+        .map(|entry| confirm_text(entry, attach.space.as_deref()));
+    Some(serde_json::json!({
+        "space": attach.space,
+        "rows": listed,
+        "selected": selected,
+        "confirm": confirm,
+    }))
+}
+
 /// What the key that chose a row asks for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum How {

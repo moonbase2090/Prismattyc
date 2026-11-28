@@ -461,6 +461,14 @@ impl App {
                 crate::server_state::ServerState::Failed(message) => format!("failed: {message}").into(),
             };
             status["server_card"] = host.server_card_shown.into();
+            status["restore_prompt"] = crate::restore_prompt::status(host);
+            status["recent_toasts"] = host
+                .status_history
+                .newest_first()
+                .take(5)
+                .map(|entry| serde_json::json!({"kind": format!("{:?}", entry.kind), "text": entry.text}))
+                .collect::<Vec<_>>()
+                .into();
             if let Some(status) = status.as_object_mut() {
                 status.insert(
                     "settings_details".into(),

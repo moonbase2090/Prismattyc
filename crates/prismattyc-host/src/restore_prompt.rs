@@ -560,6 +560,24 @@ pub(super) fn sync_login_registration() {
     });
 }
 
+/// The open choice for render-status: its selection and each row's detail.
+pub(super) fn status(host: &HostState) -> serde_json::Value {
+    let Some(prompt) = host.restore_prompt.as_ref() else {
+        return serde_json::Value::Null;
+    };
+    let rows: Vec<_> = prompt
+        .rows()
+        .iter()
+        .map(|row| serde_json::json!({"label": row.name, "detail": row.describe}))
+        .collect();
+    serde_json::json!({
+        "selected": prompt.selected,
+        "rows": rows,
+        "starting": prompt.startup.is_some(),
+        "start_fresh_queued": prompt.declined,
+    })
+}
+
 pub(super) fn paint(host: &mut HostState, buffer: &mut [u32], width: usize, height: usize) {
     let Some(prompt) = host.restore_prompt.as_ref() else {
         return;

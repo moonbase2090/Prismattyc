@@ -7,6 +7,9 @@ Restore before the key arrives. The hold then runs the real client.
 
 Start fresh must leave an empty window, keep the saved session process
 alive, and drop that session's Space owner so it can be attached again.
+Esc while the held startup runs must show that Start fresh is queued. When
+the release fails (`fresh-release-fails`, the wrapper refuses `space
+remove`), the session stays in its Space and the app shows the failure.
 Restore must show the saved Space, tabs, and panes. Neither choice may
 kill the session. On Linux the script starts a private display and sends
 the keys to that host window.
@@ -125,6 +128,10 @@ class Fixture:
             'if [ "${1:-}" = "--socket" ] && [ "${3:-}" = "up" ] && [ "$hold" != "0" ]; then\n'
             f'  printf \'%s hold\\n\' "$(date +%s)" >> "{hold_log}"\n'
             '  sleep "$hold"\n'
+            "fi\n"
+            'if [ -n "${PMUX_FAIL_RELEASE:-}" ] && [ "${3:-}" = "space" ] && [ "${4:-}" = "remove" ]; then\n'
+            "  echo 'session is busy' >&2\n"
+            "  exit 1\n"
             "fi\n"
             f'exec "{real_pmux}" "$@"\n'
         )
@@ -377,9 +384,24 @@ def choose(f, before, key_code):
         wait_for(punch, "restore prompt accepted a key", timeout=12)
     except AssertionError:
         pass
+    queued = None
+    if key_code == Keys.ESCAPE and seen is not None:
+        def feedback():
+            prompt = (host_status(f) or {}).get("restore_prompt") or {}
+            rows = prompt.get("rows") or []
+            if (prompt.get("start_fresh_queued") and prompt.get("selected") == 1 and len(rows) == 2
+                    and rows[1]["detail"].startswith("Starting fresh once the pmux server has started")):
+                return prompt
+            return None
+        try:
+            queued = wait_for(feedback, "Esc during startup shows Start fresh is queued", timeout=6)
+        except AssertionError:
+            queued = None
     # The held `pmux up` lasts 8s from host start. Read state after it returns.
     time.sleep(9)
     after = observe(f, before)
+    after["queued_feedback"] = queued
+    after["recent_toasts"] = (host_status(f) or {}).get("recent_toasts") or []
     after["prompt_seen"] = seen is not None
     after["host_exit"] = host.poll()
     if seen:
@@ -406,6 +428,27 @@ def judge_fresh(after):
         failures.append("the choice was still open after the key")
     if not after["rail_has_saved_space"]:
         failures.append("Start fresh removed the saved Space from the rail")
+    if not after.get("queued_feedback"):
+        failures.append("Esc during startup did not show that Start fresh is queued")
+    return failures
+
+
+def judge_fresh_release_fails(after):
+    failures = []
+    if not after["prompt_seen"]:
+        failures.append("the launch choice never appeared")
+    if not after["session_alive"] or not after["same_process"]:
+        failures.append("a failed release killed or replaced the running session")
+    if after["detached"]:
+        failures.append("the wrapper refused the release, yet the session left its Space")
+    if after["host_space"] == "kept":
+        failures.append("the window still shows the saved Space")
+    if not after.get("queued_feedback"):
+        failures.append("Esc during startup did not show that Start fresh is queued")
+    shown = [toast for toast in after["recent_toasts"] if toast.get("kind") == "Error"
+             and "could not release a session from kept: shelf: session is busy" in toast.get("text", "")]
+    if not shown:
+        failures.append(f"the failed release was not shown: {after['recent_toasts']}")
     return failures
 
 
@@ -482,6 +525,10 @@ def run_case(binaries, choice, frames=None):
                 failures = judge_restore(after)
                 if after.get("key_sent", True):
                     failures.append("the slow answer sent a key")
+            elif choice == "fresh-release-fails":
+                fixture.env["PMUX_FAIL_RELEASE"] = "1"
+                after = choose(fixture, before, Keys.ESCAPE)
+                failures = judge_fresh_release_fails(after)
             else:
                 key = Keys.ESCAPE if choice == "fresh" else Keys.ENTER
                 after = choose(fixture, before, key)
@@ -501,7 +548,8 @@ def main():
     for name in ("prismattyc-host", "pmux", "pmuxd"):
         if not (binaries / name).is_file():
             raise SystemExit(f"missing binary {binaries / name}")
-    report = [run_case(binaries, choice, args.frames) for choice in ("fresh", "restore", "slow")]
+    report = [run_case(binaries, choice, args.frames)
+              for choice in ("fresh", "fresh-release-fails", "restore", "slow")]
     text = json.dumps(report, indent=2)
     print(text, flush=True)
     if args.out:

@@ -2339,6 +2339,23 @@ impl PtySession {
         })
     }
 
+    /// A session over a master and program that live somewhere else, such as
+    /// a Windows pane holder that owns the pseudoconsole. Output comes from
+    /// the master's reader; dropping the session kills the program through
+    /// `child` unless the session is abandoned first.
+    pub fn from_parts(
+        master: Box<dyn MasterPty + Send>,
+        child: Box<dyn Child + Send + Sync>,
+    ) -> Result<Self> {
+        let reader = master.try_clone_reader()?;
+        Ok(Self {
+            master,
+            child,
+            reader: Some(reader),
+            reaped: false,
+        })
+    }
+
     /// Take over a PTY master and the program on its slave from a process that
     /// kept the master open across an exec of itself (pmux server live update).
     ///
@@ -2695,6 +2712,144 @@ fn unread_input_bytes_on_tty(tty_name: &Path) -> Option<usize> {
         return None;
     }
     usize::try_from(queued).ok()
+}
+
+#[cfg(test)]
+mod from_parts_tests {
+    use super::PtySession;
+    use portable_pty::{Child, ChildKiller, ExitStatus, MasterPty, PtySize};
+    use std::io::{Read, Write};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct Shared {
+        output: Vec<u8>,
+        input: Vec<u8>,
+        size: Option<PtySize>,
+        kills: u32,
+    }
+
+    struct FakeMaster(Arc<Mutex<Shared>>);
+
+    struct SharedWriter(Arc<Mutex<Shared>>);
+    impl Write for SharedWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().input.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl MasterPty for FakeMaster {
+        fn resize(&self, size: PtySize) -> Result<(), anyhow::Error> {
+            self.0.lock().unwrap().size = Some(size);
+            Ok(())
+        }
+        fn get_size(&self) -> Result<PtySize, anyhow::Error> {
+            Ok(self.0.lock().unwrap().size.unwrap_or_default())
+        }
+        fn try_clone_reader(&self) -> Result<Box<dyn Read + Send>, anyhow::Error> {
+            Ok(Box::new(std::io::Cursor::new(
+                self.0.lock().unwrap().output.clone(),
+            )))
+        }
+        fn take_writer(&self) -> Result<Box<dyn Write + Send>, anyhow::Error> {
+            Ok(Box::new(SharedWriter(self.0.clone())))
+        }
+        #[cfg(unix)]
+        fn process_group_leader(&self) -> Option<libc::pid_t> {
+            None
+        }
+        #[cfg(unix)]
+        fn as_raw_fd(&self) -> Option<portable_pty::unix::RawFd> {
+            None
+        }
+        #[cfg(unix)]
+        fn tty_name(&self) -> Option<std::path::PathBuf> {
+            None
+        }
+    }
+
+    #[derive(Debug)]
+    struct FakeChild(Arc<Mutex<Shared>>);
+    impl std::fmt::Debug for Shared {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("Shared")
+        }
+    }
+    impl ChildKiller for FakeChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.0.lock().unwrap().kills += 1;
+            Ok(())
+        }
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            Box::new(FakeChild(self.0.clone()))
+        }
+    }
+    impl Child for FakeChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+            let killed = self.0.lock().unwrap().kills > 0;
+            Ok(killed.then(|| ExitStatus::with_exit_code(1)))
+        }
+        fn wait(&mut self) -> std::io::Result<ExitStatus> {
+            Ok(ExitStatus::with_exit_code(1))
+        }
+        fn process_id(&self) -> Option<u32> {
+            Some(4242)
+        }
+        #[cfg(windows)]
+        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+            None
+        }
+    }
+
+    fn session(shared: &Arc<Mutex<Shared>>) -> PtySession {
+        PtySession::from_parts(
+            Box::new(FakeMaster(shared.clone())),
+            Box::new(FakeChild(shared.clone())),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_session_from_parts_reads_writes_and_resizes_through_them() {
+        let shared = Arc::new(Mutex::new(Shared {
+            output: b"from the holder".to_vec(),
+            ..Shared::default()
+        }));
+        let mut pty = session(&shared);
+        let mut read = Vec::new();
+        pty.take_reader().unwrap().read_to_end(&mut read).unwrap();
+        assert_eq!(read, b"from the holder");
+        pty.take_input_writer().unwrap().write_all(b"ls\r").unwrap();
+        assert_eq!(shared.lock().unwrap().input, b"ls\r");
+        let size = PtySize {
+            rows: 30,
+            cols: 100,
+            pixel_width: 800,
+            pixel_height: 600,
+        };
+        pty.resize(size).unwrap();
+        assert_eq!(shared.lock().unwrap().size, Some(size));
+        assert_eq!(pty.process_id(), Some(4242));
+    }
+
+    #[test]
+    fn dropping_a_session_from_parts_kills_the_program_once_unless_abandoned() {
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        drop(session(&shared));
+        assert_eq!(shared.lock().unwrap().kills, 1);
+
+        let kept = Arc::new(Mutex::new(Shared::default()));
+        assert_eq!(session(&kept).abandon(), Some(4242));
+        assert_eq!(
+            kept.lock().unwrap().kills,
+            0,
+            "a handed-off program keeps running"
+        );
+    }
 }
 
 #[cfg(test)]

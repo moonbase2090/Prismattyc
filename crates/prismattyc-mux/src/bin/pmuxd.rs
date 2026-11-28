@@ -174,6 +174,13 @@ MovePane can change session without respawn.
 }
 
 fn main() -> Result<()> {
+    // A pane holder: own one pane's pseudoconsole and program (Windows).
+    if std::env::args().nth(1).as_deref() == Some("--pty-holder") {
+        #[cfg(windows)]
+        return prismattyc_mux::pty_holder::run_holder();
+        #[cfg(not(windows))]
+        anyhow::bail!("pane holders are Windows only");
+    }
     if prismattyc_mux::plugins::print_bundled_identity()? {
         return Ok(());
     }

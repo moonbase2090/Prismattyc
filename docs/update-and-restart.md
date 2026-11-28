@@ -153,6 +153,26 @@ fails to start after the hand-over, the sessions come back from the saved
 workspace as after a restart. Set `live_update = false` in the `[mux]` section
 of the config file to always restart instead. Windows always restarts.
 
+### Pane holders on Windows
+
+On Windows each pane's console and program run in a small pane holder
+process (`pmuxd --pty-holder`) instead of inside the pmux server. A Windows
+console cannot move from one process to another, so this is what will let a
+future server update keep Windows programs running. Today Windows still
+restarts the sessions on an update.
+
+- The server talks to each holder over a named pipe that only your user can
+  open and that refuses connections from other machines.
+- When the server stops, crashes, or loses its pipe, the holder ends its
+  program after a few seconds, as a pane always ended with the server before.
+- Each holder runs the `pmuxd.exe` of the release that started it. Updates
+  install every release into its own folder and never delete one, so a
+  running holder never blocks an update.
+
+To run panes inside the server instead, set `pty_holder = false` in the
+`[mux]` section of the config file. New panes follow the setting; panes that
+already run keep how they started.
+
 ## Restarting the sessions
 
 With **Save and restart**, when the sessions are not handed over, the updater

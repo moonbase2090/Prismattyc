@@ -40,7 +40,11 @@ pub fn secure_directory(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(all(windows, test))]
+pub(crate) use windows::current_user_sid;
+#[cfg(all(windows, test))]
 pub(crate) use windows::private_to_user;
+#[cfg(windows)]
+pub(crate) use windows::UserOnlyDescriptor;
 #[cfg(windows)]
 pub use windows::{
     grant_installer_access, owned_socket, process_alive, require_private_directory,
@@ -77,6 +81,48 @@ mod windows {
             }
         }
     }
+    /// A security descriptor that grants only the current user, protected
+    /// from inherited entries. For named pipes a pmux server and its pane
+    /// holders share. The descriptor lives as long as this value.
+    pub(crate) struct UserOnlyDescriptor(Local);
+
+    impl UserOnlyDescriptor {
+        pub(crate) fn new() -> io::Result<Self> {
+            let sid = user_sid()?;
+            let sddl = wide(std::ffi::OsStr::new(&format!("D:P(A;;GA;;;{sid})")));
+            let mut sd = ptr::null_mut();
+            // SAFETY: `sddl` is NUL-terminated; on success `sd` is a
+            // LocalAlloc'd descriptor that `Local` frees.
+            if unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    sddl.as_ptr(),
+                    SDDL_REVISION_1,
+                    &mut sd,
+                    ptr::null_mut(),
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(Self(Local(sd)))
+        }
+
+        /// Attributes that apply this descriptor and are not inherited.
+        pub(crate) fn attributes(&self) -> SECURITY_ATTRIBUTES {
+            SECURITY_ATTRIBUTES {
+                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: self.0 .0,
+                bInheritHandle: 0,
+            }
+        }
+    }
+
+    /// The current user's SID as a string, for tests.
+    #[cfg(test)]
+    pub(crate) fn current_user_sid() -> io::Result<String> {
+        user_sid()
+    }
+
     fn user_sid() -> io::Result<String> {
         unsafe {
             let mut token = ptr::null_mut();
@@ -980,8 +1026,11 @@ pub fn spawn_detached(command: &mut std::process::Command) -> io::Result<std::pr
     }
 }
 
+/// Start `command` without handing it this process's own standard handles.
+/// A Windows child otherwise inherits every inheritable handle, so a
+/// long-lived child would keep this process's log file open after it exits.
 #[cfg(windows)]
-fn spawn_without_parent_stdio(
+pub(crate) fn spawn_without_parent_stdio(
     command: &mut std::process::Command,
 ) -> io::Result<std::process::Child> {
     use std::sync::Mutex;

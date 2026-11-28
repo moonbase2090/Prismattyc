@@ -203,6 +203,7 @@ fn timing(key: &str) -> &'static str {
         "mux.shell" => "Next shell selection",
         "mux.resume_trusted" | "mux.resume_allow_elevated" => "Next pmux server start",
         "mux.live_update" => "Next Save and restart",
+        "mux.pty_holder" => "Next new pane",
         "window_opacity" | "chrome_opacity" => {
             "Live with alpha support; opaque non-macOS windows may need restart"
         }
@@ -387,6 +388,7 @@ pub(super) fn catalog() -> Vec<Control> {
         row(Section::Mux, "mux.resume_trusted", Kind::Strings),
         row(Section::Mux, "mux.resume_allow_elevated", Kind::Bool),
         row(Section::Mux, "mux.live_update", Kind::Bool),
+        row(Section::Mux, "mux.pty_holder", Kind::Bool),
     ];
     for row in &mut rows {
         if matches!(row.kind, Kind::Pair) {

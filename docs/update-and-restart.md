@@ -56,18 +56,21 @@ also saves a snapshot first and reports where it was written or why it was not.
 Choose **Update and restart all components** in the update panel. The app
 checks the latest release and opens **Restart to update** with the installed
 and new versions (or **Restart components** when you already have the newest
-release). Restarting stops all programs in the running sessions and restarts
-the app, including local terminals. Save unsaved work in your programs first.
+release). Restarting the app restarts its local terminals. With **Save and
+restart** on macOS and Linux the programs in your sessions keep running (see
+[Keeping programs running](#keeping-programs-running)); otherwise restarting
+stops them. Save unsaved work in your programs first.
 
 The footer counts the running sessions. Choose **Show** (click it, or move to
 it and press Enter) to list their names, and **Hide** to fold the list again.
 
 Choose one of these actions:
 
-- **Save and restart** keeps your sessions. After the restart they come back
-  by themselves, with their names, split panes, working directories, Space
-  ownership, agent bindings, and scrollback, and their programs start again.
-  A session configuration file is also saved.
+- **Save and restart** keeps your sessions. On macOS and Linux the new pmux
+  server takes them over with their programs still running. When it cannot,
+  they come back by themselves after the restart, with their names, split
+  panes, working directories, Space ownership, agent bindings, and scrollback,
+  and their programs start again. A session configuration file is also saved.
 - **Restart without saving** updates and restarts without keeping the
   sessions. They are discarded.
 - **Cancel** (or Esc) leaves the sessions and running components alone.
@@ -89,11 +92,13 @@ is still running the old release. A missing MCP server is reported as having not
 
 While it runs, the dialog shows each step: the session check, the download,
 verification, installation, and each step of the restart. With **Save and
-restart** the restart steps are Saving the sessions, Stopping the old daemon,
-Starting the new daemon, Checking the restored sessions, Reconciling the
-official plug-ins, Restarting the MCP adapter, Relaunching the app and
-Opening the windows; **Restart without saving** stops the sessions instead
-of saving them and has no check. The relaunched app continues the same
+restart** on macOS and Linux the restart steps are Saving the sessions,
+Handing the sessions to the new pmux server, Checking the restored sessions,
+Reconciling the official plug-ins, Restarting the MCP adapter, Relaunching the
+app and Opening the windows. If the hand-over cannot happen, Stopping the old
+daemon and Starting the new daemon follow it, and on Windows they replace it.
+**Restart without saving** stops the sessions instead of saving them and has
+no check. The relaunched app continues the same
 meter, takes the last step, and shows **Update finished** (or **Restart
 finished**) with one line for each step's outcome. Enter or Esc closes it;
 the result panel stays open beside it. If a step fails, the dialog stays on
@@ -116,8 +121,27 @@ On macOS, the updater keeps a displaced app bundle while a process still maps
 its executables. The result names the retained bundle and the processes using it.
 Restart those components before removing the retained bundle.
 
-With **Save and restart**, the updater records the sessions before stopping
-the daemon, stops it in order so every pane's scrollback is written, and
+## Keeping programs running
+
+On macOS and Linux, **Save and restart** first asks the running pmux server to
+hand its sessions to the new one. The new pmux server takes over each pane's
+terminal in the same process, so the programs in your panes keep running with
+their screens, scrollback and unsaved state. Nothing is restarted, and the
+result reports the server as updated live. App windows reconnect to their
+panes by themselves. A `pmux attach` running in another terminal ends when the
+server changes; attach again to continue.
+
+The old server checks first that the new one can take its sessions. If it
+cannot (an older release on either side, or a pane that does not pause in
+time), nothing changes and the restart below runs instead. If the new server
+fails to start after the hand-over, the sessions come back from the saved
+workspace as after a restart. Set `live_update = false` in the `[mux]` section
+of the config file to always restart instead. Windows always restarts.
+
+## Restarting the sessions
+
+With **Save and restart**, when the sessions are not handed over, the updater
+records the sessions before stopping the daemon, stops it in order so every pane's scrollback is written, and
 starts the new daemon with that workspace. Sessions keep their IDs, so the
 relaunched app reopens your tabs on them without asking again. Each pane
 starts in its saved directory and runs what it was running: the foreground
@@ -511,3 +535,13 @@ Remove-Item -Recurse -Force "$env:LOCALAPPDATA\prismattyc\updates"
 Remove-Item -Force "$env:APPDATA\prismattyc\config.toml"
 # Remove the Start Menu shortcut and the user PATH entry that the preview installer added.
 ```
+
+## When the pmux server is stopped
+
+The app starts the pmux server on every launch. If that start fails, the
+window still opens and shows the reason, with **Try again** (Enter) and
+**Open a local shell**. While the server is stopped, starting or failed to
+start, a window with no local shell shows one card in place of its session
+panes; a short gap during a restart does not show it. **Start the pmux
+server** (Enter) starts it again and the Space's sessions reattach. While the
+server is down, the new-tab key opens a local shell instead of a new session.

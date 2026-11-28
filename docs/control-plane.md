@@ -101,6 +101,17 @@ Split accepts only a structured `SpawnSpec { program, argv, cwd, env }`.
 There is no shell command-string field. CWD must be absolute and strings,
 counts, and aggregate metadata size are bounded.
 
+`HandoffUpgrade { version, request_id, client_id, binary }` (macOS and Linux)
+asks for a live update to the pmuxd at `binary`. The server first runs
+`binary --handoff-probe` and checks that it reads this server's hand-over
+record. It then stops each pane's reader and writer, leaving unread output in
+the pane's PTY, and records the sessions. A failure in any of these is an
+`invalid_request` error, and the server carries on unchanged. Otherwise it
+answers `ShutdownAccepted`, refuses later requests, and execs `binary` in its
+own process with `--handoff-fd`. Each pane's PTY, the listening socket and the
+instance lock stay open, so the programs keep running and the new server
+serves on the same socket. Clients must reconnect.
+
 `ShutdownServer { version, request_id, client_id }` requires a registered
 `client_id` (same tier as session verbs; no pane lease). The server writes
 `ShutdownAccepted` to that caller **before** teardown; that ordering is

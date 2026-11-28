@@ -37,6 +37,8 @@ struct Cli {
     removed_rich_flag: bool,
     experimental_activity: bool,
     restore_workspace: bool,
+    /// A live update: the previous server's record is on this descriptor.
+    handoff_fd: Option<i32>,
     program: String,
     argv: Vec<String>,
 }
@@ -57,6 +59,7 @@ impl Cli {
         let mut experimental_activity = false;
         let mut program = None;
         let mut restore_workspace = false;
+        let mut handoff_fd = None;
         let mut argv = Vec::new();
         while let Some(arg) = args.next() {
             if arg == "--" {
@@ -100,6 +103,10 @@ impl Cli {
                 }
                 "--experimental-activity" if program.is_none() => experimental_activity = true,
                 "--restore-workspace" if program.is_none() => restore_workspace = true,
+                prismattyc_mux::handoff::FD_ARG if program.is_none() => {
+                    let value = args.next().context("--handoff-fd requires a descriptor")?;
+                    handoff_fd = Some(value.parse().context("--handoff-fd is not a number")?);
+                }
                 _ if program.is_none() => program = Some(arg),
                 _ => argv.push(arg),
             }
@@ -115,6 +122,7 @@ impl Cli {
             removed_rich_flag,
             experimental_activity,
             restore_workspace,
+            handoff_fd,
             program: program.unwrap_or_else(prismattyc_mux::platform::default_shell),
             argv,
         })
@@ -169,6 +177,19 @@ fn main() -> Result<()> {
     if prismattyc_mux::plugins::print_bundled_identity()? {
         return Ok(());
     }
+    // A running server asks the installed binary which live-update records
+    // it can read.
+    if std::env::args()
+        .skip(1)
+        .take_while(|arg| arg != "--")
+        .any(|arg| arg == prismattyc_mux::handoff::PROBE_ARG)
+    {
+        println!(
+            "{}",
+            serde_json::to_string(&prismattyc_mux::handoff::ProbeReply::current())?
+        );
+        return Ok(());
+    }
     // This process is a terminal: it gives each pane its own program resume
     // token and never passes on one it was given (OSC 7577).
     prismattyc_mux::program_resume::forget_inherited_token();
@@ -206,8 +227,46 @@ fn main() -> Result<()> {
     if cli.removed_rich_flag {
         eprintln!("pmuxd: rich mode was removed; --experimental-rich is ignored");
     }
-    let instance = prismattyc_mux::daemon_lock::DaemonLock::acquire(&cli.socket)
-        .context("acquire pmuxd instance lock")?;
+    // A live update hands over the lock, the socket and every running pane.
+    #[cfg(unix)]
+    let adopted = match cli.handoff_fd {
+        Some(fd) => Some(
+            prismattyc_mux::handoff::adopt(fd, &cli.socket)
+                .context("take over from the previous pmux server")?,
+        ),
+        None => None,
+    };
+    #[cfg(not(unix))]
+    let adopted: Option<std::convert::Infallible> = {
+        if cli.handoff_fd.is_some() {
+            bail!("live updates are not available on this platform");
+        }
+        None
+    };
+    #[cfg(unix)]
+    let (instance, adopted) = match adopted {
+        Some(adopted) => {
+            eprintln!(
+                "pmuxd: took over the running panes from pmuxd {}",
+                adopted.from_version
+            );
+            (
+                adopted.lock,
+                Some((adopted.plane, adopted.listener, adopted.resumes)),
+            )
+        }
+        None => (
+            prismattyc_mux::daemon_lock::DaemonLock::acquire(&cli.socket)
+                .context("acquire pmuxd instance lock")?,
+            None,
+        ),
+    };
+    #[cfg(not(unix))]
+    let (instance, adopted) = (
+        prismattyc_mux::daemon_lock::DaemonLock::acquire(&cli.socket)
+            .context("acquire pmuxd instance lock")?,
+        adopted.map(|never| match never {}),
+    );
     prismattyc_mux::mailbox::agents::repair_permissions()
         .context("repair session agent file permissions")?;
     let stopped_path = cli.socket.with_extension("stopped");
@@ -215,7 +274,7 @@ fn main() -> Result<()> {
         std::fs::remove_file(&stopped_path)?;
     }
     let login_enabled = prismattyc_mux::login::initialize_default(&cli.socket)?;
-    let restore = cli.restore_workspace || login_enabled;
+    let restore = (cli.restore_workspace || login_enabled) && adopted.is_none();
     let saved = if restore {
         match prismattyc_mux::workspace::load(&cli.socket)? {
             Some(saved) => Some(saved),
@@ -225,7 +284,17 @@ fn main() -> Result<()> {
         None
     };
     // A fresh daemon starts with one session; the default Space adopts it.
-    let adopt = saved.is_none().then_some(BOOTSTRAP_SESSION);
+    let adopt = (saved.is_none() && adopted.is_none()).then_some(BOOTSTRAP_SESSION);
+    #[cfg(unix)]
+    let (mut plane, deferred_resumes, listener) = match (adopted, saved.as_ref()) {
+        (Some((plane, listener, resumes)), _) => (plane, resumes, Some(listener)),
+        (None, Some(saved)) => {
+            let (plane, resumes) = saved.restore_plane(&cli.socket)?;
+            (plane, resumes, None)
+        }
+        (None, None) => (bootstrap_plane(&cli, first_pane_dir)?, Vec::new(), None),
+    };
+    #[cfg(not(unix))]
     let (mut plane, deferred_resumes) = match saved.as_ref() {
         Some(saved) => saved.restore_plane(&cli.socket)?,
         None => (bootstrap_plane(&cli, first_pane_dir)?, Vec::new()),
@@ -267,6 +336,13 @@ fn main() -> Result<()> {
     if activity_enabled(&cli, mux_file.as_ref()) {
         plane.enable_activity()?;
     }
+    #[cfg(unix)]
+    let server = match listener {
+        Some(listener) => ControlServer::bind_inherited(cli.socket.clone(), listener, plane),
+        None => ControlServer::bind(&cli.socket, plane),
+    }
+    .with_context(|| format!("bind {}", cli.socket.display()))?;
+    #[cfg(not(unix))]
     let server = ControlServer::bind(&cli.socket, plane)
         .with_context(|| format!("bind {}", cli.socket.display()))?;
     let identity_path = prismattyc_mux::spaces_daemon_identity_path(&cli.socket);
@@ -304,13 +380,38 @@ fn main() -> Result<()> {
     )?;
     let activity_webhook =
         prismattyc_mux::activity_webhook::Worker::start(cli.socket.clone(), config_path)?;
-    println!("{}", server.path().display());
+    // The ready line for whoever started this server. After a live update the
+    // starter may have stopped reading, so a closed stdout is not an error.
+    {
+        use std::io::Write;
+        let _ = writeln!(std::io::stdout(), "{}", server.path().display());
+    }
     server.wait_shutdown();
     drop(activity_webhook);
-    prismattyc_mux::private_fs::write(&stopped_path, b"intentional shutdown\n")?;
+    let handing_over = server.handoff_pending();
+    if !handing_over {
+        prismattyc_mux::private_fs::write(&stopped_path, b"intentional shutdown\n")?;
+    }
     drop(activity_config);
     drop(space_autosave);
     drop(checkpoint);
+    #[cfg(unix)]
+    if handing_over {
+        if let Some((prepared, listener)) = server.finish_for_handoff() {
+            let error = prismattyc_mux::handoff::exec(
+                prepared,
+                listener,
+                &instance,
+                &cli.socket,
+                std::env::args_os().skip(1),
+            );
+            // Nothing can go back to this server now. Exiting hangs up the
+            // panes; the saved workspace restores them as after a restart.
+            eprintln!("pmuxd: the live update could not start the new server: {error}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     drop(server);
     Ok(())
 }

@@ -60,9 +60,18 @@ pub struct MuxSection {
     /// Take program resume reports and resume programs while the pmux server
     /// runs as root. Default false.
     pub resume_allow_elevated: Option<bool>,
+    /// Keep sessions running through a pmux server update: the old server
+    /// hands its panes to the new one instead of restarting them. Default true.
+    pub live_update: Option<bool>,
 }
 
 impl MuxSection {
+    /// Updates hand running panes to the new pmux server unless the key is
+    /// `false`.
+    pub fn live_update(&self) -> bool {
+        self.live_update.unwrap_or(true)
+    }
+
     /// The activity feed is on unless the key is `false`.
     /// `pmuxd --experimental-activity` keeps it on whatever the key says.
     pub fn experimental_activity(&self) -> bool {
@@ -385,6 +394,12 @@ pub const MUX_KEYS: &[MuxKeySpec] = &[
         doc: "Take program resume reports and resume programs while the pmux server runs as root",
         range: "true|false; default false",
         kind: MuxKeyKind::Bool(false),
+    },
+    MuxKeySpec {
+        name: "live_update",
+        doc: "Keep sessions running through a pmux server update (macOS and Linux); false restarts them",
+        range: "true|false; default true",
+        kind: MuxKeyKind::Bool(true),
     },
 ];
 
@@ -1119,6 +1134,7 @@ mod tests {
                 shell: None,
                 resume_trusted: None,
                 resume_allow_elevated: None,
+                live_update: None,
             };
             let (instance, socket) = resolve_mux_target(Some("other".into()), None, &file).unwrap();
             assert_eq!(instance, "other");
@@ -1157,6 +1173,7 @@ mod tests {
                 shell: None,
                 resume_trusted: None,
                 resume_allow_elevated: None,
+                live_update: None,
             };
             let (instance, socket) =
                 resolve_mux_target(Some("cli".into()), Some(cli_socket.clone()), &file).unwrap();
@@ -1183,6 +1200,7 @@ mod tests {
                 shell: None,
                 resume_trusted: None,
                 resume_allow_elevated: None,
+                live_update: None,
             };
             let (instance, socket) = resolve_mux_target(None, None, &file).unwrap();
             assert_eq!(instance, "work");
@@ -1209,6 +1227,7 @@ mod tests {
                 shell: None,
                 resume_trusted: None,
                 resume_allow_elevated: None,
+                live_update: None,
             };
             let (instance, socket) = resolve_mux_target(None, None, &file).unwrap();
             assert_eq!(instance, "from-env");
@@ -1234,6 +1253,7 @@ mod tests {
                 shell: None,
                 resume_trusted: None,
                 resume_allow_elevated: None,
+                live_update: None,
             };
             assert!(resolve_mux_target(None, None, &file).is_err());
         });

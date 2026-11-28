@@ -421,6 +421,14 @@ impl App {
                 "current_panes": panes,
                 "native_transport": native_transport_status(),
             });
+            // Kept out of the macro above, which is at its recursion limit.
+            status["server"] = match &host.server {
+                crate::server_state::ServerState::Running => "running".into(),
+                crate::server_state::ServerState::Starting => "starting".into(),
+                crate::server_state::ServerState::Stopped { .. } => "stopped".into(),
+                crate::server_state::ServerState::Failed(message) => format!("failed: {message}").into(),
+            };
+            status["server_card"] = host.server_card_shown.into();
             if let Some(status) = status.as_object_mut() {
                 status.insert("pump".into(), pump.clone());
                 status.insert("sidebar_rows".into(), serde_json::Value::Array(sidebar_rows));

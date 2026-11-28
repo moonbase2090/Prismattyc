@@ -2123,7 +2123,6 @@ pub struct PtySession {
     child: Box<dyn Child + Send + Sync>,
     /// Output reader; `None` after [`take_reader`] (one-shot).
     reader: Option<Box<dyn Read + Send>>,
-    writer: Option<Box<dyn Write + Send>>,
     /// True after a successful `wait` / `try_wait` / kill+wait so Drop must not
     /// signal a recycled PID (dual-sign).
     reaped: bool,
@@ -2331,15 +2330,84 @@ impl PtySession {
         let child = pair.slave.spawn_command(command)?;
         drop(pair.slave);
         let reader = pair.master.try_clone_reader()?;
-        let writer = pair.master.take_writer()?;
 
         Ok(Self {
             master: pair.master,
             child,
             reader: Some(reader),
-            writer: Some(writer),
             reaped: false,
         })
+    }
+
+    /// Take over a PTY master and the program on its slave from a process that
+    /// kept the master open across an exec of itself (pmux server live update).
+    ///
+    /// `pid` must be a child of this process, so its exit can be reaped and
+    /// its status read. When `exited` is set the program was already reaped by
+    /// the previous owner: the session never signals or waits for that pid,
+    /// which may belong to another process by now. The descriptor becomes
+    /// close-on-exec.
+    #[cfg(unix)]
+    pub fn adopt(master: std::os::fd::OwnedFd, pid: u32, exited: bool) -> Result<Self> {
+        let master = portable_pty::unix::adopt_master(master)?;
+        let reader = master.try_clone_reader()?;
+        Ok(Self {
+            master,
+            child: Box::new(AdoptedChild::new(pid)),
+            reader: Some(reader),
+            reaped: exited,
+        })
+    }
+
+    /// A close-on-exec duplicate of the PTY master. A reader or writer thread
+    /// that owns one can stop without closing the session's own master.
+    #[cfg(unix)]
+    pub fn dup_master(&self) -> Result<std::os::fd::OwnedFd> {
+        use std::os::fd::BorrowedFd;
+
+        let raw = self
+            .master
+            .as_raw_fd()
+            .ok_or_else(|| anyhow!("PTY master has no descriptor"))?;
+        // SAFETY: `raw` is the master this session owns and keeps open here.
+        Ok(unsafe { BorrowedFd::borrow_raw(raw) }.try_clone_to_owned()?)
+    }
+
+    /// Give up this session without ending its program, for a live update.
+    ///
+    /// Returns a close-on-exec duplicate of the master and the program's pid.
+    /// The program is not signalled, and no end-of-file is written to it. The
+    /// caller must have stopped the reader and released the input writer
+    /// (see [`release_writer`]) first.
+    #[cfg(unix)]
+    pub fn release(self) -> Result<(std::os::fd::OwnedFd, Option<u32>)> {
+        let master = self.dup_master()?;
+        let pid = self.abandon();
+        Ok((master, pid))
+    }
+
+    /// Drop this session without ending its program or writing it end of file,
+    /// once another owner holds a duplicate of the master
+    /// ([`PtySession::dup_master`]). Returns the program's pid. Cannot fail, so
+    /// a caller can duplicate every master first and abandon only when all
+    /// duplicates exist.
+    pub fn abandon(mut self) -> Option<u32> {
+        let pid = self.child.process_id();
+        // The program lives on in the next owner: Drop must not end it.
+        self.reaped = true;
+        pid
+    }
+
+    /// A close-on-exec duplicate of the master for reading output, in place of
+    /// [`take_reader`]. Unlike the boxed reader it can be polled, so a reader
+    /// thread can wait on it and on a stop signal together. Reads that fail with
+    /// `EIO` (every slave closed) should be treated as end of file.
+    #[cfg(unix)]
+    pub fn take_reader_fd(&mut self) -> Result<std::os::fd::OwnedFd> {
+        self.reader
+            .take()
+            .ok_or_else(|| anyhow!("PTY output reader was already taken"))?;
+        self.dup_master()
     }
 
     pub fn read_output(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
@@ -2360,10 +2428,15 @@ impl PtySession {
             .ok_or_else(|| anyhow!("PTY output reader was already taken"))
     }
 
+    /// The PTY's input writer, made on the first call. Dropping it writes the
+    /// program end of file. A session never made one unless asked, so a pane
+    /// that writes through its own duplicate of the master
+    /// ([`PtySession::dup_master`]) can be released without that end of file
+    /// and without leaking a descriptor.
     pub fn take_input_writer(&mut self) -> Result<Box<dyn Write + Send>> {
-        self.writer
-            .take()
-            .ok_or_else(|| anyhow!("PTY input writer was already taken"))
+        self.master
+            .take_writer()
+            .map_err(|_| anyhow!("PTY input writer was already taken"))
     }
 
     pub fn resize(&self, size: PtySize) -> Result<()> {
@@ -2457,6 +2530,132 @@ impl PtySession {
         let _ = self.child.kill();
         let _ = self.child.wait();
         self.reaped = true;
+    }
+}
+
+/// Drop a PTY input writer without its end-of-file.
+///
+/// portable-pty's writer sends a newline and EOF when dropped, which would end
+/// a shell that a live update hands to the next pmux server. The descriptor it
+/// holds is a duplicate, so leaking the writer leaks one descriptor until exec
+/// closes it.
+pub fn release_writer(writer: Box<dyn Write + Send>) {
+    std::mem::forget(writer);
+}
+
+/// A program adopted after a live update: a child of this process known only
+/// by pid.
+#[cfg(unix)]
+#[derive(Debug)]
+struct AdoptedChild {
+    pid: u32,
+    status: Option<portable_pty::ExitStatus>,
+}
+
+#[cfg(unix)]
+impl AdoptedChild {
+    fn new(pid: u32) -> Self {
+        Self { pid, status: None }
+    }
+
+    fn raw_pid(&self) -> std::io::Result<libc::pid_t> {
+        libc::pid_t::try_from(self.pid).map_err(|_| std::io::Error::other("child pid out of range"))
+    }
+
+    fn reap(&mut self, flags: libc::c_int) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+        use std::os::unix::process::ExitStatusExt;
+
+        if let Some(status) = &self.status {
+            return Ok(Some(status.clone()));
+        }
+        let pid = self.raw_pid()?;
+        let mut raw = 0;
+        loop {
+            // SAFETY: waitpid writes the status into `raw`.
+            let result = unsafe { libc::waitpid(pid, &mut raw, flags) };
+            if result == 0 {
+                return Ok(None);
+            }
+            if result == pid {
+                let status: portable_pty::ExitStatus =
+                    std::process::ExitStatus::from_raw(raw).into();
+                self.status = Some(status.clone());
+                return Ok(Some(status));
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+    }
+}
+
+#[cfg(unix)]
+impl portable_pty::ChildKiller for AdoptedChild {
+    fn kill(&mut self) -> std::io::Result<()> {
+        if self.status.is_some() {
+            return Ok(());
+        }
+        let pid = self.raw_pid()?;
+        // The same order as a spawned child: hang up, give it a moment, then kill.
+        // SAFETY: plain signal sends to a pid this process owns as a child.
+        unsafe { libc::kill(pid, libc::SIGHUP) };
+        for _ in 0..10 {
+            if self.reap(libc::WNOHANG)?.is_some() {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        Ok(())
+    }
+
+    fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+        Box::new(AdoptedKiller { pid: self.pid })
+    }
+}
+
+#[cfg(unix)]
+impl Child for AdoptedChild {
+    fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+        self.reap(libc::WNOHANG)
+    }
+
+    fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+        loop {
+            if let Some(status) = self.reap(0)? {
+                return Ok(status);
+            }
+        }
+    }
+
+    fn process_id(&self) -> Option<u32> {
+        Some(self.pid)
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct AdoptedKiller {
+    pid: u32,
+}
+
+#[cfg(unix)]
+impl portable_pty::ChildKiller for AdoptedKiller {
+    fn kill(&mut self) -> std::io::Result<()> {
+        let pid = libc::pid_t::try_from(self.pid)
+            .map_err(|_| std::io::Error::other("child pid out of range"))?;
+        // SAFETY: plain signal send.
+        if unsafe { libc::kill(pid, libc::SIGHUP) } == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+        Box::new(AdoptedKiller { pid: self.pid })
     }
 }
 
@@ -5078,5 +5277,140 @@ mod child_fd_tests {
             );
             assert_eq!(unread_input_bytes_on_tty(Path::new("/dev/null")), None);
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod handoff_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn size() -> PtySize {
+        PtySize {
+            rows: 8,
+            cols: 40,
+            pixel_width: 0,
+            pixel_height: 0,
+        }
+    }
+
+    fn alive(pid: u32) -> bool {
+        // SAFETY: signal 0 only checks that the pid exists.
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+
+    /// Read from `session` until `needle` shows up, or panic after a few seconds.
+    fn read_until(session: &mut PtySession, needle: &str) -> String {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut seen = Vec::new();
+        let mut buffer = [0u8; 256];
+        while Instant::now() < deadline {
+            match session.read_output(&mut buffer) {
+                Ok(0) => break,
+                Ok(count) => seen.extend_from_slice(&buffer[..count]),
+                Err(error) => panic!("read failed: {error}"),
+            }
+            if String::from_utf8_lossy(&seen).contains(needle) {
+                return String::from_utf8_lossy(&seen).into_owned();
+            }
+        }
+        panic!(
+            "{needle:?} never arrived: {:?}",
+            String::from_utf8_lossy(&seen)
+        );
+    }
+
+    /// A released session leaves its program running, and the adopting session
+    /// can write to it, read from it and reap it.
+    #[test]
+    fn a_released_program_keeps_running_and_the_adopter_drives_and_reaps_it() {
+        let mut first = PtySession::spawn("cat", [] as [&str; 0], size()).expect("spawn cat");
+        let pid = first.process_id().expect("pid");
+        let mut writer = first.take_input_writer().expect("writer");
+        writer.write_all(b"before\n").expect("write");
+        read_until(&mut first, "before\r\nbefore");
+        release_writer(writer);
+        let (master, released_pid) = first.release().expect("release");
+        assert_eq!(released_pid, Some(pid));
+        // Dropping the first session neither signalled cat nor sent it EOF.
+        // cat also still echoes below.
+        assert!(alive(pid), "cat ended when its session was released");
+
+        let mut second = PtySession::adopt(master, pid, false).expect("adopt");
+        assert_eq!(second.process_id(), Some(pid));
+        assert!(second.try_wait().expect("try_wait").is_none());
+        let mut writer = second.take_input_writer().expect("writer");
+        writer.write_all(b"after\n").expect("write");
+        read_until(&mut second, "after\r\nafter");
+
+        drop(writer);
+        second.kill_and_reap();
+        assert!(!alive(pid), "the adopter did not end and reap cat");
+    }
+
+    /// The adopter reads the real exit status of a program that ends on its own.
+    #[test]
+    fn an_adopted_program_reports_its_exit_code() {
+        let mut first = PtySession::spawn("sh", ["-c", "read x; exit 7"], size()).expect("spawn");
+        let pid = first.process_id().expect("pid");
+        let writer = first.take_input_writer().expect("writer");
+        release_writer(writer);
+        let (master, _) = first.release().expect("release");
+        let mut second = PtySession::adopt(master, pid, false).expect("adopt");
+        // Keep reading output: a program cannot finish exiting while its echo
+        // waits in the PTY (macOS drains the tty on exit).
+        let mut reader = second.take_reader().expect("reader");
+        let drain = std::thread::spawn(move || {
+            let mut buffer = [0u8; 256];
+            while matches!(reader.read(&mut buffer), Ok(count) if count > 0) {}
+        });
+        let mut writer = second.take_input_writer().expect("writer");
+        writer.write_all(b"go\n").expect("write");
+        let status = second.wait().expect("wait");
+        drop(second);
+        drain.join().expect("drain");
+        assert_eq!(status.exit_code(), 7);
+        release_writer(writer);
+    }
+
+    /// An already reaped program's pid may name another process now, so the
+    /// adopter never signals it.
+    #[test]
+    fn an_adopted_exited_pane_never_signals_its_old_pid() {
+        let mut stand_in = PtySession::spawn("sleep", ["30"], size()).expect("spawn sleep");
+        let other = stand_in.process_id().expect("pid");
+        let first = PtySession::spawn("true", [] as [&str; 0], size()).expect("spawn true");
+        let (master, _) = first.release().expect("release");
+        // Pretend `true` was reaped and its pid reused by `sleep`.
+        let mut adopted = PtySession::adopt(master, other, true).expect("adopt");
+        assert!(adopted.try_wait().expect("try_wait").is_none());
+        adopted.kill_and_reap();
+        drop(adopted);
+        assert!(
+            alive(other),
+            "the adopter signalled a pid it had been told was reaped"
+        );
+        stand_in.kill_and_reap();
+    }
+
+    #[test]
+    fn the_reader_fd_is_close_on_exec_and_reads_output() {
+        let mut session =
+            PtySession::spawn("sh", ["-c", "printf ready; sleep 5"], size()).expect("spawn");
+        let fd = session.take_reader_fd().expect("reader fd");
+        use std::os::fd::AsRawFd;
+        // SAFETY: F_GETFD only reads the descriptor's flags.
+        let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
+        assert_ne!(flags & libc::FD_CLOEXEC, 0);
+        let mut file = std::fs::File::from(fd);
+        let mut seen = Vec::new();
+        let mut buffer = [0u8; 64];
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !String::from_utf8_lossy(&seen).contains("ready") && Instant::now() < deadline {
+            let count = file.read(&mut buffer).expect("read");
+            seen.extend_from_slice(&buffer[..count]);
+        }
+        assert!(String::from_utf8_lossy(&seen).contains("ready"));
+        assert!(session.take_reader_fd().is_err(), "a second take must fail");
     }
 }

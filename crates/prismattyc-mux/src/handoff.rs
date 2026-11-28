@@ -7,33 +7,65 @@
 //! number and program, its screen and recent output, and its program resume
 //! state. It is versioned so a new server can refuse a record it does not
 //! understand, and the old server falls back to a normal restart.
+//!
+//! On Windows a pseudoconsole cannot cross an exec, so each pane's console
+//! and program live in a pane holder (`crate::pty_holder`). The old server
+//! starts the new one as a separate process with the record in a user-only
+//! file, and the record names each pane's holder instead of a descriptor.
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::collections::BTreeMap;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::path::PathBuf;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use prismattyc_emulator::EmulatorStateV1;
 use serde::{Deserialize, Serialize};
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use crate::pane_log::PaneLogFrame;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use crate::program_resume::ResumeRecord;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use crate::remote_size::SizeOwner;
 
-/// The record format this build writes and reads.
+/// The record format this build writes and reads. Windows records name pane
+/// holders instead of descriptors, so they have their own number and a
+/// probe never mistakes one platform's server for the other's.
+#[cfg(not(windows))]
 pub const HANDOFF_FORMAT: u32 = 1;
+#[cfg(windows)]
+pub const HANDOFF_FORMAT: u32 = 2;
+
+/// How a record reaches a pane: its PTY master's descriptor on unix, its
+/// pane holder on Windows.
+#[cfg(unix)]
+pub(crate) type PaneTransport = i32;
+#[cfg(windows)]
+pub(crate) type PaneTransport = crate::pty_holder::HolderEndpoint;
+
+/// A pane the old server gave up: the record, plus on unix the master it
+/// keeps open across the exec.
+#[cfg(unix)]
+pub(crate) type KeptPane = (PaneHandoff, std::os::fd::OwnedFd);
+#[cfg(windows)]
+pub(crate) type KeptPane = PaneHandoff;
+
+/// How long a Windows holder keeps its program waiting for the next server.
+#[cfg(windows)]
+pub(crate) const HANDOFF_GRACE_MS: u32 = 30_000;
 
 /// One pane, as the old server leaves it.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct PaneHandoff {
     pub pane_id: u64,
     /// The PTY master's descriptor number, kept open across the exec.
+    #[cfg(unix)]
     pub fd: i32,
+    /// The pane holder that owns the pane's console and program.
+    #[cfg(windows)]
+    pub holder: crate::pty_holder::HolderEndpoint,
     /// The pane's program. A child of the server process.
     pub pid: Option<u32>,
     /// The program already ended and was reaped: the pane shows its last
@@ -140,7 +172,7 @@ pub fn probe(binary: &std::path::Path) -> std::io::Result<ProbeReply> {
 }
 
 /// Everything one pmux server hands to the next.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct HandoffRecord {
     pub format: u32,
@@ -148,8 +180,10 @@ pub(crate) struct HandoffRecord {
     pub from_version: String,
     /// The listening control socket, kept open so clients queue in its
     /// backlog instead of finding no server.
+    #[cfg(unix)]
     pub listener_fd: i32,
     /// The instance lock. Its flock stays held across the exec.
+    #[cfg(unix)]
     pub lock_fd: i32,
     /// Sessions, windows, panes, ids and launch specs.
     pub workspace: crate::workspace::Workspace,
@@ -245,15 +279,15 @@ pub(crate) unsafe fn inherit(fd: std::os::fd::RawFd) -> std::io::Result<std::os:
 }
 
 /// How long the old server waits for every pane's reader and writer to stop.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub(crate) const QUIESCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// Panes an accepted live update gave up, waiting for the exec.
-#[cfg(unix)]
+/// Panes an accepted live update gave up, waiting for the next server.
+#[cfg(any(unix, windows))]
 pub struct PreparedHandoff {
     pub(crate) binary: std::path::PathBuf,
     pub(crate) workspace: crate::workspace::Workspace,
-    pub(crate) panes: Vec<(PaneHandoff, std::os::fd::OwnedFd)>,
+    pub(crate) panes: Vec<KeptPane>,
 }
 
 /// Exec the new pmuxd in this process with every pane, the listening socket
@@ -389,6 +423,241 @@ pub fn adopt(fd: i32, socket: &std::path::Path) -> anyhow::Result<Adopted> {
         resumes,
         from_version: record.from_version,
     })
+}
+
+/// The new Windows server's argument naming the record file.
+pub const FILE_ARG: &str = "--handoff-file";
+
+/// Write the record next to the socket, readable only by this user. It holds
+/// each holder's token, so the new server deletes it once read.
+#[cfg(windows)]
+pub(crate) fn write_record_file(
+    dir: &std::path::Path,
+    record: &HandoffRecord,
+) -> std::io::Result<PathBuf> {
+    let path = dir.join(format!("pmuxd-handoff-{}.json", std::process::id()));
+    let bytes = serde_json::to_vec(record).map_err(std::io::Error::other)?;
+    crate::private_fs::write(&path, &bytes)?;
+    Ok(path)
+}
+
+/// Read and check the record a previous server left at `path`, then delete it.
+#[cfg(windows)]
+pub(crate) fn read_record_file(path: &std::path::Path) -> std::io::Result<HandoffRecord> {
+    let bytes = std::fs::read(path);
+    let _ = std::fs::remove_file(path);
+    let record: HandoffRecord = serde_json::from_slice(&bytes?)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    if record.format != HANDOFF_FORMAT {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "live-update record format {} is not {HANDOFF_FORMAT}",
+                record.format
+            ),
+        ));
+    }
+    Ok(record)
+}
+
+/// The new Windows server's arguments: the record file first, then this
+/// server's own arguments, without an earlier record argument.
+#[cfg(any(windows, test))]
+pub(crate) fn successor_args(
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+    record: &std::path::Path,
+) -> Vec<std::ffi::OsString> {
+    let mut args = args.into_iter().peekable();
+    while args.peek().is_some_and(|arg| arg == FILE_ARG) {
+        args.next();
+        args.next();
+    }
+    let mut out: Vec<std::ffi::OsString> = vec![FILE_ARG.into(), record.as_os_str().to_owned()];
+    out.extend(args);
+    out
+}
+
+/// Start the new pmuxd for a Windows live update and return once it runs.
+/// The holders already wait for it ([`HANDOFF_GRACE_MS`]); the caller then
+/// exits, releasing the instance lock and the socket for the new server.
+#[cfg(windows)]
+pub fn start_successor(
+    prepared: PreparedHandoff,
+    socket: &std::path::Path,
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+) -> std::io::Result<()> {
+    // The fallback if the new server cannot start.
+    if let Err(error) = prepared.workspace.write(socket) {
+        eprintln!("pmuxd: workspace not saved before the live update: {error:#}");
+    }
+    let record = HandoffRecord {
+        format: HANDOFF_FORMAT,
+        from_version: env!("CARGO_PKG_VERSION").to_string(),
+        workspace: prepared.workspace,
+        panes: prepared.panes,
+    };
+    let dir = socket
+        .parent()
+        .ok_or_else(|| std::io::Error::other("socket has no directory"))?;
+    let path = write_record_file(dir, &record)?;
+    let mut command = std::process::Command::new(&prepared.binary);
+    command.args(successor_args(args, &path));
+    match crate::platform::spawn_detached(&mut command) {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            let _ = std::fs::remove_file(&path);
+            Err(error)
+        }
+    }
+}
+
+/// What a Windows server started by a live update takes over. It takes the
+/// instance lock and binds the socket itself once the old server exits.
+#[cfg(windows)]
+pub struct Adopted {
+    pub plane: crate::control::ControlPlane,
+    /// Resume commands for panes that had to start again.
+    pub resumes: Vec<(u64, String)>,
+    /// The version of the server that handed over.
+    pub from_version: String,
+}
+
+/// Read the record at `path` and reconnect to its panes' holders.
+#[cfg(windows)]
+pub fn adopt_file(path: &std::path::Path, socket: &std::path::Path) -> anyhow::Result<Adopted> {
+    use anyhow::Context;
+
+    let record = read_record_file(path).context("read the live-update record")?;
+    let workspace = record.workspace;
+    let domain = crate::domain::Domain::from_workspace(&workspace)?;
+    let bounds = workspace
+        .sessions
+        .iter()
+        .flat_map(|session| session.windows.iter())
+        .map(|window| window.bounds);
+    let spawns = workspace
+        .sessions
+        .iter()
+        .flat_map(|session| session.windows.iter())
+        .flat_map(|window| window.panes.iter())
+        .map(|pane| (pane.id, pane.spawn.clone()));
+    let (mut plane, respawned) = crate::control::ControlPlane::new_adopted(
+        domain,
+        bounds,
+        spawns,
+        socket.to_owned(),
+        record.panes,
+    )
+    .map_err(|error| anyhow::anyhow!("{}", error.message))?;
+    let policy = crate::load_mux_section(&crate::prism_config_path())
+        .ok()
+        .and_then(|file| file.space_open_runs_commands)
+        .unwrap_or_default();
+    let resumes = workspace.resume_commands(&mut plane, policy, |id| respawned.contains(&id));
+    Ok(Adopted {
+        plane,
+        resumes,
+        from_version: record.from_version,
+    })
+}
+
+#[cfg(test)]
+mod successor_tests {
+    use super::*;
+    use std::ffi::OsString;
+
+    fn os(args: &[&str]) -> Vec<OsString> {
+        args.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn the_record_file_comes_first_and_an_earlier_one_is_dropped() {
+        let record = std::path::Path::new("C:/run/pmuxd-handoff-7.json");
+        assert_eq!(
+            successor_args(os(&["--socket", "S", "pwsh"]), record),
+            os(&[
+                FILE_ARG,
+                "C:/run/pmuxd-handoff-7.json",
+                "--socket",
+                "S",
+                "pwsh"
+            ])
+        );
+        assert_eq!(
+            successor_args(
+                os(&[
+                    FILE_ARG,
+                    "C:/run/old.json",
+                    "--socket",
+                    "S",
+                    "--",
+                    "pwsh",
+                    FILE_ARG
+                ]),
+                record
+            ),
+            os(&[
+                FILE_ARG,
+                "C:/run/pmuxd-handoff-7.json",
+                "--socket",
+                "S",
+                "--",
+                "pwsh",
+                FILE_ARG
+            ]),
+            "only the leading record argument is ours; the program's own stays"
+        );
+    }
+}
+
+#[cfg(all(test, windows))]
+mod record_file_tests {
+    use super::*;
+
+    fn record(format: u32) -> HandoffRecord {
+        HandoffRecord {
+            format,
+            from_version: "9.9.9".into(),
+            workspace: serde_json::from_value(serde_json::json!({
+                "version": 1,
+                "next_ids": {"session": 1, "window": 1, "pane": 1},
+                "sessions": [],
+                "view": null,
+            }))
+            .unwrap(),
+            panes: Vec::new(),
+        }
+    }
+
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_record_file_is_read_once_and_then_gone() {
+        let dir = scratch_dir("handoff-record-once");
+        let path = write_record_file(&dir, &record(HANDOFF_FORMAT)).unwrap();
+        let read = read_record_file(&path).unwrap();
+        assert_eq!(read.from_version, "9.9.9");
+        assert!(
+            !path.exists(),
+            "the record holds holder tokens and must not stay"
+        );
+        assert!(read_record_file(&path).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_record_of_another_format_is_refused() {
+        let dir = scratch_dir("handoff-record-format");
+        let path = write_record_file(&dir, &record(HANDOFF_FORMAT + 1)).unwrap();
+        let error = read_record_file(&path).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(!path.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
 
 #[cfg(all(test, unix))]

@@ -45,6 +45,17 @@ pub struct HolderSpec {
     pub grace_ms: u32,
 }
 
+/// Where a running holder is reached, as a server hands it to the next. A
+/// pane whose program has exited has no holder; its record carries the
+/// default, which nothing reads.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HolderEndpoint {
+    pub pipe: String,
+    /// Hex of the holder's token.
+    pub token: String,
+    pub holder_pid: u32,
+}
+
 /// Full pipe paths for a base name: (server to holder, holder to server).
 pub fn pipe_paths(base: &str) -> (String, String) {
     (
@@ -104,8 +115,79 @@ impl ExitReport {
     }
 }
 
+/// Where the server's reading of a holder stands during a handoff.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Reading {
+    Running,
+    /// Pause sent; output still arrives until Paused.
+    Pausing,
+    /// Paused read: every output byte so far has been returned.
+    Paused,
+    /// Handed to the next server: the reader stops for good.
+    Released,
+}
+
+/// The pause handshake as the server's reader of one holder sees it. The
+/// holder answers each Pause with one Paused, in order with its output, so
+/// only the answer to the latest Pause, with no Resume since, stops the reader.
+#[cfg(any(windows, test))]
+#[derive(Debug)]
+pub(crate) struct PauseState {
+    reading: Reading,
+    /// Pause frames sent on this connection.
+    requested: u64,
+    /// Paused frames read on this connection.
+    answered: u64,
+}
+
+#[cfg(any(windows, test))]
+impl PauseState {
+    pub(crate) fn new() -> Self {
+        Self {
+            reading: Reading::Running,
+            requested: 0,
+            answered: 0,
+        }
+    }
+
+    pub(crate) fn reading(&self) -> Reading {
+        self.reading
+    }
+
+    /// A Pause frame is about to go to the holder.
+    pub(crate) fn pause(&mut self) {
+        self.requested += 1;
+        if self.reading != Reading::Released {
+            self.reading = Reading::Pausing;
+        }
+    }
+
+    /// A Resume frame went to the holder.
+    pub(crate) fn resume(&mut self) {
+        if self.reading != Reading::Released {
+            self.reading = Reading::Running;
+        }
+    }
+
+    /// The pane went to the next server.
+    pub(crate) fn release(&mut self) {
+        self.reading = Reading::Released;
+    }
+
+    /// A Paused frame arrived. True when the reader must now stop.
+    pub(crate) fn acknowledge(&mut self) -> bool {
+        self.answered += 1;
+        if self.reading == Reading::Pausing && self.answered >= self.requested {
+            self.reading = Reading::Paused;
+            return true;
+        }
+        false
+    }
+}
+
 #[cfg(windows)]
-pub use self::windows::{run_holder, spawn_holder};
+pub use self::windows::{adopt_holder, ended_session, run_holder, spawn_holder, HolderHandle};
 
 #[cfg(windows)]
 mod windows {
@@ -139,8 +221,8 @@ mod windows {
     };
 
     use super::{
-        hex, pipe_base, pipe_paths, token_from_hex, tokens_match, ExitReport, HolderSpec,
-        DISCONNECT_GRACE_MS,
+        hex, pipe_base, pipe_paths, token_from_hex, tokens_match, ExitReport, HolderEndpoint,
+        HolderSpec, PauseState, Reading, DISCONNECT_GRACE_MS,
     };
     use crate::platform::UserOnlyDescriptor;
     use crate::pty_holder_frame::{read_frame, write_frame, Frame, HOLDER_PROTOCOL, TOKEN_LEN};
@@ -400,14 +482,22 @@ mod windows {
         /// Bumped on each connection, so a stale grace timer does nothing.
         generation: AtomicU64,
         last_output: Mutex<Instant>,
+        /// The server asked to pause: output and the exit report wait for
+        /// the next trusted server.
+        paused: AtomicBool,
     }
 
     impl Link {
-        /// Write a frame to the connected server, waiting for one if needed.
-        /// A failed write drops the connection and waits for the next.
+        /// Write output or the exit report to the connected server, waiting
+        /// for one if needed and while paused. A failed write drops the
+        /// connection and waits for the next.
         fn send(&self, frame: &Frame) {
             let mut out = self.out.lock().unwrap_or_else(|e| e.into_inner());
             loop {
+                if self.paused.load(Ordering::Acquire) {
+                    out = self.connected.wait(out).unwrap_or_else(|e| e.into_inner());
+                    continue;
+                }
                 if let Some(pipe) = out.as_mut() {
                     if write_frame(pipe, frame).and_then(|()| pipe.flush()).is_ok() {
                         return;
@@ -415,6 +505,21 @@ mod windows {
                     *out = None;
                 }
                 out = self.connected.wait(out).unwrap_or_else(|e| e.into_inner());
+            }
+        }
+
+        /// Stop output and say so. Taking the pipe lock waits out any frame
+        /// being written, so `Paused` follows the last output sent.
+        fn pause(&self) {
+            self.paused.store(true, Ordering::Release);
+            let mut out = self.out.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(pipe) = out.as_mut() {
+                if write_frame(pipe, &Frame::Paused)
+                    .and_then(|()| pipe.flush())
+                    .is_err()
+                {
+                    *out = None;
+                }
             }
         }
     }
@@ -465,6 +570,7 @@ mod windows {
             grace_ms: AtomicU32::new(spec.grace_ms.max(1)),
             generation: AtomicU64::new(0),
             last_output: Mutex::new(Instant::now()),
+            paused: AtomicBool::new(false),
         });
 
         // Console output goes to the server only while one is connected; the
@@ -569,6 +675,8 @@ mod windows {
                 link.generation.fetch_add(1, Ordering::AcqRel);
                 link.grace_ms.store(spec.grace_ms.max(1), Ordering::Release);
                 *link.out.lock().unwrap_or_else(|e| e.into_inner()) = Some(out);
+                // A new trusted server takes over where a paused one stopped.
+                link.paused.store(false, Ordering::Release);
                 link.connected.notify_all();
             }
             // Serve this server until its pipe closes.
@@ -607,6 +715,12 @@ mod windows {
                     }
                     Ok(Some(Frame::Handoff { grace_ms })) => {
                         link.grace_ms.store(grace_ms.max(1), Ordering::Release);
+                    }
+                    Ok(Some(Frame::Pause)) => link.pause(),
+                    Ok(Some(Frame::Resume)) => {
+                        let _out = link.out.lock().unwrap_or_else(|e| e.into_inner());
+                        link.paused.store(false, Ordering::Release);
+                        link.connected.notify_all();
                     }
                     Ok(Some(_)) => {}
                     Ok(None) | Err(_) => break,
@@ -658,12 +772,11 @@ mod windows {
     struct Connection {
         to_holder: Mutex<File>,
         exit: ExitState,
-        /// Base pipe name and token, kept for a later handoff record.
-        #[allow(dead_code)]
+        pause: Mutex<PauseState>,
+        reading_changed: Condvar,
+        /// Base pipe name and token, for the handoff record.
         pipe: String,
-        #[allow(dead_code)]
         token: [u8; TOKEN_LEN],
-        #[allow(dead_code)]
         holder_pid: u32,
     }
 
@@ -695,6 +808,29 @@ mod windows {
                     Ok(Some(Frame::Exit { code })) => {
                         self.connection.exit.set(code);
                         return Ok(0);
+                    }
+                    // Everything before this frame has been returned. Wait to
+                    // be resumed, or stop for good once handed over.
+                    Ok(Some(Frame::Paused)) => {
+                        let mut pause = self
+                            .connection
+                            .pause
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        if !pause.acknowledge() {
+                            continue;
+                        }
+                        self.connection.reading_changed.notify_all();
+                        while pause.reading() == Reading::Paused {
+                            pause = self
+                                .connection
+                                .reading_changed
+                                .wait(pause)
+                                .unwrap_or_else(|e| e.into_inner());
+                        }
+                        if pause.reading() == Reading::Released {
+                            return Ok(0);
+                        }
                     }
                     Ok(Some(_)) => {}
                     // The holder is gone without reporting an exit.
@@ -831,6 +967,169 @@ mod windows {
         }
     }
 
+    /// A session for a pane whose program ended before a live update. Its
+    /// holder ended with the program, so there is no output and input goes
+    /// nowhere; the pane keeps the screen the record carried.
+    pub fn ended_session(pid: Option<u32>, size: PtySize) -> Result<PtySession> {
+        PtySession::from_parts(
+            Box::new(EndedMaster(Mutex::new(size))),
+            Box::new(EndedChild(pid)),
+        )
+    }
+
+    struct EndedMaster(Mutex<PtySize>);
+
+    impl MasterPty for EndedMaster {
+        fn resize(&self, size: PtySize) -> Result<(), anyhow::Error> {
+            *self.0.lock().unwrap_or_else(|e| e.into_inner()) = size;
+            Ok(())
+        }
+        fn get_size(&self) -> Result<PtySize, anyhow::Error> {
+            Ok(*self.0.lock().unwrap_or_else(|e| e.into_inner()))
+        }
+        fn try_clone_reader(&self) -> Result<Box<dyn Read + Send>, anyhow::Error> {
+            Ok(Box::new(io::empty()))
+        }
+        fn take_writer(&self) -> Result<Box<dyn Write + Send>, anyhow::Error> {
+            Ok(Box::new(io::sink()))
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct EndedChild(Option<u32>);
+
+    impl ChildKiller for EndedChild {
+        fn kill(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            Box::new(self.clone())
+        }
+    }
+
+    impl Child for EndedChild {
+        fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+            Ok(Some(ExitStatus::with_exit_code(0)))
+        }
+        fn wait(&mut self) -> io::Result<ExitStatus> {
+            Ok(ExitStatus::with_exit_code(0))
+        }
+        fn process_id(&self) -> Option<u32> {
+            self.0
+        }
+        fn as_raw_handle(&self) -> Option<RawHandle> {
+            None
+        }
+    }
+
+    /// The pane runtime's grip on a holder: pause, resume and hand over.
+    #[derive(Clone)]
+    pub struct HolderHandle(Arc<Connection>);
+
+    impl HolderHandle {
+        pub fn endpoint(&self) -> HolderEndpoint {
+            HolderEndpoint {
+                pipe: self.0.pipe.clone(),
+                token: hex(&self.0.token),
+                holder_pid: self.0.holder_pid,
+            }
+        }
+
+        fn update(&self, change: impl FnOnce(&mut PauseState)) {
+            change(&mut self.0.pause.lock().unwrap_or_else(|e| e.into_inner()));
+            self.0.reading_changed.notify_all();
+        }
+
+        /// Ask the holder to stop output; see [`HolderHandle::paused`].
+        pub fn pause(&self) -> io::Result<()> {
+            self.update(PauseState::pause);
+            self.0.send(&Frame::Pause)
+        }
+
+        /// The holder said Paused and the reader returned everything before it.
+        pub fn paused(&self) -> bool {
+            self.0
+                .pause
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .reading()
+                == Reading::Paused
+        }
+
+        /// Carry on after an abandoned handoff.
+        pub fn resume(&self) -> io::Result<()> {
+            let sent = self.0.send(&Frame::Resume);
+            self.update(PauseState::resume);
+            sent
+        }
+
+        /// Hand the pane over: keep the program `grace_ms` after this
+        /// server's pipe closes, and end this server's reader.
+        pub fn release(&self, grace_ms: u32) -> io::Result<()> {
+            let sent = self.0.send(&Frame::Handoff { grace_ms });
+            self.update(PauseState::release);
+            sent
+        }
+    }
+
+    /// Open a holder's pipes and present its token. The holder answers with
+    /// its program's pid.
+    fn connect(
+        pipe: String,
+        token: [u8; TOKEN_LEN],
+        holder_pid: u32,
+        size: PtySize,
+    ) -> Result<(PtySession, HolderHandle)> {
+        let (in_path, out_path) = pipe_paths(&pipe);
+        let deadline = Instant::now() + START_TIMEOUT;
+        let mut to_holder = open_pipe(&in_path, GENERIC_WRITE, deadline)?;
+        let mut from_holder = open_pipe(&out_path, GENERIC_READ, deadline)?;
+        write_frame(
+            &mut to_holder,
+            &Frame::Hello {
+                protocol: HOLDER_PROTOCOL,
+                token,
+            },
+        )?;
+        to_holder.flush()?;
+        let pid = match read_frame(&mut from_holder)? {
+            Some(Frame::Ready { protocol, pid }) if protocol == HOLDER_PROTOCOL => pid,
+            other => bail!("pane holder refused the connection: {other:?}"),
+        };
+        let connection = Arc::new(Connection {
+            to_holder: Mutex::new(to_holder),
+            exit: ExitState::default(),
+            pause: Mutex::new(PauseState::new()),
+            reading_changed: Condvar::new(),
+            pipe,
+            token,
+            holder_pid,
+        });
+        let master = HolderMaster {
+            connection: connection.clone(),
+            from_holder: Mutex::new(Some(from_holder)),
+            size: Mutex::new(size),
+        };
+        let child = HolderChild {
+            connection: connection.clone(),
+            pid,
+        };
+        let session = PtySession::from_parts(Box::new(master), Box::new(child))?;
+        Ok((session, HolderHandle(connection)))
+    }
+
+    /// Reconnect to a holder another server started, as the new server in a
+    /// live update.
+    pub fn adopt_holder(
+        endpoint: &HolderEndpoint,
+        size: PtySize,
+    ) -> Result<(PtySession, HolderHandle)> {
+        let token =
+            token_from_hex(&endpoint.token).context("holder token in the handoff record")?;
+        connect(endpoint.pipe.clone(), token, endpoint.holder_pid, size)
+            .with_context(|| format!("reconnect to pane holder {}", endpoint.holder_pid))
+    }
+
     /// Start a holder for one pane and connect to it. The returned session
     /// behaves like an in-process ConPTY session.
     pub fn spawn_holder(
@@ -839,7 +1138,7 @@ mod windows {
         cwd: Option<&std::path::Path>,
         env: &std::collections::BTreeMap<String, String>,
         size: PtySize,
-    ) -> Result<PtySession> {
+    ) -> Result<(PtySession, HolderHandle)> {
         let mut nonce = [0u8; 8];
         let mut token = [0u8; TOKEN_LEN];
         getrandom::fill(&mut nonce).map_err(|err| anyhow!("holder nonce: {err}"))?;
@@ -894,50 +1193,61 @@ mod windows {
         let line = heard
             .recv_timeout(START_TIMEOUT)
             .map_err(|_| anyhow!("pane holder did not start"))?;
-        let pid = line
-            .trim()
+        line.trim()
             .strip_prefix("ready ")
             .and_then(|pid| pid.parse::<u32>().ok())
             .ok_or_else(|| anyhow!("pane holder failed to start the program"))?;
         // The holder outlives this handle; the pipe is how it is reached.
         drop(holder);
-
-        let (in_path, out_path) = pipe_paths(&pipe);
-        let deadline = Instant::now() + START_TIMEOUT;
-        let mut to_holder = open_pipe(&in_path, GENERIC_WRITE, deadline)?;
-        let mut from_holder = open_pipe(&out_path, GENERIC_READ, deadline)?;
-        write_frame(
-            &mut to_holder,
-            &Frame::Hello {
-                protocol: HOLDER_PROTOCOL,
-                token,
-            },
-        )?;
-        to_holder.flush()?;
-        match read_frame(&mut from_holder)? {
-            Some(Frame::Ready { protocol, .. }) if protocol == HOLDER_PROTOCOL => {}
-            other => bail!("pane holder refused the connection: {other:?}"),
-        }
-        let connection = Arc::new(Connection {
-            to_holder: Mutex::new(to_holder),
-            exit: ExitState::default(),
-            pipe,
-            token,
-            holder_pid,
-        });
-        let master = HolderMaster {
-            connection: connection.clone(),
-            from_holder: Mutex::new(Some(from_holder)),
-            size: Mutex::new(size),
-        };
-        let child = HolderChild { connection, pid };
-        PtySession::from_parts(Box::new(master), Box::new(child))
+        connect(pipe, token, holder_pid, size)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_paused_that_arrives_after_resume_leaves_the_reader_running() {
+        // An abandoned handoff resumed the holder before the reader got to
+        // the holder's answer to the pause.
+        let mut state = PauseState::new();
+        state.pause();
+        state.resume();
+        assert!(
+            !state.acknowledge(),
+            "the late answer must not stop the reader"
+        );
+        assert_eq!(state.reading(), Reading::Running);
+    }
+
+    #[test]
+    fn a_paused_answering_an_earlier_pause_does_not_answer_a_later_one() {
+        // Output the holder sent between the first answer and the second
+        // pause is still to come, so only the second answer stops the reader.
+        let mut state = PauseState::new();
+        state.pause();
+        state.resume();
+        state.pause();
+        assert!(!state.acknowledge());
+        assert_eq!(state.reading(), Reading::Pausing);
+        assert!(state.acknowledge());
+        assert_eq!(state.reading(), Reading::Paused);
+        state.resume();
+        assert_eq!(state.reading(), Reading::Running);
+    }
+
+    #[test]
+    fn a_released_reader_stays_released() {
+        let mut state = PauseState::new();
+        state.pause();
+        assert!(state.acknowledge());
+        state.release();
+        assert!(!state.acknowledge());
+        state.resume();
+        state.pause();
+        assert_eq!(state.reading(), Reading::Released);
+    }
 
     #[test]
     fn an_exit_seen_while_output_is_still_coming_is_reported_later() {

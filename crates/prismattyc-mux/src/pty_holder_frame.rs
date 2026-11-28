@@ -25,6 +25,9 @@ const RESIZE: u8 = 5;
 const EXIT: u8 = 6;
 const KILL: u8 = 7;
 const HANDOFF: u8 = 8;
+const PAUSE: u8 = 9;
+const PAUSED: u8 = 10;
+const RESUME: u8 = 11;
 
 /// One message on a holder pipe.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +57,14 @@ pub enum Frame {
     /// Server to holder: this server is about to hand the pane to the next
     /// one. Keep the program for `grace_ms` after the pipe closes.
     Handoff { grace_ms: u32 },
+    /// Server to holder: stop sending output. Output not sent yet waits for
+    /// the next trusted server.
+    Pause,
+    /// Holder to server: nothing more follows this frame on this connection,
+    /// so everything sent before it is the pane's output so far.
+    Paused,
+    /// Server to holder: the handoff was abandoned; send output again.
+    Resume,
 }
 
 fn invalid(message: &str) -> io::Error {
@@ -98,6 +109,9 @@ impl Frame {
             Frame::Exit { code } => (EXIT, code.to_le_bytes().to_vec()),
             Frame::Kill => (KILL, Vec::new()),
             Frame::Handoff { grace_ms } => (HANDOFF, grace_ms.to_le_bytes().to_vec()),
+            Frame::Pause => (PAUSE, Vec::new()),
+            Frame::Paused => (PAUSED, Vec::new()),
+            Frame::Resume => (RESUME, Vec::new()),
         }
     }
 
@@ -152,6 +166,18 @@ impl Frame {
                 Frame::Handoff {
                     grace_ms: u32_at(&payload, 0),
                 }
+            }
+            PAUSE => {
+                exact(0)?;
+                Frame::Pause
+            }
+            PAUSED => {
+                exact(0)?;
+                Frame::Paused
+            }
+            RESUME => {
+                exact(0)?;
+                Frame::Resume
             }
             _ => return Err(invalid("unknown holder frame")),
         })
@@ -220,6 +246,9 @@ mod tests {
             Frame::Exit { code: 0xC000_013A },
             Frame::Kill,
             Frame::Handoff { grace_ms: 30_000 },
+            Frame::Pause,
+            Frame::Paused,
+            Frame::Resume,
         ]
     }
 

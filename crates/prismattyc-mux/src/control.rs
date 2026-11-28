@@ -2351,7 +2351,7 @@ pub struct ControlPlane {
     activity: Option<crate::activity::ActivityFeed>,
     shutdown_pending: bool,
     /// Panes given up for a live update, waiting for the exec.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pending_handoff: Option<crate::handoff::PreparedHandoff>,
     /// A live update took the panes. The pane-log checkpoint written just
     /// before must not be replaced by the now empty runtime.
@@ -2509,7 +2509,7 @@ impl ControlPlane {
         Ok(Self {
             activity: None,
             shutdown_pending: false,
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             pending_handoff: None,
             handed_over: false,
             domain,
@@ -2850,13 +2850,13 @@ impl ControlPlane {
     /// with each pane's running program adopted from `panes`. A pane that
     /// cannot be adopted starts its launch command again, as after a restart;
     /// its id is returned so its program resume can run.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub(crate) fn new_adopted(
         domain: Domain,
         window_bounds: impl IntoIterator<Item = WindowBounds>,
         pane_spawns: impl IntoIterator<Item = (u64, SpawnSpec)>,
         mux_socket: PathBuf,
-        panes: Vec<(crate::handoff::PaneHandoff, std::os::fd::OwnedFd)>,
+        panes: Vec<crate::handoff::KeptPane>,
     ) -> Result<(Self, Vec<u64>), ControlError> {
         let mut plane = Self::new(domain, window_bounds, None)?;
         plane.mux_socket = Some(mux_socket);
@@ -4533,7 +4533,7 @@ impl ControlPlane {
 
     /// Stop every pane and give it up for a live update to `binary`. On any
     /// failure the panes keep running here and the error says why.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn prepare_handoff(&mut self, binary: &Path) -> Result<(), ControlError> {
         let refuse = |message: String| ControlError::new(ControlErrorCode::InvalidRequest, message);
         if self.live.is_none() {
@@ -4600,7 +4600,7 @@ impl ControlPlane {
         Ok(())
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     fn prepare_handoff(&mut self, _binary: &Path) -> Result<(), ControlError> {
         Err(ControlError::new(
             ControlErrorCode::InvalidRequest,
@@ -4609,7 +4609,7 @@ impl ControlPlane {
     }
 
     /// The panes given up by an accepted live update, once.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub(crate) fn take_handoff(&mut self) -> Option<crate::handoff::PreparedHandoff> {
         self.pending_handoff.take()
     }
@@ -7701,7 +7701,7 @@ impl ControlServer {
     /// Whether the shutdown that ended [`ControlServer::wait_shutdown`] was an
     /// accepted live update.
     pub fn handoff_pending(&self) -> bool {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             self.plane
                 .lock()
@@ -7709,7 +7709,7 @@ impl ControlServer {
                 .pending_handoff
                 .is_some()
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             false
         }
@@ -7731,6 +7731,20 @@ impl ControlServer {
         self.keep_socket = true;
         drop(self);
         Some((handoff, listener))
+    }
+
+    /// End this server after an accepted Windows live update and return the
+    /// panes for the next server, which binds the socket itself once this
+    /// process exits. `None` for a plain shutdown.
+    #[cfg(windows)]
+    pub fn finish_for_handoff(self) -> Option<crate::handoff::PreparedHandoff> {
+        let handoff = self
+            .plane
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take_handoff()?;
+        drop(self);
+        Some(handoff)
     }
 }
 

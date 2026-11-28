@@ -117,6 +117,9 @@ pub(super) struct Panel {
     server_socket: Option<PathBuf>,
     server_request: Option<CardAction>,
     stop_confirmation: Option<StopConfirmation>,
+    /// Live (sessions, Spaces) from the host's snapshot cache while the
+    /// server runs. `None` hides the counts.
+    live: Option<(usize, usize)>,
     pub scroll: usize,
 }
 
@@ -150,6 +153,7 @@ impl Panel {
             server_socket: None,
             server_request: None,
             stop_confirmation: None,
+            live: None,
             scroll: 0,
         })
     }
@@ -232,12 +236,15 @@ impl Panel {
             ServerState::Stopped { .. } => ("Stopped", StatusTone::Notice),
             ServerState::Failed(_) => ("Failed", StatusTone::Failed),
         };
-        let status = match &self.server {
-            _ if self.server_busy => "Update or restart in progress",
-            ServerState::Failed(message) => message.lines().next().unwrap_or(""),
-            _ => "pmux server",
+        let status = match (&self.server, self.live) {
+            _ if self.server_busy => "Update or restart in progress".to_owned(),
+            (ServerState::Failed(message), _) => message.lines().next().unwrap_or("").to_owned(),
+            (ServerState::Running, Some((sessions, spaces))) => {
+                format!("pmux server · {}", counts_label(sessions, spaces))
+            }
+            _ => "pmux server".to_owned(),
         };
-        rows.push(PaletteRow::status(tone, badge.into(), status.into()));
+        rows.push(PaletteRow::status(tone, badge.into(), status));
         let (label, detail) = match self.mux_action() {
             Some(CardAction::Start) => (
                 "Start the pmux server",
@@ -257,6 +264,21 @@ impl Panel {
             _ => return,
         };
         rows.push(PaletteRow::plain(label.into(), detail, "Enter".into()));
+    }
+
+    /// Show `live` counts beside the Running badge. Returns whether the
+    /// Multiplexer page needs a repaint.
+    fn on_mux(&self) -> bool {
+        Section::ALL[self.section] == Section::Mux
+    }
+
+    fn update_live(&mut self, live: Option<(usize, usize)>) -> bool {
+        let live = live.filter(|_| self.server == ServerState::Running);
+        if self.live == live {
+            return false;
+        }
+        self.live = live;
+        Section::ALL[self.section] == Section::Mux
     }
 
     fn update_server(&mut self, server: &ServerState, busy: bool) -> bool {
@@ -1654,6 +1676,36 @@ fn prepare_entry(
     true
 }
 
+/// Live sessions, and the Spaces that own at least one of them.
+fn live_counts(snapshot: &prismattyc_mux::Snapshot) -> (usize, usize) {
+    let spaces = snapshot
+        .sessions
+        .iter()
+        .filter_map(|session| session.space_id.as_deref())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    (snapshot.sessions.len(), spaces)
+}
+
+fn counts_label(sessions: usize, spaces: usize) -> String {
+    let plural =
+        |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    format!(
+        "{} · {}",
+        plural(sessions, "session", "sessions"),
+        plural(spaces, "Space", "Spaces")
+    )
+}
+
+/// Counts from the host's background snapshot cache. It never connects on
+/// this thread; with the cache off, the counts stay hidden.
+fn host_live_counts(host: &crate::HostState) -> Option<(usize, usize)> {
+    (host.server == ServerState::Running)
+        .then(|| host.snapshot_client.as_deref()?.fresh())
+        .flatten()
+        .map(|snapshot| live_counts(&snapshot))
+}
+
 pub(super) fn open(host: &mut crate::HostState) {
     if !prepare_entry(
         host.session_prompt.is_some(),
@@ -1673,6 +1725,7 @@ pub(super) fn open(host: &mut crate::HostState) {
     panel.wake = host.ui_wake.clone();
     panel.server_socket = crate::host_mux_socket();
     panel.update_server(&host.server, host.server_busy);
+    panel.update_live(host_live_counts(host));
     panel
         .plugins
         .bind(panel.server_socket.clone(), host.ui_wake.clone());
@@ -1793,6 +1846,13 @@ pub(super) fn handle_key(host: &mut crate::HostState, event: &winit::event::KeyE
 }
 
 pub(super) fn poll(host: &mut crate::HostState) {
+    // Clone the cached snapshot only while the Multiplexer page is showing.
+    let live = host
+        .settings
+        .as_ref()
+        .is_some_and(Panel::on_mux)
+        .then(|| host_live_counts(host))
+        .flatten();
     let Some(panel) = host.settings.as_mut() else {
         return;
     };
@@ -1800,7 +1860,8 @@ pub(super) fn poll(host: &mut crate::HostState) {
     if font_changed {
         panel.effective_font = host.font.primary_name().to_string();
     }
-    let server_changed = panel.update_server(&host.server, host.server_busy);
+    let mut server_changed = panel.update_server(&host.server, host.server_busy);
+    server_changed |= panel.update_live(live);
     if server_changed {
         host.palette_layout = None;
     }

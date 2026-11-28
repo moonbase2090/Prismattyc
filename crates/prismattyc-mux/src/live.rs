@@ -418,6 +418,44 @@ pub(crate) struct GuestStamp<'a> {
     pub agent_id: Option<&'a str>,
 }
 
+/// Start a pane's program. On Windows it runs in a pane holder process when
+/// holders are on, so a server update can hand it over (see
+/// [`crate::pty_holder`]). Elsewhere, and with holders off, the program's
+/// PTY belongs to this process.
+fn spawn_pane_session(
+    program: &str,
+    argv: &[String],
+    cwd: Option<&Path>,
+    env: &BTreeMap<String, String>,
+    size: portable_pty::PtySize,
+) -> Result<PtySession> {
+    #[cfg(windows)]
+    if pane_holders_enabled() {
+        return crate::pty_holder::spawn_holder(program, argv, cwd, env, size);
+    }
+    PtySession::spawn_config(program, argv, cwd, env, size)
+}
+
+/// Holders run this executable with `--pty-holder`, so only pmuxd itself
+/// can start them; a test binary that spawns panes keeps them in process.
+#[cfg(windows)]
+fn pane_holders_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        let is_server = std::env::current_exe()
+            .ok()
+            .and_then(|exe| {
+                exe.file_stem()
+                    .map(|stem| stem.eq_ignore_ascii_case("pmuxd"))
+            })
+            .unwrap_or(false);
+        is_server
+            && crate::load_mux_section(&crate::prism_config_path())
+                .map(|section| section.pty_holder())
+                .unwrap_or(true)
+    })
+}
+
 impl LivePane {
     #[allow(clippy::too_many_arguments)]
     fn spawn(
@@ -444,7 +482,7 @@ impl LivePane {
                 env.remove(crate::program_resume::TOKEN_ENV);
             }
         }
-        let session = PtySession::spawn_config(
+        let session = spawn_pane_session(
             &spawn.program,
             &spawn.argv,
             spawn.cwd.as_deref(),

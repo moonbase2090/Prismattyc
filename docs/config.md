@@ -318,6 +318,8 @@ activity_graph_style = "braille"
 resume_allow_elevated = false
 # Keep sessions running through a pmux server update (macOS and Linux); false restarts them. true|false; default true.
 live_update = true
+# Windows: run each pane's console in its own pane holder process, so a pmux server update can keep it; false keeps panes in the server. true|false; default true.
+pty_holder = true
 
 [keys]
 # Host actions. An entry replaces that action's default chords.
@@ -910,6 +912,7 @@ instance = "default"                 # $XDG_RUNTIME_DIR/prismattyc/pmux.sock
 # resume_trusted = ["nvim", "lazygit"]  # commands a program may ask to resume; "*" trusts all (program-resume.md)
 # resume_allow_elevated = false         # default false: a root pmux server takes no resume reports
 # live_update = true                    # default true: Save and restart hands running sessions to the new pmux server
+# pty_holder = true                     # Windows, default true: each pane's console runs in a pane holder process
 ```
 
 Cmd+Q (quit) and Cmd+N (new window) are available by default.

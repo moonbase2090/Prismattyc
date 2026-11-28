@@ -114,6 +114,7 @@ activity_graph_style = "ascii"
 resume_trusted = ["nvim", "lazygit"]
 resume_allow_elevated = true
 live_update = false
+pty_holder = false
 
 [[remote]]
 id = "sample-box"

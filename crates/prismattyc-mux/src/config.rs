@@ -63,6 +63,9 @@ pub struct MuxSection {
     /// Keep sessions running through a pmux server update: the old server
     /// hands its panes to the new one instead of restarting them. Default true.
     pub live_update: Option<bool>,
+    /// Windows: run each pane's pseudoconsole and program in a pane holder
+    /// process, so a pmux server update can hand them over. Default true.
+    pub pty_holder: Option<bool>,
 }
 
 impl MuxSection {
@@ -70,6 +73,11 @@ impl MuxSection {
     /// `false`.
     pub fn live_update(&self) -> bool {
         self.live_update.unwrap_or(true)
+    }
+
+    /// Windows panes run in pane holders unless the key is `false`.
+    pub fn pty_holder(&self) -> bool {
+        self.pty_holder.unwrap_or(true)
     }
 
     /// The activity feed is on unless the key is `false`.
@@ -398,6 +406,12 @@ pub const MUX_KEYS: &[MuxKeySpec] = &[
     MuxKeySpec {
         name: "live_update",
         doc: "Keep sessions running through a pmux server update (macOS and Linux); false restarts them",
+        range: "true|false; default true",
+        kind: MuxKeyKind::Bool(true),
+    },
+    MuxKeySpec {
+        name: "pty_holder",
+        doc: "Windows: run each pane's console in its own pane holder process, so a pmux server update can keep it; false keeps panes in the server",
         range: "true|false; default true",
         kind: MuxKeyKind::Bool(true),
     },
@@ -1135,6 +1149,7 @@ mod tests {
                 resume_trusted: None,
                 resume_allow_elevated: None,
                 live_update: None,
+                pty_holder: None,
             };
             let (instance, socket) = resolve_mux_target(Some("other".into()), None, &file).unwrap();
             assert_eq!(instance, "other");
@@ -1174,6 +1189,7 @@ mod tests {
                 resume_trusted: None,
                 resume_allow_elevated: None,
                 live_update: None,
+                pty_holder: None,
             };
             let (instance, socket) =
                 resolve_mux_target(Some("cli".into()), Some(cli_socket.clone()), &file).unwrap();
@@ -1201,6 +1217,7 @@ mod tests {
                 resume_trusted: None,
                 resume_allow_elevated: None,
                 live_update: None,
+                pty_holder: None,
             };
             let (instance, socket) = resolve_mux_target(None, None, &file).unwrap();
             assert_eq!(instance, "work");
@@ -1228,6 +1245,7 @@ mod tests {
                 resume_trusted: None,
                 resume_allow_elevated: None,
                 live_update: None,
+                pty_holder: None,
             };
             let (instance, socket) = resolve_mux_target(None, None, &file).unwrap();
             assert_eq!(instance, "from-env");
@@ -1254,6 +1272,7 @@ mod tests {
                 resume_trusted: None,
                 resume_allow_elevated: None,
                 live_update: None,
+                pty_holder: None,
             };
             assert!(resolve_mux_target(None, None, &file).is_err());
         });

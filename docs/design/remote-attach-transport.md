@@ -6,6 +6,11 @@ opens a port or alters how the pmux server accepts connections.
 
 Base: `origin/main` `3bba8e8f`. Line references are to that commit.
 
+Updated for the owner's decisions of November 27, 2026 on the four open
+questions: push notifications are in v1, pairing defaults to full input, there
+is no public-port fallback, and the companion-only listener is optional and
+off by default. The last section lists what each decision changed.
+
 ## Summary
 
 A phone or tablet companion needs to watch sessions, type into a pane, and see
@@ -13,8 +18,9 @@ which seats need the user. Today the pmux server accepts connections only on a
 local socket, and only from the same OS user. This note compares three ways to
 reach it from another device and recommends one.
 
-**Decision:** the companion reaches the host over **SSH**, preferably carried
-by an **overlay VPN** the host already uses. Each device gets its own key,
+**Decision:** the companion reaches the host over **SSH** carried by an
+**overlay VPN** the host already uses, and over nothing else. Each device gets
+its own key,
 installed with a **restricted `authorized_keys` entry** whose forced command is
 a small, fixed **companion gate** (`pmux companion gate`, proposed). The gate
 runs on the host as the user, talks to the local socket like any other `pmux`
@@ -25,8 +31,12 @@ key that the user added by hand.
 The restricted entry limits only the companion's own keys. Other ways into the
 same account, such as passwords or ordinary keys, are not limited by it. The
 note states which host settings it assumes, what pairing checks, and an
-optional companion-only SSH listener that closes those other paths on the
-network the companion uses.
+optional companion-only SSH listener, off by default, that closes those other
+paths on the network the companion uses.
+
+Push notifications for the needs-you inbox are sent by the host itself, as a
+content-free wake-up through the mobile platform's push service. All terminal
+and inbox data still travels only over SSH.
 
 A dedicated network protocol for the pmux server is deferred. The gate's stdio
 framing is designed so that the same protocol could later run over another
@@ -71,6 +81,11 @@ From the feature's owner decisions:
 - Transport is SSH or the overlay VPN only. No relay run by the project, no
   anonymous listener.
 - v1 covers watching, full terminal input, and a needs-you inbox of seats.
+- The needs-you inbox sends push notifications in v1.
+- Attaching to a Space defaults to full input.
+- There is no public-port fallback. When the overlay VPN is unavailable, the
+  companion does not connect.
+- The companion-only SSH listener is optional and off by default.
 
 Added by this spike:
 
@@ -78,7 +93,8 @@ Added by this spike:
   through SSH stream forwarding.
 - Every connection names one enrolled device. Revoking a device takes effect
   on the next connection and ends its live connections.
-- A device can be enrolled as view-only.
+- A device can be enrolled as view-only, by choice at pairing.
+- A push carries no terminal text, seat name or message.
 - First pairing does not trust a host key on first use.
 
 ## Options
@@ -98,7 +114,8 @@ same way the desktop remote Space catalog does.
 | Untrusted networks | SSH encrypts the session and the pinned host key defeats an interception attempt. To reach a home or office machine from a mobile network, though, the SSH port must be reachable from the internet, which invites scanning and password guessing. The project cannot see or enforce the host's SSH server settings. |
 
 Reachability is the weak point. A phone usually cannot reach a desktop behind
-NAT without a public port or port forwarding.
+NAT without a public port or port forwarding. The owner has ruled out a public
+port, so A is not offered on its own.
 
 ### B. SSH carried by an overlay VPN already on the host
 
@@ -147,8 +164,9 @@ authentication and per-device grants mapped onto `ControlRequest`.
 
 The owner's transport policy rules out a new listener for now. C also repeats
 work SSH already does well. It becomes worth building only if the companion
-needs something SSH cannot carry. Examples are push wake-ups, sharing a session
-with another person, or devices with no SSH client.
+needs something SSH cannot carry, such as sharing a session with another person
+or devices with no SSH client. Push wake-ups do not need it: the host sends
+them outbound (see Push notifications), with no listener.
 
 ### Comparison
 
@@ -156,23 +174,30 @@ with another person, or devices with no SSH client.
 | --- | --- | --- | --- |
 | New listener on the host | No (uses the system SSH server) | No | Yes |
 | Reach from a mobile network | Needs a public SSH port | Yes, through NAT | Needs a public port or the overlay |
+| Push wake-ups | Outbound from the host | Outbound from the host | Outbound, or over its own channel |
 | Per-device identity | Yes, with per-device keys | Yes, two layers | Yes |
 | Narrow permissions | Yes, with a forced command | Yes, with a forced command | Yes, per request |
-| Within the owner's transport policy | Yes | Yes | No, not for v1 |
+| Within the owner's transport policy | No, no public port | Yes | No, not for v1 |
 | New code to trust | The gate | The gate | Listener, protocol, crypto, registry |
 
 ## Decision
 
-Use **B as the default and A as the fallback**: SSH to the host's system SSH
-server, over the overlay when one is present, with one restricted key per
-device and a fixed gate as the forced command.
+Use **B only**: SSH to the host's system SSH server over the overlay, with one
+restricted key per device and a fixed gate as the forced command.
+
+There is no fallback. When the overlay is down on the phone or the host, the
+companion shows that the overlay is unreachable and does not try another
+address. It does not use a LAN address either: from the phone, a LAN address
+cannot be told apart from a forwarded public port, so only the overlay address
+from the pairing code is dialed.
 
 ### Per-device restricted key
 
 Pairing writes one line per device (wrapped here; it is one line on disk):
 
 ```
-restrict,pty,command="pmux companion gate --device dev_7f3a --scope drive"
+from="<overlay range>",restrict,pty,
+  command="pmux companion gate --device dev_7f3a --scope drive"
   ecdsa-sha2-nistp256 AAAA... prismattyc-companion dev_7f3a
 ```
 
@@ -185,9 +210,10 @@ restrict,pty,command="pmux companion gate --device dev_7f3a --scope drive"
   for. The client's requested command is only data, in `SSH_ORIGINAL_COMMAND`.
 - `--device` is written by the host, not supplied by the client, so the gate
   knows which device is calling.
-- `--scope` is `watch` (view only) or `drive` (view and type).
-- When the overlay is used, pairing can add `from="<overlay range>"` so the key
-  is refused from any other network.
+- `--scope` is `drive` (view and type) by default, or `watch` (view only) when
+  the user picks it at pairing.
+- Pairing always adds `from="<overlay range>"`, so the key is refused from any
+  other network.
 - P-256 is used because it is the key type both mobile hardware key stores
   support. The SSH server accepts it by default.
 
@@ -202,8 +228,10 @@ fixed grammar:
 | `hello` | both | Prints the gate protocol version, host label and scope. |
 | `catalog` | both | `pmux space catalog` (existing, read-only). |
 | `inbox` | both | Streams needs-you items: `PaneAttention` and seat activity states, as NDJSON. |
-| `attach SESSION_ID SPACE_ID` | `watch` | `pmux attach --session-id … --space-id … --read-only`. |
-| `attach SESSION_ID SPACE_ID` | `drive` | The same attach, without `--read-only`. |
+| `attach SESSION_ID SPACE_ID` | `drive` | `pmux attach --session-id … --space-id …`, with full input. |
+| `attach SESSION_ID SPACE_ID` | `watch` | The same attach with `--read-only`. |
+| `push-register TOKEN` | both | Stores this device's push token on the host, replacing any earlier one. |
+| `push-unregister` | both | Removes this device's push token. |
 
 - Arguments are parsed as identifiers and checked against the catalog. Names
   are never passed through as command text.
@@ -213,6 +241,8 @@ fixed grammar:
   pmux server needs no change to accept it.
 - The gate records its pid in a per-device runtime file so revocation can end
   live connections.
+- A push token is checked as an opaque string of bounded length and stored in
+  a per-device file with mode `0600`. It is never passed to a shell.
 - The gate does not offer shutdown, plug-in management, `send-keys`, mail
   writes, Space edits or `pmux new`. Adding a verb later is a reviewed change
   to the gate, not a client update.
@@ -224,17 +254,19 @@ changing the gate verb.
 ### Pairing, without a listener or relay
 
 1. On the host, `pmux companion pair` shows a pairing code (QR and text). It
-   carries the gate protocol version, SSH user, overlay and LAN addresses, port
-   and **all host key fingerprints**. It contains no secret.
+   carries the gate protocol version, SSH user, overlay address, port and
+   **all host key fingerprints**. It contains no secret. Pairing refuses to
+   start when the host has no overlay address.
 2. The phone scans it, creates a non-exportable P-256 key that needs user
    presence to sign, and shows the public key as text and as a share-sheet item
    with a short fingerprint.
 3. The user moves the public key to the host by any channel they already use
    (share sheet, clipboard sync, a file). `pmux companion add` reads it, shows
-   the same short fingerprint for the user to compare, asks for the scope, and
-   writes the restricted line atomically with mode `0600`.
-4. The phone runs `hello` against the pinned host keys. On success it stores
-   the host as paired.
+   the same short fingerprint for the user to compare, asks for the scope with
+   `drive` preselected, and writes the restricted line atomically with mode
+   `0600`.
+4. The phone runs `hello` against the pinned host keys, then `push-register`
+   with its push token. On success it stores the host as paired.
 
 Step 3 is the clumsiest step. The prototype spike should time it on real
 devices. Any shortcut must still keep enrollment on the host and must not admit
@@ -250,14 +282,64 @@ accepts a replacement on an unverified connection.
 
 ### Revocation
 
-`pmux companion revoke DEVICE` does three things:
+`pmux companion revoke DEVICE` does four things:
 
 - removes that device's line;
+- deletes the device's push token, so the host stops sending it wake-ups;
 - signals the device's live gate processes, which ends its open attaches;
 - prints what it removed.
 
-`pmux companion list` shows each device, its scope and when it last connected.
-On the overlay, removing the phone's node is a second, independent cut-off.
+`pmux companion list` shows each device, its scope, whether it has a push token
+and when it last connected. On the overlay, removing the phone's node is a
+second, independent cut-off.
+
+### Push notifications
+
+The owner wants the inbox to notify in v1, including while the app is not
+running. A suspended mobile app can only be woken by the platform's push
+service, so something must send to that service. The design keeps that sender
+on the host and keeps the data on SSH:
+
+1. At pairing, and whenever the platform rotates it, the phone sends its push
+   token through the gate's `push-register` verb.
+2. On the host, a small sender runs beside the pmux server as a local client,
+   like any `pmux` command, and watches the same signals the inbox uses. When
+   a seat enters the inbox for an urgent reason (every rank except a finished
+   turn, as set out in [`phone-seat-attention.md`](phone-seat-attention.md)),
+   the sender sends one wake-up to each registered device of that host.
+3. The wake-up is **content-free**: the host label from pairing and a
+   generic line such as "A seat needs you". It carries no seat name, message,
+   pane text or session id. The platform push service sees only that this host
+   sent a wake-up.
+4. Tapping it opens the companion, which unlocks the device key with user
+   presence, connects over SSH and loads the inbox. The details are fetched
+   then, never from the push.
+
+Why this shape:
+
+- The send is an outbound HTTPS request from the host. It opens no listener
+  and adds no relay in the data path.
+- The device key needs user presence to sign, so the app cannot reconnect
+  silently in the background to fetch details. A content-free push avoids
+  needing that.
+- Lock-screen exposure is limited to the host label.
+
+What it needs, and the trade-off for the owner to know about:
+
+- The platform push service accepts sends only with the app publisher's push
+  credential. For the private test build, the paired computers are the owner's
+  own, so the credential can live in each computer's OS credential store and
+  is read only by the sending code. A leaked credential lets someone send
+  notifications to every install of the app. It does not reveal terminal
+  data.
+- Before a public release, sending from users' computers with the publisher's
+  credential is not acceptable. Public distribution needs a small sender
+  service that holds the credential and accepts only content-free wake-ups.
+  That is a new owner decision, and it is not part of v1.
+- Rate limit: at most one wake-up per device per minute, and none while the
+  companion holds an open inbox connection to that host.
+- Notifications are on by default for every paired device. The companion
+  offers a per-host mute, which calls `push-unregister`.
 
 ### Other ways into the same account
 
@@ -320,8 +402,9 @@ what they can see, without changing anything:
   keys from elsewhere is outside what it can see, and the report says so.
 - Neither check reads the server's configuration or needs elevated rights.
 
-**Optional hardening: a companion-only listener.** A user with admin rights can
-give the companion its own SSH listener, for example on the overlay address
+**Optional hardening: a companion-only listener, off by default.** Pairing
+works without it, and Prismattyc never turns it on. A user with admin rights
+can give the companion its own SSH listener, for example on the overlay address
 only. The settings below are applied by the user, never by Prismattyc:
 
 ```
@@ -343,9 +426,9 @@ Match LocalPort 2222
   exits.
 
 When the ordinary SSH port is not reachable from the overlay, the only SSH path
-over the overlay goes through the gate. That is the configuration this note
-recommends for users who can apply it. Without it, the assumptions above
-apply.
+over the overlay goes through the gate. Setup docs present this as optional
+hardening for users who can apply it. Without it, which is the default, the
+assumptions above apply.
 
 ## Threat note
 
@@ -358,24 +441,23 @@ Assets:
 
 | Threat | Effect | Mitigation | Residual risk |
 | --- | --- | --- | --- |
-| Anonymous caller on the network | Probes or brute-forces the host | No new listener. On the overlay, SSH is not exposed to the internet. Pairing warns when the server offers password or keyboard-interactive logins. | Key-only login is a host assumption the project cannot enforce. A public SSH port (option A) with passwords on is exposed to guessing. |
+| Anonymous caller on the network | Probes or brute-forces the host | No new listener and no public port: the companion dials only the overlay address. Pairing warns when the server offers password or keyboard-interactive logins. | Key-only login is a host assumption the project cannot enforce. A public SSH port the user opened for other reasons is outside the companion's control. |
 | Interception on public Wi-Fi | Reads or alters the session | SSH encryption with host keys pinned at pairing; no trust on first use. | None beyond SSH itself. |
 | Socket forwarding to reach the raw control plane | Full control, including shutdown and plug-in admin | For companion keys, `restrict` turns off socket and port forwarding and the forced command cannot be bypassed. On the companion-only listener, `DisableForwarding` covers every key. | On an ordinary SSH port, other keys or a password can still forward the socket. `pmux companion list` reports full-access and can-forward keys. |
 | Other credentials on the same account | A shell, or a forwarded pmux socket, bypassing the gate | Out of the gate's reach. Host assumptions are stated; pairing reports offered methods and keys that are not fully constrained; the companion-only listener closes these paths on its port. | Without that listener, the account is as safe as its weakest SSH credential, with or without the companion. |
 | Gate command injection | Shell access through crafted verbs | Fixed grammar, no shell, identifiers checked against the catalog, refused input exits. | Gate bugs. The gate is small and gets its own tests. |
-| Lost or stolen phone | Someone types into panes | Key needs user presence (biometric or passcode) per connection. Revoke from the host. Watch-only scope for devices that do not need input. | A `drive` device that is unlocked and in hand can type commands. This is inherent to "full terminal input" and should be stated plainly in the app. |
+| Lost or stolen phone | Someone types into panes | Key needs user presence (biometric or passcode) per connection. Revoke from the host. Watch-only scope for devices that do not need input. | `drive` is the default, so a paired device that is unlocked and in hand can type commands. This is inherent to "full terminal input" and should be stated plainly in the app and at pairing. |
 | Malicious app or backup on the phone | Copies the key | Key is non-exportable and never in backups. | A compromised OS can still ask the key store to sign while unlocked. |
 | Host key swapped by an attacker | Phishing host collects input | Pinned keys, hard stop, no override. | A user who re-pairs without checking the desktop. The pairing code comes from the desktop screen, not the network. |
 | Revoked device keeps a live session | Continued access after revoke | Revoke ends live gate processes. | A short window between key removal and the signal. |
 | Overlay account compromise | Attacker joins the overlay | Still needs an SSH credential the server accepts on the overlay. With the companion-only listener as the only SSH path there, that means an enrolled device key. `from=` alone is not trusted. | Without that listener, any credential the account accepts (another key, or a password if allowed) works over the overlay. |
-| Secrets in the inbox | Message text exposed on the lock screen | Inbox items carry attention messages, which are capped at 512 bytes. The app chooses lock-screen redaction. | App behavior, out of scope here. |
+| Secrets in the inbox | Message text exposed on the lock screen | Pushes are content-free. Inbox items carry attention messages, which are capped at 512 bytes, and are shown only inside the unlocked app. | None from the push. In-app display is app behavior. |
+| Push credential leaked from a host | Someone sends notifications to every install | Stored in the OS credential store, read only by the sender. Wake-ups carry no data and every detail is fetched over SSH. | Spam or misleading wake-ups until the credential is rotated. A public release needs a sender service instead. |
+| Push token leaked | Someone who also has the credential targets one device | Tokens stay on the host in `0600` files, deleted on revoke. | The same as a leaked credential, limited to one device. |
 
 Out of scope:
 
-- Push notifications while the app is not running. Waking a suspended mobile
-  app needs a push service holding a sender key, which acts as a relay. That is
-  an owner decision. Without it, v1's inbox updates only while the app is open
-  or briefly in the background.
+- A push sender service for public distribution (see Push notifications).
 - Sharing a session with another person.
 
 ## Proof plan
@@ -389,8 +471,10 @@ Setup:
 - A test user with its own home and an isolated `PMUX_SOCKET`.
 - An SSH server bound to loopback (or the VM's private interface) with a test
   host key.
-- Two test device keys, one installed with `--scope watch` and one with
-  `--scope drive`.
+- Two test device keys, one installed with the default scope (`drive`) and
+  one with `--scope watch`.
+- A push sender pointed at a local stub that records requests, never the
+  platform service.
 - The client is the system `ssh` with `-o BatchMode=yes` and a test
   known-hosts file, standing in for the phone.
 
@@ -431,11 +515,23 @@ the test user and one ordinary, unrestricted key):
 12. On the ordinary port, the unrestricted key still gets a shell and can
     forward the socket. This records the limit stated above; it is expected to
     pass before and after the gate.
-13. On the companion-only port configured as above, the unrestricted key and
-    the password are both refused, `ssh -L` to the socket is refused for the
-    drive key, and a connection with no command still lands in `hello`. A key
-    removed from the companion key file is refused even with `ForceCommand`
-    present.
+13. With the companion-only listener not configured (the default), pairing
+    completes and checks 1–10 pass. On the companion-only port configured as
+    above, the unrestricted key and the password are both refused, `ssh -L`
+    to the socket is refused for the drive key, and a connection with no
+    command still lands in `hello`. A key removed from the companion key file
+    is refused even with `ForceCommand` present.
+
+Checks for push and reachability:
+
+14. `push-register` stores the token in a `0600` file. A token longer than the
+    limit or containing control characters is refused. `revoke` deletes it.
+15. A message raised by `pmux attention` makes the stub record exactly one
+    request per registered device. Its body contains the host label and the
+    generic line, and no seat name, message text or session id. A second
+    message within a minute records nothing new.
+16. `pmux companion pair` on a host with no overlay address refuses with a
+    clear error. The written key line always carries `from=`.
 
 Phone-side checks belong to the prototype spike: key creation with user
 presence, the pairing transfer, VPN co-existence, and background behavior.
@@ -449,18 +545,22 @@ proof. They are based on recent pmux CLI pull requests of similar size.
 | --- | --- | --- | --- |
 | Gate | `pmux companion gate`: grammar, scopes, catalog and attach dispatch, polled inbox, pid file, tests and proof checks 1–7 and 10 | 6–8 | 1.5–2 days |
 | Pairing and revocation | `pmux companion pair`, `add`, `list` and `revoke`; atomic `authorized_keys` edits; method probe and full-access key report; `--from-auth-info`; checks 8–9 and 11–13 | 8–11 | 2–2.5 days |
+| Push sender | `push-register` and `push-unregister`; token files; content-free sender with rate limit, reading the credential from the OS store; checks 14–15 | 6–9 | 1.5–2 days |
 | Inbox on the event stream | Switch `inbox` to the streaming endpoint once it lands | 1–2 | 0.5 day |
 
 The catalog and prototype spike should start from the gate's verb list and
 the pairing flow above.
 
-## Open questions for the owner
+## Owner decisions
 
-1. Is push notification for the inbox wanted in v1? It needs a push sender,
-   which the current transport policy does not cover.
-2. Should `watch` be the default scope at pairing, with `drive` as an explicit
-   choice?
-3. When no overlay is present, should the client allow option A on a public
-   SSH port, or refuse and point to the overlay?
-4. Should setup docs present the companion-only listener as the expected
-   configuration, or as optional hardening? It needs admin rights on the host.
+The owner answered this note's open questions on November 27, 2026:
+
+| Question | Decision | Changed in this note |
+| --- | --- | --- |
+| Push notifications for the inbox in v1? | Yes. | New Push notifications section, gate verbs, revocation, threat rows, checks 14–15, Push sender slice. |
+| Default scope at pairing? | Full input (`drive`). `watch` stays available as a choice. | Per-device key, pairing step 3, gate table order, lost-phone threat row. |
+| Public SSH port when the overlay is missing? | No. SSH over the overlay only. | Decision, option A, comparison, pairing code, anonymous-caller threat row, check 16. |
+| Companion-only listener expected or optional? | Optional, off by default. | Summary, Optional hardening, check 13. |
+
+The remaining owner decision is how pushes are sent for a public release,
+covered under Push notifications.

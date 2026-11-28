@@ -81,6 +81,7 @@ mod restart;
 mod restart_modal;
 #[cfg(target_os = "macos")]
 mod safe_restart;
+mod server_state;
 mod sidebar_resize;
 mod sidebar_width;
 mod snapshot_client;
@@ -1232,6 +1233,17 @@ struct HostState {
     /// The update review a clicked update notice asked for; the app takes
     /// it on its next pump.
     toast_update_action: Option<update_flow::Action>,
+    /// The pmux server's state, copied from the app each pump.
+    server: server_state::ServerState,
+    /// The app is stopping and starting the server itself (update, restart).
+    server_busy: bool,
+    /// The user chose a local shell from the card; cleared when it runs again.
+    server_card_dismissed: bool,
+    /// Painted this frame, with its two buttons for the pointer.
+    server_card_shown: bool,
+    server_card_buttons: [graphite::Rect; 2],
+    /// A card choice for the app to carry out on the next pump.
+    server_card_request: Option<server_state::CardAction>,
     /// Last caption-control press. A bounce or double-click at the same
     /// pixel must not fire Show me then Skip after the caption advances.
     caption_click: Option<(Instant, usize, usize)>,
@@ -3138,6 +3150,8 @@ enum UserAction {
     AccessKit(accesskit_winit::Event),
     /// A restart-when-idle request found no running sessions.
     IdleRestartReady,
+    /// A start the server card asked for finished.
+    ServerStartFinished(Result<(), String>),
 }
 
 impl From<accesskit_winit::Event> for UserAction {
@@ -3228,6 +3242,9 @@ struct App {
     idle_restart_commit: bool,
     /// Set while the idle-restart watcher thread is running.
     idle_watch: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The pmux server as this app sees it; the card shows while it is down.
+    server: server_state::ServerState,
+    server_probe: Option<server_state::Probe>,
     automatic_update_checks: bool,
     /// A menu Restart is previewing or running; a second click is ignored.
     #[cfg(target_os = "macos")]
@@ -3339,6 +3356,8 @@ impl App {
             update_confirm: update_flow::ConfirmStyle::Review,
             idle_restart_commit: false,
             idle_watch: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            server: server_state::ServerState::Running,
+            server_probe: None,
             automatic_update_checks,
             #[cfg(target_os = "macos")]
             safe_restart_inflight: false,
@@ -4105,6 +4124,7 @@ impl App {
         let pump_io = existing_io_scope.unwrap_or_else(pump_timing::PumpIoScope::begin);
         self.wake_pending.store(false, Ordering::Relaxed);
         self.poll_file_writer();
+        self.sync_server();
         let phase_started = Instant::now();
         let actions = self
             .windows
@@ -4749,6 +4769,12 @@ impl App {
                 left_button_down: false,
                 suppress_left_release: false,
                 toast_update_action: None,
+                server: self.server.clone(),
+                server_busy: false,
+                server_card_dismissed: false,
+                server_card_shown: false,
+                server_card_buttons: [graphite::Rect::new(0, 0, 0, 0); 2],
+                server_card_request: None,
                 caption_click: None,
                 app_mouse_button: None,
                 last_app_mouse_cell: None,
@@ -5566,6 +5592,14 @@ fn chrome_overlay(host: &HostState) -> a11y::OverlayKind {
     }
     if let Some(prompt) = &host.session_prompt {
         return session_prompt::accessibility(prompt);
+    }
+    if host.server_card_shown {
+        let (title, rows) = server_state::rows(&host.server);
+        return a11y::OverlayKind::Choices {
+            title,
+            rows,
+            selected: 0,
+        };
     }
     if let Some(modal) = &host.restart_modal {
         return a11y::OverlayKind::Choices {
@@ -6972,7 +7006,9 @@ fn rasterize_frame(
         // pane damage, so it must force full frames like the others.
         restore_prompt: host.restore_prompt.is_some()
             || host.session_prompt.is_some()
-            || host.restart_modal.is_some(),
+            || host.restart_modal.is_some()
+            // The server card appears and ages with no pane damage.
+            || host.server != server_state::ServerState::Running,
         palette: host.palette.is_some(),
         theme_picker: host.theme_picker.is_some(),
         space_picker: host.space_picker.is_some(),
@@ -8547,6 +8583,22 @@ fn rasterize_frame(
                 animation_ms.filter(|_| fitted.animated_art()),
             );
         }
+    }
+    // The server card sits over dead panes, under every dialog and menu.
+    let local_live = host.mux.panes_and_rects().any(|(id, runtime, _)| {
+        runtime.child_alive && !host.attach_pane_sessions.contains_key(&id)
+    });
+    host.server_card_shown = server_state::shows_card(
+        &host.server,
+        SystemTime::now(),
+        local_live,
+        host.server_card_dismissed,
+        host.server_busy,
+    );
+    if host.server_card_shown {
+        let server = host.server.clone();
+        host.server_card_buttons =
+            server_state::paint(host, &server, buffer, width as usize, height as usize);
     }
     restore_prompt::paint(host, buffer, width as usize, height as usize);
     restart_modal::paint(host, buffer, width as usize, height as usize);
@@ -18279,7 +18331,12 @@ fn apply_mux_tab_command_body(
     program: &str,
     child_args: &[String],
 ) -> Result<MuxApplyResult> {
-    if command == MuxTabCommand::NewTab && host.space_rail.current.is_some() {
+    // A Space's new tab is one of its sessions, which needs the pmux server.
+    // While the server is down it is a local shell, as the card offers.
+    if command == MuxTabCommand::NewTab
+        && host.space_rail.current.is_some()
+        && host.server == server_state::ServerState::Running
+    {
         spawn_owned_space_pane(host, None, None)?;
         return Ok(MuxApplyResult::Changed(true));
     }
@@ -18342,6 +18399,16 @@ fn handle_mux_command(
     child_args: &[String],
 ) -> bool {
     match command {
+        // A new session needs the pmux server; while it is down, New tab is
+        // a local shell, as the server card offers.
+        MuxCommand::NewTab if host.server != server_state::ServerState::Running => {
+            if let Err(error) = host.mux.new_tab(program, child_args) {
+                rail_error_toast(host, &format!(" could not open a local shell: {error} "));
+            }
+            mark_layout_dirty(host);
+            host.dirty = true;
+            return false;
+        }
         MuxCommand::NewTab => {
             session_prompt::create_pane(host, None);
             return false;
@@ -21090,6 +21157,94 @@ impl App {
         let socket = host_mux_socket().context("mux socket path")?;
         daemon_startup::ensure_pmuxd_started(&pmux_bin(), &socket)
     }
+
+    /// Fold the probe's sample into the server state, copy it to every
+    /// window, and carry out the card choices the windows made.
+    fn sync_server(&mut self) {
+        if let Some(live) = self
+            .server_probe
+            .as_ref()
+            .and_then(server_state::Probe::live)
+        {
+            let next = server_state::next(&self.server, live, SystemTime::now());
+            if next != self.server {
+                if next == server_state::ServerState::Running {
+                    // Space views reattach their sessions on the next refresh.
+                    for host in self.windows.values_mut() {
+                        host.last_space_refresh = None;
+                        host.server_card_dismissed = false;
+                    }
+                }
+                self.server = next;
+            }
+        }
+        let busy = self.idle_restart_commit
+            || matches!(
+                self.full_update,
+                update_flow::Flow::Busy | update_flow::Flow::Installing(..)
+            );
+        let program = self.cli.program.clone();
+        let child_args = self.cli.child_args.clone();
+        let mut start = false;
+        for host in self.windows.values_mut() {
+            if host.server != self.server || host.server_busy != busy {
+                host.server = self.server.clone();
+                host.server_busy = busy;
+                host.dirty = true;
+            }
+            if self.server != server_state::ServerState::Running {
+                // The probe wakes once a second while the server is down:
+                // repaint so the card appears after the grace and ages.
+                host.dirty = true;
+            }
+            match host.server_card_request.take() {
+                Some(server_state::CardAction::Start) => start = true,
+                Some(server_state::CardAction::LocalShell) => {
+                    host.server_card_dismissed = true;
+                    let _ = dispatch_action(host, keybind::Action::NewTab, &program, &child_args);
+                    host.dirty = true;
+                }
+                None => {}
+            }
+        }
+        if start {
+            self.start_server();
+        }
+    }
+
+    /// Start the pmux server off the event loop; the result comes back as
+    /// `UserAction::ServerStartFinished`.
+    fn start_server(&mut self) {
+        if self.server == server_state::ServerState::Starting {
+            return;
+        }
+        let Some(socket) = host_mux_socket() else {
+            self.server = server_state::ServerState::Failed("no pmux socket path".into());
+            return;
+        };
+        self.server = server_state::ServerState::Starting;
+        let proxy = self.event_proxy.clone();
+        let _ = std::thread::Builder::new()
+            .name("server-start".into())
+            .spawn(move || {
+                let result = daemon_startup::ensure_pmuxd_started(&pmux_bin(), &socket)
+                    .map_err(|error| format!("{error:#}"));
+                let _ = proxy.send_event(UserAction::ServerStartFinished(result));
+            });
+    }
+
+    fn server_start_finished(&mut self, result: Result<(), String>) {
+        self.server = match result {
+            // The probe confirms it; until then the card says Starting.
+            Ok(()) => server_state::ServerState::Starting,
+            Err(message) => server_state::ServerState::Failed(message),
+        };
+        for host in self.windows.values_mut() {
+            host.last_space_refresh = None;
+            host.dirty = true;
+            host.window.request_redraw();
+        }
+    }
 }
 
 impl ApplicationHandler<UserAction> for App {
@@ -21098,10 +21253,13 @@ impl ApplicationHandler<UserAction> for App {
             return;
         }
         if let Err(error) = self.ensure_pmuxd_for_startup() {
+            // Open the window anyway: it shows the card with the reason and
+            // Try again, instead of quitting with only a log line.
             eprintln!("prismattyc-host: failed to start pmuxd: {error:#}");
-            self.exit_code = 1;
-            event_loop.exit();
-            return;
+            self.server = server_state::ServerState::Failed(format!("{error:#}"));
+        }
+        if let Some(socket) = host_mux_socket() {
+            self.server_probe = Some(server_state::Probe::spawn(socket, self.wake.clone()));
         }
         if !self.cli.explicit_program && self.cli.attach_sessions.is_empty() {
             if let Some(socket) = host_mux_socket() {
@@ -21184,6 +21342,23 @@ impl ApplicationHandler<UserAction> for App {
         }
         if restart_modal::handle_pointer(host, &event) {
             return;
+        }
+        if host.server_card_shown {
+            if let WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } = &event
+            {
+                if let Some(action) = host.pointer_px.and_then(|(x, y)| {
+                    server_state::hit(&host.server_card_buttons, x as usize, y as usize)
+                }) {
+                    host.server_card_request = Some(action);
+                    host.dirty = true;
+                    host.window.request_redraw();
+                    return;
+                }
+            }
         }
         if host.transparency.is_some()
             && matches!(
@@ -21453,6 +21628,24 @@ impl ApplicationHandler<UserAction> for App {
                 if host.restart_modal.is_some() {
                     restart_modal::dispatch_key(host, &event.logical_key, event.repeat);
                     return;
+                }
+                if host.server_card_shown
+                    && host.palette.is_none()
+                    && host.space_picker.is_none()
+                    && host.context_menu.is_none()
+                    && host.settings.is_none()
+                    && host.theme_picker.is_none()
+                {
+                    match server_state::key(&host.server, &event.logical_key) {
+                        server_state::CardKey::Act(action) => {
+                            host.server_card_request = Some(action);
+                            host.dirty = true;
+                            host.window.request_redraw();
+                            return;
+                        }
+                        server_state::CardKey::Swallow => return,
+                        server_state::CardKey::Pass => {}
+                    }
                 }
                 if host.space_rail.edit.is_some() {
                     handle_space_name_key(host, &event);
@@ -22533,6 +22726,7 @@ impl ApplicationHandler<UserAction> for App {
             UserAction::FocusExisting => self.focus_existing_window(),
             UserAction::FullUpdate(event) => update_flow::event(self, event),
             UserAction::IdleRestartReady => update_flow::begin_idle_restart(self),
+            UserAction::ServerStartFinished(result) => self.server_start_finished(result),
             UserAction::AccessKit(event) => self.handle_accesskit(event_loop, event),
         }
     }

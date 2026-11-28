@@ -7,6 +7,9 @@ pub(super) struct RestorePrompt {
     pub(super) selected: usize,
     automatic_at: Option<Instant>,
     startup: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
+    /// Esc arrived while the daemon was still starting. Apply it when that
+    /// startup finishes, so a restore cannot put the sessions back afterwards.
+    declined: bool,
 }
 
 pub(super) fn cache_matches_space(
@@ -36,6 +39,7 @@ impl RestorePrompt {
                 selected: 0,
                 automatic_at: None,
                 startup: None,
+                declined: false,
             })
     }
 
@@ -162,11 +166,17 @@ pub(super) fn hover_button(host: &HostState) -> Option<usize> {
 }
 
 pub(super) fn finish(host: &mut HostState, accept: bool) {
-    if accept {
-        if let Some(prompt) = host.restore_prompt.as_mut().filter(|p| p.startup.is_some()) {
+    if let Some(prompt) = host.restore_prompt.as_mut().filter(|p| p.startup.is_some()) {
+        if accept {
+            prompt.declined = false;
             prompt.automatic_at = Some(Instant::now());
-            return;
+        } else {
+            // The daemon may still be restoring this Space. Detach only after
+            // that startup returns, or it would put the sessions back.
+            prompt.declined = true;
+            prompt.automatic_at = None;
         }
+        return;
     }
     let Some(prompt) = host.restore_prompt.take() else {
         return;
@@ -228,6 +238,7 @@ pub(super) fn finish(host: &mut HostState, accept: bool) {
             }
         }
     } else {
+        let space_name = prompt.layout.space.clone();
         host.local_views.fresh = true;
         set_current_space(host, None);
         if let Some(path) = host.attach_layout_path.clone() {
@@ -235,6 +246,9 @@ pub(super) fn finish(host: &mut HostState, accept: bool) {
             if let Err(error) = enqueue_attach_tabs(host, &path, Default::default()) {
                 rail_error_toast(host, &format!(" Could not save fresh workspace: {error} "));
             }
+        }
+        if let Some(name) = space_name {
+            detach_saved_sessions(&name);
         }
     }
     host.dirty = true;
@@ -249,26 +263,107 @@ pub(super) fn finish(host: &mut HostState, accept: bool) {
 }
 
 pub(super) fn poll(host: &mut HostState) {
-    let Some(prompt) = host.restore_prompt.as_mut() else {
-        return;
-    };
-    let result = prompt.startup.as_ref().and_then(|rx| match rx.try_recv() {
-        Ok(result) => Some(result),
-        Err(std::sync::mpsc::TryRecvError::Empty) => None,
-        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-            Some(Err("workspace startup worker stopped".into()))
+    enum After {
+        Quiet,
+        Decline,
+        Failed(String),
+        FailedThenDecline(String),
+    }
+    let after = {
+        let Some(prompt) = host.restore_prompt.as_mut() else {
+            return;
+        };
+        let result = prompt.startup.as_ref().and_then(|rx| match rx.try_recv() {
+            Ok(result) => Some(result),
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Some(Err("workspace startup worker stopped".into()))
+            }
+        });
+        if let Some(result) = result {
+            let declined = prompt.declined;
+            prompt.startup = None;
+            match result {
+                Err(error) if declined => After::FailedThenDecline(error),
+                Err(error) => {
+                    prompt.automatic_at = None;
+                    After::Failed(error)
+                }
+                Ok(()) if declined => After::Decline,
+                Ok(()) => After::Quiet,
+            }
+        } else {
+            After::Quiet
         }
-    });
-    if let Some(result) = result {
-        prompt.startup = None;
-        if let Err(error) = result {
-            prompt.automatic_at = None;
+    };
+    match after {
+        After::Failed(error) => {
             rail_error_toast(host, &format!(" Could not start workspace: {error} "));
             return;
         }
+        After::FailedThenDecline(error) => {
+            rail_error_toast(host, &format!(" Could not start workspace: {error} "));
+            finish(host, false);
+            return;
+        }
+        After::Decline => {
+            finish(host, false);
+            return;
+        }
+        After::Quiet => {}
     }
-    if prompt.deadline().is_some_and(|at| Instant::now() >= at) {
+    if host
+        .restore_prompt
+        .as_ref()
+        .is_some_and(|prompt| prompt.deadline().is_some_and(|at| Instant::now() >= at))
+    {
         finish(host, true);
+    }
+}
+
+/// Drop live Space ownership for the saved sessions. Processes keep running
+/// and stay in the attach list. `space remove` without `--kill` is the
+/// existing release; it does not destroy the session.
+fn detach_saved_sessions(space_name: &str) {
+    let Some(socket) = host_mux_socket() else {
+        return;
+    };
+    if !socket.exists() {
+        return;
+    }
+    let Ok(space) = load_space(&spaces_dir(), space_name) else {
+        return;
+    };
+    let pmux = find_mux_bin();
+    for session in space.sessions {
+        let output = prismattyc_process::spawn(
+            prismattyc_mux::platform::hidden_capture_command(&pmux)
+                .arg("--socket")
+                .arg(&socket)
+                .arg("space")
+                .arg("remove")
+                .arg(space_name)
+                .arg("--session")
+                .arg(&session.name),
+        )
+        .and_then(std::process::Child::wait_with_output);
+        match output {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => {
+                let detail = String::from_utf8_lossy(&output.stderr);
+                eprintln!(
+                    "prismattyc-host: could not detach {}: {}",
+                    session.name,
+                    detail.trim()
+                );
+            }
+            Err(error) => {
+                eprintln!(
+                    "prismattyc-host: could not detach {}: {error}",
+                    session.name
+                );
+            }
+        }
     }
 }
 

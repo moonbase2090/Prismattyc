@@ -583,6 +583,134 @@ fn multiplexer_keyboard_keeps_stop_confirmation_on_the_server_row() {
     assert_eq!(fixture.panel.server_request, Some(CardAction::Stop));
 }
 
+#[cfg(unix)]
+#[test]
+fn the_first_stop_counts_live_sessions_and_only_the_second_stops() {
+    use prismattyc_mux::{ControlPlane, ControlServer, Domain, WindowBounds};
+
+    let mut fixture = Fixture::new("");
+    // A real control plane answers the count; it starts with one session.
+    let socket = fixture.dir.join("pmux.sock");
+    let domain = Domain::bootstrap("seat").unwrap();
+    let window = domain
+        .sessions()
+        .next()
+        .and_then(|session| session.windows.first().copied())
+        .unwrap();
+    let plane = ControlPlane::new(
+        domain,
+        [WindowBounds {
+            window_id: window.get(),
+            cols: 80,
+            rows: 24,
+        }],
+        Some(64),
+    )
+    .unwrap();
+    let _server = ControlServer::bind(&socket, plane).unwrap();
+    let (woke, wakes) = mpsc::channel();
+    fixture.panel.wake = std::sync::Arc::new(move || {
+        let _ = woke.send(());
+    });
+    fixture.panel.server_socket = Some(socket);
+    open_multiplexer(&mut fixture);
+    fixture.press(NamedKey::ArrowDown);
+    assert_eq!(fixture.panel.selected(), 1);
+    assert!(fixture.panel.stop_confirmation.is_none(), "starts unarmed");
+
+    fixture.press(NamedKey::Enter);
+    assert!(matches!(
+        fixture.panel.stop_confirmation,
+        Some(StopConfirmation::Counting(_))
+    ));
+    assert_eq!(
+        fixture.panel.server_request, None,
+        "the first Stop only starts the count"
+    );
+    wakes
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the count reports back");
+    assert_eq!(fixture.panel.poll(), (true, false));
+    assert!(matches!(
+        fixture.panel.stop_confirmation,
+        Some(StopConfirmation::Ready(1))
+    ));
+    assert_eq!(fixture.panel.server_request, None);
+    let (_, rows) = fixture.panel.rows();
+    assert!(
+        rows[2].describe.contains("save 1 session and stop"),
+        "{}",
+        rows[2].describe
+    );
+
+    fixture.press(NamedKey::Enter);
+    assert_eq!(fixture.panel.server_request, Some(CardAction::Stop));
+}
+
+#[test]
+fn running_badge_shows_live_session_and_space_counts() {
+    let mut fixture = Fixture::new("");
+    open_multiplexer(&mut fixture);
+    let status = |fixture: &Fixture| {
+        let (_, rows) = fixture.panel.rows();
+        (rows[1].name.clone(), rows[1].describe.clone())
+    };
+    let running = |text: &str| ("Running".to_owned(), text.to_owned());
+    assert_eq!(status(&fixture), running("pmux server"));
+    assert!(fixture.panel.update_live(Some((1, 1))));
+    assert_eq!(
+        status(&fixture),
+        running("pmux server · 1 session · 1 Space")
+    );
+    assert!(fixture.panel.update_live(Some((3, 2))));
+    assert_eq!(
+        status(&fixture),
+        running("pmux server · 3 sessions · 2 Spaces")
+    );
+    assert!(fixture.panel.update_live(Some((0, 0))));
+    assert_eq!(
+        status(&fixture),
+        running("pmux server · 0 sessions · 0 Spaces")
+    );
+    assert!(
+        !fixture.panel.update_live(Some((0, 0))),
+        "unchanged counts need no repaint"
+    );
+
+    // Counts describe a running server only.
+    fixture.panel.update_server(&ServerState::Starting, false);
+    fixture.panel.update_live(Some((2, 1)));
+    assert_eq!(
+        status(&fixture),
+        ("Starting".to_owned(), "pmux server".to_owned())
+    );
+    fixture.panel.update_server(&ServerState::Running, true);
+    fixture.panel.update_live(Some((2, 1)));
+    assert_eq!(status(&fixture), running("Update or restart in progress"));
+}
+
+#[test]
+fn live_counts_count_sessions_and_the_spaces_that_own_them() {
+    let snapshot: prismattyc_mux::Snapshot = serde_json::from_value(serde_json::json!({
+        "sequence": 1,
+        "sessions": [
+            {"id": 1, "name": "a", "space_id": "one", "windows": []},
+            {"id": 2, "name": "b", "space_id": "one", "windows": []},
+            {"id": 3, "name": "loose", "windows": []},
+            {"id": 4, "name": "c", "space_id": "two", "windows": []}
+        ]
+    }))
+    .unwrap();
+    assert_eq!(live_counts(&snapshot), (4, 2));
+    assert_eq!(
+        live_counts(&prismattyc_mux::Snapshot {
+            sequence: 0,
+            sessions: Vec::new()
+        }),
+        (0, 0)
+    );
+}
+
 #[test]
 fn multiplexer_clicks_open_the_right_editor_after_the_action_shifts() {
     let mut fixture = Fixture::new("[mux]\ninstance = \"demo\"");

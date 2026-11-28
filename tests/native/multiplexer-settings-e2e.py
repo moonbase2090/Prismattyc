@@ -5,6 +5,7 @@
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -84,6 +85,13 @@ def exercise(bins, out, scratch, revision, chrome):
     def badge(label):
         return wait(lambda: panel().get("status") == label, f"{label} status badge")
 
+    def live_counts():
+        # Beside Running: both sessions, from the live snapshot.
+        badge("Running")
+        return wait(lambda: re.fullmatch(r"pmux server · 2 sessions · \d+ Spaces?",
+                                         panel().get("status_detail") or ""),
+                    "live session and Space counts beside Running")
+
     def confirmation():
         return (row := action(STOP)) and "2 sessions" in row["detail"]
 
@@ -115,7 +123,7 @@ def exercise(bins, out, scratch, revision, chrome):
             for _ in range(4):
                 key("Left")
             wait(lambda: panel().get("title") == MUX, "Multiplexer")
-            badge("Running")
+            live_counts()
             assert action(START) is None
             key("Down")
             wait(lambda: selected(STOP), "keyboard focus on Stop")
@@ -138,7 +146,7 @@ def exercise(bins, out, scratch, revision, chrome):
             wait(lambda: window().get("server_card"), "the stopped-server card behind Settings")
             capture("stopped")
             click(START)
-            badge("Running")
+            live_counts()
             check_sessions()
             print("PASS keyboard confirmed Stop, mouse started the server, and both sessions returned")
 
@@ -148,7 +156,7 @@ def exercise(bins, out, scratch, revision, chrome):
             click(STOP)
             badge("Stopped")
             key("Return")
-            badge("Running")
+            live_counts()
             check_sessions()
             print("PASS mouse confirmed Stop and keyboard started the server")
 

@@ -80,6 +80,28 @@ pub fn tokens_match(a: &[u8; TOKEN_LEN], b: &[u8; TOKEN_LEN]) -> bool {
     a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
+/// When a holder reports its program's exit. A session reports the exit
+/// only once (reading it reaps the program), and the report waits until the
+/// program's last output has gone out, so it must be kept once seen.
+#[derive(Debug, Default)]
+pub(crate) struct ExitReport {
+    code: Option<u32>,
+}
+
+impl ExitReport {
+    /// Record the exit the first time `poll` returns one; skip `poll` after.
+    pub(crate) fn observe(&mut self, poll: impl FnOnce() -> Option<u32>) {
+        if self.code.is_none() {
+            self.code = poll();
+        }
+    }
+
+    /// The exit code to send, once the output is quiet.
+    pub(crate) fn ready(&self, quiet: bool) -> Option<u32> {
+        self.code.filter(|_| quiet)
+    }
+}
+
 #[cfg(windows)]
 pub use self::windows::{run_holder, spawn_holder};
 
@@ -115,7 +137,8 @@ mod windows {
     };
 
     use super::{
-        hex, pipe_base, pipe_paths, token_from_hex, tokens_match, HolderSpec, DISCONNECT_GRACE_MS,
+        hex, pipe_base, pipe_paths, token_from_hex, tokens_match, ExitReport, HolderSpec,
+        DISCONNECT_GRACE_MS,
     };
     use crate::platform::UserOnlyDescriptor;
     use crate::pty_holder_frame::{read_frame, write_frame, Frame, HOLDER_PROTOCOL, TOKEN_LEN};
@@ -321,39 +344,42 @@ mod windows {
             let exited = exited.clone();
             thread::Builder::new()
                 .name("holder-forward".into())
-                .spawn(move || loop {
-                    match forward.recv_timeout(EXIT_POLL) {
-                        Ok(bytes) => link.send(&Frame::Output(bytes)),
-                        Err(mpsc::RecvTimeoutError::Timeout) => {}
-                        // The console reached end of file; keep polling the exit.
-                        Err(mpsc::RecvTimeoutError::Disconnected) => thread::sleep(EXIT_POLL),
+                .spawn(move || {
+                    let mut ended = ExitReport::default();
+                    loop {
+                        match forward.recv_timeout(EXIT_POLL) {
+                            Ok(bytes) => link.send(&Frame::Output(bytes)),
+                            Err(mpsc::RecvTimeoutError::Timeout) => {}
+                            // The console reached end of file; keep polling the exit.
+                            Err(mpsc::RecvTimeoutError::Disconnected) => thread::sleep(EXIT_POLL),
+                        }
+                        ended.observe(|| {
+                            session
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .try_wait()
+                                .ok()
+                                .flatten()
+                                .map(|status| status.exit_code())
+                        });
+                        let quiet = link
+                            .last_output
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .elapsed()
+                            >= EXIT_QUIET;
+                        let Some(code) = ended.ready(quiet) else {
+                            continue;
+                        };
+                        while let Ok(bytes) = forward.try_recv() {
+                            link.send(&Frame::Output(bytes));
+                        }
+                        link.send(&Frame::Exit { code });
+                        exited.store(true, Ordering::Release);
+                        // Give the server a moment to read the exit, then go.
+                        thread::sleep(Duration::from_millis(200));
+                        std::process::exit(0);
                     }
-                    let status = session
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .try_wait()
-                        .ok()
-                        .flatten();
-                    let Some(status) = status else { continue };
-                    let quiet = link
-                        .last_output
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .elapsed()
-                        >= EXIT_QUIET;
-                    if !quiet {
-                        continue;
-                    }
-                    while let Ok(bytes) = forward.try_recv() {
-                        link.send(&Frame::Output(bytes));
-                    }
-                    link.send(&Frame::Exit {
-                        code: status.exit_code(),
-                    });
-                    exited.store(true, Ordering::Release);
-                    // Give the server a moment to read the exit, then go.
-                    thread::sleep(Duration::from_millis(200));
-                    std::process::exit(0);
                 })?;
         }
 
@@ -755,6 +781,20 @@ mod windows {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_exit_seen_while_output_is_still_coming_is_reported_later() {
+        // A session reports the exit once, then reports nothing.
+        let mut reports = vec![None, Some(7)].into_iter();
+        let mut poll = move || reports.next().flatten();
+        let mut exit = ExitReport::default();
+        exit.observe(&mut poll);
+        assert_eq!(exit.ready(true), None, "still running");
+        exit.observe(&mut poll);
+        assert_eq!(exit.ready(false), None, "output is not quiet yet");
+        exit.observe(&mut poll);
+        assert_eq!(exit.ready(true), Some(7), "the exit is kept once seen");
+    }
 
     #[test]
     fn tokens_round_trip_through_hex_and_reject_anything_else() {

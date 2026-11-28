@@ -2,14 +2,28 @@
 
 ## [Unreleased]
 
+## [0.3.82] - 2026-11-28
+
 ### Added
 
+- **Settings > Multiplexer** shows the pmux server state. Stop asks for a second confirmation and shows how many sessions will be saved. Start brings the saved sessions back. The Running badge shows live session and Space counts when available.
+
 - A floating pane has a **Dock** button in its title row. The new `float_pane` key (**Ctrl+Alt+Shift+F** by default) floats the focused pane, and pressing it again docks the floating pane from any pane. It is in the command palette, `--list-bindings` and the pane menu. Right-clicking the tile under a floating pane also offers **Dock pane**.
+
+### Changed
+
+- After a live update, **Update and restart** reports which sessions kept running and lists any that are missing afterward.
 
 ### Fixed
 
 - **Restore workspace** at launch brings a floating pane back as an overlay. It used to come back docked.
 - A pane no longer shows "new output" for output the app caused itself, such as a shell redrawing after the app resized or reattached it.
+- After a failed server start, the recovery card appears as soon as the launch splash is dismissed. Its buttons then accept input.
+- **Start fresh** keeps the window responsive while releasing the saved Space's sessions and shows any sessions it could not release. Pressing Esc while the server is starting shows that Start fresh is queued.
+
+### Tests and documentation
+
+- The attach tests cover slow server startup and verify that an interactive attach exits if a different server takes over its socket. The documentation explains when attach retries and when it exits. The launch tests check the restore countdown at its exact deadline.
 
 ## [0.3.81] - 2026-11-28
 

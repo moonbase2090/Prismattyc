@@ -83,11 +83,13 @@ pub fn tokens_match(a: &[u8; TOKEN_LEN], b: &[u8; TOKEN_LEN]) -> bool {
 /// When a holder reports its program's exit. A session reports the exit
 /// only once (reading it reaps the program), and the report waits until the
 /// program's last output has gone out, so it must be kept once seen.
+#[cfg(any(windows, test))]
 #[derive(Debug, Default)]
 pub(crate) struct ExitReport {
     code: Option<u32>,
 }
 
+#[cfg(any(windows, test))]
 impl ExitReport {
     /// Record the exit the first time `poll` returns one; skip `poll` after.
     pub(crate) fn observe(&mut self, poll: impl FnOnce() -> Option<u32>) {
@@ -233,6 +235,125 @@ mod windows {
             } else {
                 thread::sleep(Duration::from_millis(20));
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, HANDLE};
+        use windows_sys::Win32::Security::Authorization::{
+            ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
+            SE_KERNEL_OBJECT,
+        };
+        use windows_sys::Win32::Security::{
+            ImpersonateLoggedOnUser, LogonUserW, RevertToSelf, DACL_SECURITY_INFORMATION,
+            LOGON32_LOGON_NETWORK, LOGON32_PROVIDER_DEFAULT,
+        };
+
+        fn pipe_dacl(pipe: &File) -> String {
+            let mut descriptor = std::ptr::null_mut();
+            // SAFETY: a live pipe handle; the descriptor is LocalAlloc'd.
+            let status = unsafe {
+                GetSecurityInfo(
+                    pipe.as_raw_handle() as HANDLE,
+                    SE_KERNEL_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut descriptor,
+                )
+            };
+            assert_eq!(status, 0, "GetSecurityInfo");
+            let mut text = std::ptr::null_mut();
+            // SAFETY: `descriptor` came from GetSecurityInfo above.
+            let ok = unsafe {
+                ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                    descriptor,
+                    SDDL_REVISION_1,
+                    DACL_SECURITY_INFORMATION,
+                    &mut text,
+                    std::ptr::null_mut(),
+                )
+            };
+            assert_ne!(
+                ok, 0,
+                "ConvertSecurityDescriptorToStringSecurityDescriptorW"
+            );
+            let mut len = 0;
+            // SAFETY: `text` is a NUL-terminated string from the call above.
+            while unsafe { *text.add(len) } != 0 {
+                len += 1;
+            }
+            // SAFETY: `len` UTF-16 units were just measured.
+            let sddl = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text, len) });
+            // SAFETY: both were LocalAlloc'd by the calls above.
+            unsafe {
+                windows_sys::Win32::Foundation::LocalFree(text.cast());
+                windows_sys::Win32::Foundation::LocalFree(descriptor);
+            }
+            sddl
+        }
+
+        fn test_pipe_path() -> String {
+            let mut nonce = [0u8; 8];
+            getrandom::fill(&mut nonce).unwrap();
+            pipe_paths(&pipe_base(std::process::id(), &nonce)).0
+        }
+
+        /// The holder's pipe admits only the user who runs the server: its
+        /// DACL is protected and has one entry, for that user. When the run
+        /// provides another local account (`PMUX_TEST_OTHER_USER` and
+        /// `PMUX_TEST_OTHER_PASSWORD`, as the clean-VM proof does), opening
+        /// the pipe as that account is refused while this user can open it.
+        #[test]
+        fn a_holder_pipe_admits_only_the_current_user() {
+            let path = test_pipe_path();
+            let pipe = create_pipe(&path, PIPE_ACCESS_INBOUND).unwrap();
+            let sid = crate::platform::current_user_sid().unwrap();
+            assert_eq!(pipe_dacl(&pipe), format!("D:P(A;;FA;;;{sid})"));
+
+            if let (Ok(user), Ok(password)) = (
+                std::env::var("PMUX_TEST_OTHER_USER"),
+                std::env::var("PMUX_TEST_OTHER_PASSWORD"),
+            ) {
+                let mut token: HANDLE = std::ptr::null_mut();
+                // SAFETY: NUL-terminated strings; `token` receives a handle.
+                let logged_on = unsafe {
+                    LogonUserW(
+                        wide(&user).as_ptr(),
+                        wide(".").as_ptr(),
+                        wide(&password).as_ptr(),
+                        LOGON32_LOGON_NETWORK,
+                        LOGON32_PROVIDER_DEFAULT,
+                        &mut token,
+                    )
+                };
+                assert_ne!(
+                    logged_on,
+                    0,
+                    "log on as {user}: {}",
+                    io::Error::last_os_error()
+                );
+                // SAFETY: `token` is a fresh logon token.
+                assert_ne!(unsafe { ImpersonateLoggedOnUser(token) }, 0);
+                let refused = open_pipe(&path, GENERIC_WRITE, Instant::now());
+                // SAFETY: undo the impersonation on this thread.
+                unsafe {
+                    RevertToSelf();
+                    CloseHandle(token);
+                }
+                let err = refused.expect_err("another user opened the holder pipe");
+                assert_eq!(
+                    err.raw_os_error(),
+                    Some(ERROR_ACCESS_DENIED as i32),
+                    "{err}"
+                );
+                eprintln!("checked: {user} cannot open the holder pipe");
+            }
+            open_pipe(&path, GENERIC_WRITE, Instant::now()).expect("the owner opens it");
         }
     }
 

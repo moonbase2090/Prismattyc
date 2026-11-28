@@ -40,6 +40,8 @@ pub fn secure_directory(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(all(windows, test))]
+pub(crate) use windows::current_user_sid;
+#[cfg(all(windows, test))]
 pub(crate) use windows::private_to_user;
 #[cfg(windows)]
 pub(crate) use windows::UserOnlyDescriptor;
@@ -113,6 +115,12 @@ mod windows {
                 bInheritHandle: 0,
             }
         }
+    }
+
+    /// The current user's SID as a string, for tests.
+    #[cfg(test)]
+    pub(crate) fn current_user_sid() -> io::Result<String> {
+        user_sid()
     }
 
     fn user_sid() -> io::Result<String> {

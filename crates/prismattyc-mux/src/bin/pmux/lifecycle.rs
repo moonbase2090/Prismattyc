@@ -440,6 +440,31 @@ fn stop_daemon(executable: &Path, paths: &Paths) -> Result<()> {
     Ok(())
 }
 
+/// `pmux stop --save`: record the running sessions as the workspace, stop
+/// the server in order so every pane's scrollback is written, then write the
+/// workspace for `pmux up --restore-workspace`. These are the steps a
+/// restart that keeps its sessions takes, without the start.
+pub(super) fn stop_saving(paths: &Paths) -> Result<()> {
+    let _lock = components::coordinator_lock(&paths.socket)?;
+    let mut client = Client::connect(&paths.socket).context("the pmux server is not running")?;
+    let snapshot = take_snapshot(&mut client)?;
+    let view = prismattyc_mux::attach_tabs::load(
+        &prismattyc_mux::attach_tabs::layout_path_from_socket(&paths.socket),
+    );
+    let workspace = prismattyc_mux::workspace::Workspace::for_update(snapshot, view)
+        .context("could not record the sessions to restore; nothing was stopped")?;
+    let saved = workspace.session_names();
+    drop(client);
+    let executable = std::env::current_exe()?;
+    stop_daemon(&executable, paths)?;
+    // Written after the server exits so its last checkpoint cannot replace it.
+    workspace
+        .write(&paths.socket)
+        .context("the server stopped, but the sessions to restore could not be written")?;
+    println!("{}", json!({"status": "stopped", "saved": saved}));
+    Ok(())
+}
+
 /// Which saved sessions the restarted daemon brought back.
 fn restored_sessions(paths: &Paths, saved: Vec<String>) -> serde_json::Value {
     let running = Client::connect(&paths.socket).and_then(|mut client| take_snapshot(&mut client));

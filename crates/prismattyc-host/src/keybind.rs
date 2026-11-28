@@ -55,6 +55,8 @@ pub enum Action {
     SessionSplitRight,
     SessionSplitDown,
     TerminalSwitcher,
+    StartServer,
+    StopServer,
     AttachSession,
     AgentMessages,
     /// Open or focus the Activity Monitor Space.
@@ -201,6 +203,8 @@ impl Action {
             Action::SessionSplitRight,
             Action::SessionSplitDown,
             Action::TerminalSwitcher,
+            Action::StartServer,
+            Action::StopServer,
             Action::AttachSession,
             Action::AgentMessages,
             Action::ActivityMonitor,
@@ -302,6 +306,8 @@ impl Action {
             Action::SessionSplitRight => "session_split_right".into(),
             Action::SessionSplitDown => "session_split_down".into(),
             Action::TerminalSwitcher => "terminal_switcher".into(),
+            Action::StartServer => "start_server".into(),
+            Action::StopServer => "stop_server".into(),
             Action::AttachSession => "attach_session".into(),
             Action::AgentMessages => "agent_messages".into(),
             Action::ActivityMonitor => "activity_monitor".into(),
@@ -403,6 +409,8 @@ impl Action {
             Action::SessionSplitRight => "split right with an automatically named session".into(),
             Action::SessionSplitDown => "split down with an automatically named session".into(),
             Action::TerminalSwitcher => "find a terminal across Spaces".into(),
+            Action::StartServer => "start the pmux server and restore saved sessions".into(),
+            Action::StopServer => "save every session, then stop the pmux server".into(),
             Action::AttachSession => {
                 "Attach running session: bring a live session into this Space".into()
             }
@@ -584,6 +592,8 @@ impl Action {
             | Action::ActivityMonitor
             | Action::JumpNeedsYou
             | Action::TerminalSwitcher
+            | Action::StartServer
+            | Action::StopServer
             | Action::AttachSession
             | Action::OpenSpace
             | Action::DeleteSpace
@@ -1220,6 +1230,8 @@ pub(crate) fn default_chords(action: Action) -> Vec<&'static str> {
         Action::SessionSplitDown => vec!["ctrl+alt+shift+b"],
         Action::TerminalSwitcher => vec!["ctrl+shift+o"],
         Action::AgentMessages
+        | Action::StartServer
+        | Action::StopServer
         | Action::AttachSession
         | Action::ActivityMonitor
         | Action::UpdateRestart
@@ -1639,6 +1651,8 @@ mod tests {
         matches!(
             action,
             Action::AgentMessages
+                | Action::StartServer
+                | Action::StopServer
                 | Action::AttachSession
                 | Action::ActivityMonitor
                 | Action::UpdateRestart

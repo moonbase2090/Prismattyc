@@ -375,6 +375,10 @@ session_split_right = "ctrl+alt+shift+r"
 session_split_down = "ctrl+alt+shift+b"
 # find a terminal across Spaces.
 terminal_switcher = "ctrl+shift+o"
+# start the pmux server and restore saved sessions.
+# start_server = []
+# save every session, then stop the pmux server.
+# stop_server = []
 # Attach running session: bring a live session into this Space.
 # attach_session = []
 # view pending mail and pane input queue receipts.

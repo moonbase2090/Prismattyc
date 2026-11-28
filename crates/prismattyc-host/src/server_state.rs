@@ -108,6 +108,8 @@ impl Probe {
 pub(crate) enum CardAction {
     Start,
     LocalShell,
+    /// Save every session, then stop the server (confirmed by the caller).
+    Stop,
 }
 
 struct CardCopy {

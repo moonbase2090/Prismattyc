@@ -19,8 +19,8 @@ import time
 from pathlib import Path
 
 MAC = sys.platform == 'darwin'
-MAC_CODES = {'t': 17, 'Return': 36}
-MAC_FLAGS = {'shift': 1 << 17, 'ctrl': 1 << 18}
+MAC_CODES = {'t': 17, 'u': 32, 'Return': 36, 'Down': 125}
+MAC_FLAGS = {'shift': 1 << 17, 'ctrl': 1 << 18, 'alt': 1 << 19}
 
 
 def main():
@@ -35,9 +35,14 @@ def main():
     runtime = Path(tempfile.mkdtemp(prefix='pcard-', dir='/tmp'))
     for name in ('home', 'config', 'data', 'state', 'project'):
         (out / name).mkdir()
+    # Login shells take their prompt from the system profile, which names the
+    # machine; frames are published, so every shell gets a neutral prompt.
+    for profile in ('.profile', '.bash_profile', '.bashrc', '.zshrc'):
+        (out / 'home' / profile).write_text("PS1='card> '\nPROMPT='card> '\n")
     config = out / 'config.toml'
     config.write_text('splash = false\nstart_at_login = false\nautomatic_update_checks = false\n'
-                      'install_agent_skills = false\nspace_startup = "fresh"\nchrome_style = "graphite"\n')
+                      'install_agent_skills = false\nspace_startup = "fresh"\nchrome_style = "graphite"\n'
+                      '[keys]\nupdate_restart = "ctrl+alt+u"\n')
     # `pmux up` fails while the mode file says so; everything else is real.
     mode = out / 'mode'
     mode.write_text('fail')
@@ -101,7 +106,14 @@ exec {bins / 'pmux'} "$@"
         cg.CGEventPostToPid.argtypes = [ctypes.c_int, ctypes.c_void_p]
         cf.CFRelease.argtypes = [ctypes.c_void_p]
 
+    def seq():
+        return status()['last_raster']['capture_seq']
+
     def key(name, mods=()):
+        try:
+            before = seq()
+        except (AssertionError, KeyError, ValueError):
+            before = None
         if MAC:
             flags = 0
             for mod in mods:
@@ -114,7 +126,13 @@ exec {bins / 'pmux'} "$@"
         else:
             subprocess.run(['xdotool', 'key', '--clearmodifiers', '+'.join([*mods, name])],
                            check=True, env=env)
-        time.sleep(.5)
+        # Render status is published with each presented frame.
+        if before is not None:
+            try:
+                wait(lambda: seq() > before, 'frame after ' + name, timeout=5)
+            except AssertionError:
+                pass
+        time.sleep(.3)
 
     def capture(name):
         time.sleep(1.2)
@@ -125,6 +143,19 @@ exec {bins / 'pmux'} "$@"
         print('PASS ' + check, flush=True)
 
     status = window
+
+    def select_row(prefix):
+        """Arrow to the update-menu row starting with prefix, one step at a time."""
+        details = wait(lambda: (d := status().get('space_details')) and any(
+            row.startswith(prefix) for row in d['rows']) and d, 'menu row ' + prefix)
+        target = next(i for i, row in enumerate(details['rows']) if row.startswith(prefix))
+        for _ in range(len(details['rows']) + 2):
+            current = status()['space_details']['selected']
+            if current == target:
+                return
+            key('Down')
+            wait(lambda: status()['space_details']['selected'] != current, 'selection moved')
+        raise AssertionError(f'never reached {prefix}: {status()["space_details"]}')
 
     try:
         host = subprocess.Popen([str(bins / 'prismattyc-host')], env=env, cwd=out / 'project',
@@ -181,6 +212,53 @@ exec {bins / 'pmux'} "$@"
         assert status()['server'] == 'stopped'
         capture('5-local-shell')
         record('local shell: the new-tab key opened a local shell and the card stepped aside')
+
+        # Stop from Update and restart: it asks first, saves the sessions,
+        # clears a pending restart-when-idle, and Start brings them back.
+        cli('up')
+        wait(lambda: status()['server'] == 'running', 'running again', timeout=60)
+        # The plain stop above ended work-1; this session is the one to save.
+        cli('new', '--no-attach', 'kept', '--', '/bin/sh')
+        work_file = next(path for root in (out, runtime) for path in Path(root).rglob('work.json'))
+        marker = work_file.parent / 'restart-when-idle'
+        marker.write_text('v1\nrelease=0.0.0\n')
+        key('u', ('ctrl', 'alt'))
+        select_row('Stop the pmux server')
+        key('Return')
+        details = wait(lambda: (d := status().get('space_details')) and any(
+            row.startswith('Enter again saves') for row in d['rows']) and d, 'stop asks first')
+        assert status()['server'] == 'running', 'nothing stops on the first Enter'
+        capture('6-stop-confirm')
+        key('Return')
+        wait(lambda: status()['server'] == 'stopped', 'Save and stop', timeout=60)
+        assert not marker.exists(), 'the restart-when-idle marker is cleared'
+        # This window still has the local shell from above, so no card.
+        assert not status()['server_card']
+        record('stop: the update menu asked first, then saved, stopped and cleared restart-when-idle')
+        key('u', ('ctrl', 'alt'))
+        select_row('Start the pmux server')
+        capture('7-start-row')
+        key('Return')
+        wait(lambda: status()['server'] == 'running' and not status()['server_card'], 'Start', timeout=60)
+        assert 'kept' in cli('ls'), 'the saved session came back'
+        capture('8-restored')
+        record('start: the saved session came back')
+
+        # A saved workspace that cannot be read stops Start with its reason.
+        cli('stop', '--save')
+        wait(lambda: status()['server'] == 'stopped', 'stopped again', timeout=60)
+        saved = next(path for root in (out, runtime) for path in Path(root).rglob('workspace.json'))
+        saved.write_text('{ not a workspace')
+        key('u', ('ctrl', 'alt'))
+        select_row('Start the pmux server')
+        key('Return')
+        state = wait(lambda: (s := status()) and s['server'].startswith('failed:') and s,
+                     'unreadable workspace', timeout=60)
+        assert 'could not be read' in state['server'], state['server']
+        wait(lambda: status()['server_card'], 'card with the reason')
+        assert 'status: not running' in cli('status'), 'nothing started'
+        capture('9-unreadable-workspace')
+        record('unreadable saved sessions: Start stopped and showed the reason')
         result['status'] = 'PASS'
     finally:
         (out / 'result.json').write_text(json.dumps(result, indent=2))

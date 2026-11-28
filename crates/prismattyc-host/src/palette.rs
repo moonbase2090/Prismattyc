@@ -1524,6 +1524,8 @@ mod tests {
                 "move_pane_to_space",
                 "undo_space_change",
                 "save_space",
+                "stop_server",
+                "start_server",
                 "attach_session",
                 "activity_monitor",
                 "jump_needs_you",

@@ -741,6 +741,12 @@ fn main() -> Result<()> {
             reject_session_flag(cli_session.as_deref(), "status")?;
             cmd_status(&paths)
         }
+        Verb::Stop if rest.iter().any(|arg| arg == "--save") => {
+            if cli_session.is_some() || rest.iter().any(|arg| arg != "--save") {
+                bail!("usage: pmux stop --save   (stops every session after saving them)");
+            }
+            lifecycle::stop_saving(&paths)
+        }
         Verb::Stop => cmd_stop(&paths, session_from_args(cli_session, rest, "stop")?),
         Verb::Restart => {
             reject_session_flag(cli_session.as_deref(), "restart")?;

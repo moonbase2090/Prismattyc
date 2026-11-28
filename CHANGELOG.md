@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Esc** on the launch choice keeps the fresh window and releases the saved Space's running sessions. Those sessions keep running and can be attached again. The Space stays on the rail. Enter, and a countdown that ends with no key, still restore the Space.
+
 ## [0.3.80] - 2026-11-28
 
 ### Added

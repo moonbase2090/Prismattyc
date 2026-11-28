@@ -123,15 +123,18 @@ Restart those components before removing the retained bundle.
 
 ## Keeping programs running
 
-On macOS and Linux, **Save and restart** first asks the running pmux server to
-hand its sessions to the new one. The new pmux server takes over each pane's
-terminal in the same process, so the programs in your panes keep running with
+**Save and restart** first asks the running pmux server to hand its sessions
+to the new one. On macOS and Linux the new pmux server takes over each pane's
+terminal in the same process; on Windows it is a new process that reconnects
+to each pane's holder (see below). Either way the programs in your panes keep running with
 their screens, scrollback and unsaved state. Nothing is restarted: the
 result says the pmux server moved to the new version without stopping, and
 names the sessions that kept running. App windows reconnect to their
-panes by themselves. An interactive `pmux attach` in another terminal also reconnects
-to its current pane, repaints the screen, and accepts input again. If the
-server process is replaced or the pane no longer exists, the attach ends.
+panes by themselves. On macOS and Linux an interactive `pmux attach` in another
+terminal also reconnects to its current pane, repaints the screen, and accepts
+input again. If the server process is replaced or the pane no longer exists,
+the attach ends. On Windows the server process always changes, so an
+interactive `pmux attach` ends; run it again to reach the same pane.
 
 How an interactive attach recovers from a lost connection:
 
@@ -151,15 +154,23 @@ cannot (an older release on either side, or a pane that does not pause in
 time), nothing changes and the restart below runs instead. If the new server
 fails to start after the hand-over, the sessions come back from the saved
 workspace as after a restart. Set `live_update = false` in the `[mux]` section
-of the config file to always restart instead. Windows always restarts.
+of the config file to always restart instead.
 
 ### Pane holders on Windows
 
 On Windows each pane's console and program run in a small pane holder
 process (`pmuxd --pty-holder`) instead of inside the pmux server. A Windows
-console cannot move from one process to another, so this is what will let a
-future server update keep Windows programs running. Today Windows still
-restarts the sessions on an update.
+console cannot move from one process to another, so this is what lets a
+server update keep Windows programs running.
+
+In a live update on Windows the old server pauses every holder, so no output
+is lost, and writes what the new server needs (each pane's screen, recent
+output and holder) to a file next to the socket that only your user can read.
+It tells each holder to keep its program for 30 seconds, starts the new
+server and exits. The new server reads and deletes that file, reconnects to
+each holder and takes over the socket. A pane whose holder it cannot reach
+starts again as after a restart. Panes that run without a holder
+(`pty_holder = false`) cannot be handed over, so the update restarts instead.
 
 - The server talks to each holder over a named pipe that only your user can
   open and that refuses connections from other machines.

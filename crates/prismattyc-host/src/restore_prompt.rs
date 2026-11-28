@@ -278,6 +278,11 @@ pub(super) fn finish(host: &mut HostState, accept: bool) {
 }
 
 pub(super) fn poll(host: &mut HostState) {
+    poll_at(host, Instant::now());
+}
+
+/// [`poll`] at a given time, so tests drive the countdown without the clock.
+pub(super) fn poll_at(host: &mut HostState, now: Instant) {
     enum After {
         Quiet,
         Decline,
@@ -334,7 +339,7 @@ pub(super) fn poll(host: &mut HostState) {
             prompt.held_for_splash,
             prompt.startup.is_some(),
             prompt.automatic_at,
-            Instant::now(),
+            now,
         )
     });
     match step {
@@ -345,7 +350,7 @@ pub(super) fn poll(host: &mut HostState) {
         }
         Some(CountdownStep::Rearm) => {
             if let Some(prompt) = host.restore_prompt.as_mut() {
-                prompt.automatic_at = Some(Instant::now() + RESTORE_COUNTDOWN);
+                prompt.automatic_at = Some(now + RESTORE_COUNTDOWN);
                 prompt.held_for_splash = false;
             }
         }
@@ -516,9 +521,8 @@ pub(super) fn test_expire_countdown(host: &mut HostState) {
 }
 
 #[cfg(all(test, target_os = "linux"))]
-pub(super) fn test_countdown_remaining_ms(host: &HostState) -> Option<u128> {
-    let at = host.restore_prompt.as_ref()?.automatic_at?;
-    Some(at.saturating_duration_since(Instant::now()).as_millis())
+pub(super) fn test_countdown_deadline(host: &HostState) -> Option<Instant> {
+    host.restore_prompt.as_ref()?.automatic_at
 }
 
 #[cfg(test)]

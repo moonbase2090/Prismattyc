@@ -8171,16 +8171,19 @@ fn rasterize_frame(
         }
     }
     // The server card sits over dead panes, under every dialog and menu.
+    // The launch splash owns the window and its input, so the card waits
+    // until the splash is dismissed instead of painting over it.
     let local_live = host.mux.panes_and_rects().any(|(id, runtime, _)| {
         runtime.child_alive && !host.attach_pane_sessions.contains_key(&id)
     });
-    host.server_card_shown = server_state::shows_card(
-        &host.server,
-        SystemTime::now(),
-        local_live,
-        host.server_card_dismissed,
-        host.server_busy,
-    );
+    host.server_card_shown = host.splash.is_none()
+        && server_state::shows_card(
+            &host.server,
+            SystemTime::now(),
+            local_live,
+            host.server_card_dismissed,
+            host.server_busy,
+        );
     if host.server_card_shown {
         let server = host.server.clone();
         host.server_card_buttons =

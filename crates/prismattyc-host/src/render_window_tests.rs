@@ -591,20 +591,27 @@ fn verify_countdown_waits_for_splash(
             host.restore_prompt.is_some(),
             "dismissing the splash leaves the choice"
         );
-        restore_prompt::poll(host);
+        // The clock is the test's: the re-armed deadline is exact, and the
+        // choice holds until that instant, not a moment before.
+        let dismissed_at = Instant::now();
+        restore_prompt::poll_at(host, dismissed_at);
         assert!(
             host.restore_prompt.is_some(),
             "dismissing the splash must not restore by itself"
         );
-        let remaining = restore_prompt::test_countdown_remaining_ms(host)
+        let deadline = restore_prompt::test_countdown_deadline(host)
             .expect("the countdown starts when the splash is dismissed");
-        let limit = Duration::from_secs(3).as_millis();
-        assert!(
-            remaining > limit - 1_000 && remaining <= limit,
-            "rearmed countdown is {remaining} ms"
+        assert_eq!(
+            deadline,
+            dismissed_at + Duration::from_secs(3),
+            "the countdown re-arms for its full length from the dismissal"
         );
-        restore_prompt::test_expire_countdown(host);
-        restore_prompt::poll(host);
+        restore_prompt::poll_at(host, deadline - Duration::from_millis(1));
+        assert!(
+            host.restore_prompt.is_some(),
+            "the choice waits until the re-armed deadline"
+        );
+        restore_prompt::poll_at(host, deadline);
         assert!(
             host.restore_prompt.is_none(),
             "the countdown restores once the splash is gone and the deadline passes"
@@ -612,6 +619,29 @@ fn verify_countdown_waits_for_splash(
     }
     app.windows.clear();
     std::fs::write(path, original).unwrap();
+}
+
+/// A failed server start at launch must not paint its card over the splash,
+/// which owns the window's input; the card shows once the splash is gone.
+fn verify_server_card_waits_for_splash(host: &mut HostState) {
+    let size = host.window.inner_size();
+    let mut pixels = vec![0u32; size.width as usize * size.height as usize];
+    host.server = server_state::ServerState::Failed("socket directory is not writable".into());
+    host.server_card_dismissed = false;
+    host.server_busy = false;
+    rasterize_frame(host, &mut pixels, size.width, size.height, true);
+    assert!(
+        !host.server_card_shown,
+        "the server card must not paint above the launch splash"
+    );
+    dispatch_splash_key(host, &Key::Named(NamedKey::Escape), ModifiersState::empty());
+    assert!(host.splash.is_none(), "escape dismisses the splash");
+    rasterize_frame(host, &mut pixels, size.width, size.height, true);
+    assert!(
+        host.server_card_shown,
+        "the failed start shows its card once the splash is dismissed"
+    );
+    host.server = server_state::ServerState::Running;
 }
 
 /// Wait until no open window has a layout write queued. The cache writer
@@ -730,6 +760,7 @@ fn verify_startup_restore(app: &mut App, event_loop: &ActiveEventLoop) {
         "a fresh bare launch keeps its splash"
     );
     assert!(app.windows[&fresh].restore_prompt.is_none());
+    verify_server_card_waits_for_splash(app.windows.get_mut(&fresh).unwrap());
     app.windows.clear();
     let path = attach_tabs::layout_path_from_socket(&host_mux_socket().unwrap());
     // Missing sessions fall back to a nested pmux child. The unit-test runner

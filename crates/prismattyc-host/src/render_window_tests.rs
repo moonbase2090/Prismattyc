@@ -559,6 +559,60 @@ fn paint_in_real_window(restore_only: bool) {
     assert!(proof.painted, "the event loop must run the paint assertion");
 }
 
+/// The splash covers the restore choice. An expired countdown must not accept
+/// Restore until the splash is dismissed, and dismissing it starts the wait.
+fn verify_countdown_waits_for_splash(
+    app: &mut App,
+    event_loop: &ActiveEventLoop,
+    path: &std::path::Path,
+    original: &[u8],
+) {
+    let id = app.open_window(event_loop, false).unwrap();
+    {
+        let host = app.windows.get_mut(&id).unwrap();
+        assert!(
+            host.splash.is_some(),
+            "the splash covers the restore choice"
+        );
+        assert!(
+            host.restore_prompt.is_some(),
+            "the restore choice is waiting under the splash"
+        );
+        restore_prompt::test_expire_countdown(host);
+        restore_prompt::poll(host);
+        assert!(
+            host.splash.is_some() && host.restore_prompt.is_some(),
+            "an expired countdown must not restore while the splash is up"
+        );
+        dispatch_splash_key(host, &Key::Named(NamedKey::Escape), ModifiersState::empty());
+        assert!(host.splash.is_none(), "escape dismisses the splash");
+        assert!(
+            host.restore_prompt.is_some(),
+            "dismissing the splash leaves the choice"
+        );
+        restore_prompt::poll(host);
+        assert!(
+            host.restore_prompt.is_some(),
+            "dismissing the splash must not restore by itself"
+        );
+        let remaining = restore_prompt::test_countdown_remaining_ms(host)
+            .expect("the countdown starts when the splash is dismissed");
+        let limit = Duration::from_secs(3).as_millis();
+        assert!(
+            remaining > limit - 1_000 && remaining <= limit,
+            "rearmed countdown is {remaining} ms"
+        );
+        restore_prompt::test_expire_countdown(host);
+        restore_prompt::poll(host);
+        assert!(
+            host.restore_prompt.is_none(),
+            "the countdown restores once the splash is gone and the deadline passes"
+        );
+    }
+    app.windows.clear();
+    std::fs::write(path, original).unwrap();
+}
+
 /// Exercise the first-window cache boundary, not just the prompt's key map.
 fn verify_startup_restore(app: &mut App, event_loop: &ActiveEventLoop) {
     app.windows.clear();
@@ -600,6 +654,7 @@ fn verify_startup_restore(app: &mut App, event_loop: &ActiveEventLoop) {
     };
     attach_tabs::persist_if_changed(&path, &mut None, saved.clone()).unwrap();
     let original = std::fs::read(&path).unwrap();
+    verify_countdown_waits_for_splash(app, event_loop, &path, &original);
     let id = app.open_window(event_loop, false).unwrap();
     app.poll_attach_tabs();
     {

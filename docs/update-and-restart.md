@@ -535,3 +535,13 @@ Remove-Item -Recurse -Force "$env:LOCALAPPDATA\prismattyc\updates"
 Remove-Item -Force "$env:APPDATA\prismattyc\config.toml"
 # Remove the Start Menu shortcut and the user PATH entry that the preview installer added.
 ```
+
+## When the pmux server is stopped
+
+The app starts the pmux server on every launch. If that start fails, the
+window still opens and shows the reason, with **Try again** (Enter) and
+**Open a local shell**. While the server is stopped, starting or failed to
+start, a window with no local shell shows one card in place of its session
+panes; a short gap during a restart does not show it. **Start the pmux
+server** (Enter) starts it again and the Space's sessions reattach. While the
+server is down, the new-tab key opens a local shell instead of a new session.

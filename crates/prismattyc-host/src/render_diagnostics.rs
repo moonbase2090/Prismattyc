@@ -391,6 +391,13 @@ impl App {
                 "space_rail_position": host.spacing.space_rail.as_str(),
                 "space_undo_available": host.space_polish.undo.is_some(),
                 "space_picker_open": host.space_picker.is_some(),
+                "server": match &host.server {
+                    crate::server_state::ServerState::Running => "running".to_string(),
+                    crate::server_state::ServerState::Starting => "starting".to_string(),
+                    crate::server_state::ServerState::Stopped { .. } => "stopped".to_string(),
+                    crate::server_state::ServerState::Failed(message) => format!("failed: {message}"),
+                },
+                "server_card": host.server_card_shown,
                 "space_open_pending": host.space_opens.busy(),
                 "last_space_open": host.last_space_open,
                 "space_chips": chips,

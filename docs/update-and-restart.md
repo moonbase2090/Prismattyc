@@ -30,8 +30,9 @@ hidden only by `toasts = "off"`.
 
 On the Plug-ins page, **Restart now** opens the same one-step dialog when
 official plug-ins are waiting for the pmux server. The running sessions are
-listed immediately. **Save and restart** saves them and restarts the pmux
-server in that step, then brings them back. **Restart when idle** leaves them
+listed immediately. **Save and restart** saves them and updates the pmux
+server in that step. On macOS and Linux they keep running through it; when
+they cannot, they come back from the saved configuration. **Restart when idle** leaves them
 running and restarts the pmux server after the last one ends, so a pending
 official plug-in can apply. That choice remembers the release and the pending
 official plug-ins that were shown. It restarts only if those are still the

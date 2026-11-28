@@ -34,12 +34,37 @@ const ONE_CONFIRM: [(&str, &str, update_flow::Action); 3] = [
     ),
     ("Cancel", "Nothing changes now", update_flow::Action::Cancel),
 ];
+/// The same choices where the new pmux server takes the sessions over live
+/// (macOS and Linux with `live_update` on): the sessions keep running, and the
+/// saved configuration is only the fallback.
+const OPTIONS_LIVE: [(&str, &str, update_flow::Action); 3] = [
+    (
+        "Save and restart",
+        "Sessions keep running; saved as a fallback",
+        update_flow::Action::SaveAndContinue,
+    ),
+    OPTIONS[1],
+    OPTIONS[2],
+];
+const ONE_CONFIRM_LIVE: [(&str, &str, update_flow::Action); 3] = [
+    (
+        "Save and restart",
+        "Update the pmux server now; sessions keep running",
+        update_flow::Action::SaveAndContinue,
+    ),
+    ONE_CONFIRM[1],
+    ONE_CONFIRM[2],
+];
 /// Selection index of the Show and Hide toggle, after the three choices.
 const TOGGLE: usize = OPTIONS.len();
 /// The link to the new release's notes, on the title line.
 const NOTES_LINK: &str = "Release notes";
 const EXPLANATION: &str = "Save the session configuration to recreate your sessions after restart. Unsaved work inside programs is not saved.";
 const ONE_EXPLANATION: &str = "Save and restart applies the pmux server now and brings these sessions back. Restart when idle waits until the last session ends. Unsaved work inside programs is not saved.";
+/// What happens to a running program when the hand-over is not possible.
+const LIVE_FALLBACK: &str = "If the new server cannot take them over, they come back from the saved configuration and unsaved work inside programs is lost.";
+const EXPLANATION_LIVE: &str = "Save and restart hands your sessions to the new pmux server, so programs keep running with their unsaved work.";
+const ONE_EXPLANATION_LIVE: &str = "Save and restart updates the pmux server now and these sessions keep running with their unsaved work.";
 const SAVED: &str = "names, directories, launch commands, pane layouts";
 const KEYS: &str = "Enter select · Esc close · ↑↓ move";
 /// The choices after an update fails.
@@ -73,6 +98,19 @@ pub(super) struct RestartModal {
     dismissed: bool,
     /// The release notes link was chosen and its page is not open yet.
     open_notes: bool,
+    /// The new pmux server is expected to take the sessions over live.
+    live: bool,
+}
+
+/// Whether Save and restart will try to hand the sessions to the new pmux
+/// server live: macOS and Linux, unless `live_update = false`.
+fn live_update_expected() -> bool {
+    // Tests see the restart wording unless they turn `live` on themselves.
+    !cfg!(test)
+        && cfg!(unix)
+        && prismattyc_mux::load_mux_section(&prismattyc_mux::prism_config_path())
+            .map(|section| section.live_update())
+            .unwrap_or(true)
 }
 
 #[derive(Clone, Copy, Default)]
@@ -111,19 +149,33 @@ impl RestartModal {
             running: None,
             dismissed: false,
             open_notes: false,
+            live: live_update_expected(),
         }
     }
 
-    fn choices(
-        style: update_flow::ConfirmStyle,
-    ) -> &'static [(&'static str, &'static str, update_flow::Action)] {
-        match style {
-            update_flow::ConfirmStyle::Review => &OPTIONS,
-            update_flow::ConfirmStyle::OneConfirm => &ONE_CONFIRM,
+    fn choices(&self) -> &'static [(&'static str, &'static str, update_flow::Action)] {
+        match (self.style, self.live) {
+            (update_flow::ConfirmStyle::Review, false) => &OPTIONS,
+            (update_flow::ConfirmStyle::Review, true) => &OPTIONS_LIVE,
+            (update_flow::ConfirmStyle::OneConfirm, false) => &ONE_CONFIRM,
+            (update_flow::ConfirmStyle::OneConfirm, true) => &ONE_CONFIRM_LIVE,
         }
     }
 
     fn explanation(&self) -> String {
+        if self.live {
+            return match self.style {
+                update_flow::ConfirmStyle::OneConfirm => match &self.available {
+                    Some(available) => format!(
+                        "Save and restart installs {available} and hands these sessions to the new pmux server, so they keep running with their unsaved work. {LIVE_FALLBACK} Restart when idle waits until the last session ends and applies only this release."
+                    ),
+                    None => format!(
+                        "{ONE_EXPLANATION_LIVE} {LIVE_FALLBACK} Restart when idle waits until the last session ends."
+                    ),
+                },
+                update_flow::ConfirmStyle::Review => format!("{EXPLANATION_LIVE} {LIVE_FALLBACK}"),
+            };
+        }
         match self.style {
             update_flow::ConfirmStyle::OneConfirm => match &self.available {
                 Some(available) => format!(
@@ -240,7 +292,7 @@ impl RestartModal {
             self.open_notes = true;
         } else if index == TOGGLE {
             self.expanded = !self.expanded;
-        } else if let Some((_, _, action)) = Self::choices(self.style).get(index) {
+        } else if let Some((_, _, action)) = self.choices().get(index) {
             self.chosen = Some(*action);
         }
     }
@@ -344,7 +396,8 @@ impl RestartModal {
             }
             return rows;
         }
-        let mut rows: Vec<String> = Self::choices(self.style)
+        let mut rows: Vec<String> = self
+            .choices()
             .iter()
             .map(|(label, hint, _)| format!("{label}: {hint}"))
             .collect();
@@ -691,7 +744,7 @@ pub(super) fn paint(host: &mut HostState, buffer: &mut [u32], width: usize, heig
     };
     // Title, explanation, divider, options, divider, footer, names, key hints.
     let top_h = pad + s(26.0) + s(8.0) + explanation.len() * line_h + pad;
-    let options_h = s(8.0) + RestartModal::choices(modal.style).len() * (row_h + s(2.0)) + s(8.0);
+    let options_h = s(8.0) + modal.choices().len() * (row_h + s(2.0)) + s(8.0);
     let mut footer_h = pad + line_h;
     if !names.is_empty() {
         footer_h += s(8.0) + names.len() * line_h;
@@ -795,7 +848,7 @@ pub(super) fn paint(host: &mut HostState, buffer: &mut [u32], width: usize, heig
         255,
     );
     ry += s(8.0);
-    for (index, (label, hint, _)) in RestartModal::choices(modal.style).iter().enumerate() {
+    for (index, (label, hint, _)) in modal.choices().iter().enumerate() {
         let row = Rect::new(x + s(8.0), ry, panel_w.saturating_sub(s(16.0)), row_h);
         if ry + row_h > bottom {
             break;
@@ -1357,6 +1410,71 @@ mod tests {
             sessions.iter().map(|name| (*name).to_string()).collect(),
             update_flow::ConfirmStyle::OneConfirm,
         )
+    }
+
+    #[test]
+    fn a_live_update_says_the_sessions_keep_running_and_names_the_fallback() {
+        let mut review = modal(3);
+        review.live = true;
+        assert_eq!(
+            review.rows()[0],
+            "Save and restart: Sessions keep running; saved as a fallback"
+        );
+        assert_eq!(
+            review.rows()[1],
+            "Restart without saving: Sessions are discarded"
+        );
+        let text = review.explanation();
+        assert!(text.starts_with("Save and restart hands your sessions to the new pmux server, so programs keep running with their unsaved work."), "{text}");
+        assert!(
+            text.ends_with("unsaved work inside programs is lost."),
+            "{text}"
+        );
+        assert!(!text.contains("recreate"), "{text}");
+
+        let mut confirm = one_confirm(&["alpha"]);
+        confirm.live = true;
+        assert_eq!(
+            confirm.rows()[0],
+            "Save and restart: Update the pmux server now; sessions keep running"
+        );
+        let text = confirm.explanation();
+        assert!(
+            text.contains("installs 0.3.78 and hands these sessions to the new pmux server"),
+            "{text}"
+        );
+        assert!(
+            text.contains("If the new server cannot take them over"),
+            "{text}"
+        );
+        assert!(text.ends_with("applies only this release."), "{text}");
+        let mut restart_only = RestartModal::with_style(
+            "0.3.78",
+            None,
+            vec!["alpha".into()],
+            update_flow::ConfirmStyle::OneConfirm,
+        );
+        restart_only.live = true;
+        let text = restart_only.explanation();
+        assert!(
+            text.starts_with(
+                "Save and restart updates the pmux server now and these sessions keep running"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.ends_with("Restart when idle waits until the last session ends."),
+            "{text}"
+        );
+
+        // Without a live hand-over (Windows, or live_update = false) the
+        // approved restart wording stays word for word.
+        review.live = false;
+        assert_eq!(
+            review.rows()[0],
+            "Save and restart: Recreate sessions afterwards"
+        );
+        assert_eq!(review.explanation(), EXPLANATION);
     }
 
     #[test]

@@ -2353,6 +2353,9 @@ pub struct ControlPlane {
     /// Panes given up for a live update, waiting for the exec.
     #[cfg(unix)]
     pending_handoff: Option<crate::handoff::PreparedHandoff>,
+    /// A live update took the panes. The pane-log checkpoint written just
+    /// before must not be replaced by the now empty runtime.
+    handed_over: bool,
     domain: Domain,
     active_clients: HashSet<ClientId>,
     client_spaces: HashMap<ClientId, String>,
@@ -2508,6 +2511,7 @@ impl ControlPlane {
             shutdown_pending: false,
             #[cfg(unix)]
             pending_handoff: None,
+            handed_over: false,
             domain,
             active_clients: HashSet::new(),
             client_spaces: HashMap::new(),
@@ -3269,6 +3273,9 @@ impl ControlPlane {
     pub(crate) fn flush_pane_logs(&mut self) {
         // Shutdown must finish the older write before publishing the final state.
         self.pane_log_worker.take();
+        if self.handed_over {
+            return;
+        }
         self.pane_log_pending_mark = None;
         self.pane_log_capture = None;
         let Some(path) = self.pane_log_path.clone() else {
@@ -4561,14 +4568,30 @@ impl ControlPlane {
                 return Err(refuse(format!("live update refused: {error:#}")));
             }
         };
+        // The last checkpoint of every pane, written while the runtime still
+        // has them: if the new server never starts, the restore brings back
+        // this scrollback.
+        self.flush_pane_logs();
         let live = self.live.as_mut().expect("checked above");
         let panes = match live.export_handoff() {
             Ok(panes) => panes,
             Err(error) => {
                 let _ = live.resume_after_handoff();
+                // The flush above stopped the checkpoint worker; the panes stay
+                // here, so start it again (without reading the file back).
+                if self.pane_log_path.is_some() {
+                    self.pane_log_captured.clear();
+                    match PersistWorker::start() {
+                        Ok(worker) => self.pane_log_worker = Some(worker),
+                        Err(restart) => {
+                            eprintln!("pmuxd: pane-log checkpoints did not restart: {restart}")
+                        }
+                    }
+                }
                 return Err(refuse(format!("live update refused: {error:#}")));
             }
         };
+        self.handed_over = true;
         self.pending_handoff = Some(crate::handoff::PreparedHandoff {
             binary: binary.to_owned(),
             workspace,
@@ -8561,14 +8584,14 @@ fn handle_client_loop(
         ) {
             state.snapshot_established = false;
         }
-        write_response(writer, &response, stop)?;
-        if matches!(
+        let accepted_shutdown = matches!(
             &response.body,
             ControlResponseBody::Ok {
                 response: ControlResponseData::ShutdownAccepted
             }
-        ) {
-            shutdown.request();
+        );
+        let written = write_response(writer, &response, stop);
+        if after_reply(written, accepted_shutdown, shutdown)? {
             return Ok(());
         }
     }
@@ -8658,6 +8681,23 @@ fn read_frame(reader: &mut BufReader<UnixStream>, frame: &mut Vec<u8>) -> io::Re
             }
             return Ok(true);
         }
+    }
+}
+
+/// What a connection does once a reply has been written (or failed). Returns
+/// true when the connection ends because the server is stopping. An accepted
+/// shutdown (or live update) has already committed the plane, so the process
+/// must go on even when the caller is gone and the reply could not be written.
+fn after_reply(
+    written: io::Result<()>,
+    accepted_shutdown: bool,
+    shutdown: &ShutdownGate,
+) -> io::Result<bool> {
+    if accepted_shutdown {
+        shutdown.request();
+        written.map(|()| true)
+    } else {
+        written.map(|()| false)
     }
 }
 
@@ -11861,6 +11901,35 @@ function Read-Exact([int]$Count) {
         );
         drop(server);
         assert!(!path.exists(), "server Drop must remove the owned socket");
+    }
+
+    /// An accepted shutdown (or live update) has already committed the plane,
+    /// so the server must stop even when the caller is gone and the
+    /// acknowledgement cannot be written.
+    #[test]
+    fn an_accepted_shutdown_proceeds_when_the_acknowledgement_cannot_be_written() {
+        let gate = ShutdownGate {
+            flag: Mutex::new(false),
+            cvar: Condvar::new(),
+        };
+        let broken = || Err(io::Error::from(io::ErrorKind::BrokenPipe));
+        assert!(after_reply(broken(), true, &gate).is_err());
+        assert!(
+            *gate.flag.lock().unwrap(),
+            "the server was not told to stop"
+        );
+
+        let quiet = ShutdownGate {
+            flag: Mutex::new(false),
+            cvar: Condvar::new(),
+        };
+        assert!(after_reply(broken(), false, &quiet).is_err());
+        assert!(
+            !*quiet.flag.lock().unwrap(),
+            "an ordinary reply stopped the server"
+        );
+        assert!(!after_reply(Ok(()), false, &quiet).unwrap());
+        assert!(after_reply(Ok(()), true, &quiet).unwrap());
     }
 
     #[test]

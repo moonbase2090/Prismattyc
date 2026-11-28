@@ -243,6 +243,22 @@ exec {bins / 'pmux'} "$@"
         assert 'kept' in cli('ls'), 'the saved session came back'
         capture('8-restored')
         record('start: the saved session came back')
+
+        # A saved workspace that cannot be read stops Start with its reason.
+        cli('stop', '--save')
+        wait(lambda: status()['server'] == 'stopped', 'stopped again', timeout=60)
+        saved = next(path for root in (out, runtime) for path in Path(root).rglob('workspace.json'))
+        saved.write_text('{ not a workspace')
+        key('u', ('ctrl', 'alt'))
+        select_row('Start the pmux server')
+        key('Return')
+        state = wait(lambda: (s := status()) and s['server'].startswith('failed:') and s,
+                     'unreadable workspace', timeout=60)
+        assert 'could not be read' in state['server'], state['server']
+        wait(lambda: status()['server_card'], 'card with the reason')
+        assert 'status: not running' in cli('status'), 'nothing started'
+        capture('9-unreadable-workspace')
+        record('unreadable saved sessions: Start stopped and showed the reason')
         result['status'] = 'PASS'
     finally:
         (out / 'result.json').write_text(json.dumps(result, indent=2))

@@ -21312,17 +21312,8 @@ impl App {
         let _ = std::thread::Builder::new()
             .name("server-start".into())
             .spawn(move || {
-                // Sessions saved by Save and stop come back with the server.
-                let saved = prismattyc_mux::workspace::load(&socket)
-                    .ok()
-                    .flatten()
-                    .is_some();
-                let result = if saved {
-                    daemon_startup::start_restoring(&pmux_bin(), &socket)
-                } else {
-                    daemon_startup::ensure_pmuxd_started(&pmux_bin(), &socket)
-                }
-                .map_err(|error| format!("{error:#}"));
+                let result = daemon_startup::start_server(&pmux_bin(), &socket)
+                    .map_err(|error| format!("{error:#}"));
                 let _ = proxy.send_event(UserAction::ServerStartFinished(result));
             });
     }
@@ -21334,6 +21325,15 @@ impl App {
             Err(message) => server_state::ServerState::Failed(message),
         };
         for host in self.windows.values_mut() {
+            if let server_state::ServerState::Failed(message) = &self.server {
+                // A card dismissed for a local shell comes back: the reason
+                // must not be hidden behind it.
+                host.server_card_dismissed = false;
+                rail_error_toast(
+                    host,
+                    &format!(" could not start the pmux server: {message} "),
+                );
+            }
             host.last_space_refresh = None;
             host.dirty = true;
             host.window.request_redraw();

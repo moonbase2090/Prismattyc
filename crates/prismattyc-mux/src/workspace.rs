@@ -103,8 +103,12 @@ pub(crate) fn socket_key(socket: &Path) -> String {
 }
 
 pub fn load(socket: &Path) -> Result<Option<Workspace>> {
-    let path = path(socket);
-    let bytes = match std::fs::read(&path) {
+    load_from(&path(socket))
+}
+
+/// [`load`] for a saved workspace file named directly.
+pub fn load_from(path: &Path) -> Result<Option<Workspace>> {
+    let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error).context("read saved workspace"),

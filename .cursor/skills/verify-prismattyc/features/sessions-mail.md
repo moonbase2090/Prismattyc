@@ -35,6 +35,10 @@ For interactive attach across a live server update on macOS or Linux, run
 `python3 tests/native/login-restore-e2e.py --bins "$verify_bins" --case live-update-attach`.
 It drives a real terminal, updates the private daemon, observes a fresh paint,
 and sends input through the original attach process to the surviving shell.
+The replacement case is `cargo test -p prismattyc-mux --test interactive_attach
+attach_stops_instead_of_driving_a_replacement_daemon`: a different daemon at the
+same socket must end the attach with `attach server was replaced`, and the keys
+typed into that attach must not reach it.
 
 ## Linux test portability
 

@@ -1385,6 +1385,52 @@ impl Drop for ResizeFaultProxy {
     }
 }
 
+/// A different daemon at the same socket is not the attach's server, even
+/// when it reuses the pane's numeric id. The old attach must stop with the
+/// replacement diagnostic, and none of its keystrokes may reach the new
+/// daemon.
+#[test]
+fn attach_stops_instead_of_driving_a_replacement_daemon() {
+    let socket = socket_path();
+    let first = start_server_shell(&socket, "printf 'FIRST-READY\\n'; exec /bin/cat");
+    wait_attach_json(&socket, &["FIRST-READY"]);
+    let (pair, mut child, transcript) = spawn_attach_pty(&socket, 24, 80);
+    drop(pair.slave);
+    wait_transcript(&transcript, "FIRST-READY", Duration::from_secs(5));
+
+    // The first daemon goes away and another one binds the same path.
+    drop(first);
+    let _second = start_server_shell(&socket, "printf 'SECOND-READY\\n'; exec /bin/cat");
+    let mut keys = pair.master.take_writer().expect("pty writer");
+    keys.write_all(b"OLD-ATTACH-KEYS\r")
+        .expect("type into the old attach");
+
+    let mut killer = child.clone_killer();
+    let (done, exit) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(child.wait());
+    });
+    let status = exit
+        .recv_timeout(test_time_budget(Duration::from_secs(10)))
+        .unwrap_or_else(|err| {
+            let _ = killer.kill();
+            panic!("attach did not stop after its server was replaced: {err}");
+        })
+        .expect("wait for attach");
+    assert!(!status.success(), "a replaced server is an attach failure");
+    wait_transcript(
+        &transcript,
+        "attach server was replaced",
+        Duration::from_secs(5),
+    );
+
+    let pane = wait_attach_json(&socket, &["SECOND-READY"]);
+    assert!(
+        !pane.contains("OLD-ATTACH-KEYS"),
+        "the replacement daemon received input from the old attach: {pane}"
+    );
+}
+
 /// A failed Resize must log Err with pane/session identity, not report success.
 #[test]
 fn resize_transport_failure_logs_request_error() {

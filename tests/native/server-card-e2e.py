@@ -35,6 +35,10 @@ def main():
     runtime = Path(tempfile.mkdtemp(prefix='pcard-', dir='/tmp'))
     for name in ('home', 'config', 'data', 'state', 'project'):
         (out / name).mkdir()
+    # Login shells take their prompt from the system profile, which names the
+    # machine; frames are published, so every shell gets a neutral prompt.
+    for profile in ('.profile', '.bash_profile', '.bashrc', '.zshrc'):
+        (out / 'home' / profile).write_text("PS1='card> '\nPROMPT='card> '\n")
     config = out / 'config.toml'
     config.write_text('splash = false\nstart_at_login = false\nautomatic_update_checks = false\n'
                       'install_agent_skills = false\nspace_startup = "fresh"\nchrome_style = "graphite"\n'
@@ -140,6 +144,19 @@ exec {bins / 'pmux'} "$@"
 
     status = window
 
+    def select_row(prefix):
+        """Arrow to the update-menu row starting with prefix, one step at a time."""
+        details = wait(lambda: (d := status().get('space_details')) and any(
+            row.startswith(prefix) for row in d['rows']) and d, 'menu row ' + prefix)
+        target = next(i for i, row in enumerate(details['rows']) if row.startswith(prefix))
+        for _ in range(len(details['rows']) + 2):
+            current = status()['space_details']['selected']
+            if current == target:
+                return
+            key('Down')
+            wait(lambda: status()['space_details']['selected'] != current, 'selection moved')
+        raise AssertionError(f'never reached {prefix}: {status()["space_details"]}')
+
     try:
         host = subprocess.Popen([str(bins / 'prismattyc-host')], env=env, cwd=out / 'project',
                                 stdout=open(out / 'host.log', 'w'), stderr=subprocess.STDOUT,
@@ -206,13 +223,7 @@ exec {bins / 'pmux'} "$@"
         marker = work_file.parent / 'restart-when-idle'
         marker.write_text('v1\nrelease=0.0.0\n')
         key('u', ('ctrl', 'alt'))
-        details = wait(lambda: (d := status().get('space_details')) and d.get('rows') and d, 'update menu')
-        target = next(i for i, row in enumerate(details['rows']) if row.startswith('Stop the pmux server'))
-        for _ in range(len(details['rows']) + 2):
-            if status()['space_details']['selected'] == target:
-                break
-            key('Down')
-        assert status()['space_details']['selected'] == target, status()['space_details']
+        select_row('Stop the pmux server')
         key('Return')
         details = wait(lambda: (d := status().get('space_details')) and any(
             row.startswith('Enter again saves') for row in d['rows']) and d, 'stop asks first')
@@ -225,13 +236,7 @@ exec {bins / 'pmux'} "$@"
         assert not status()['server_card']
         record('stop: the update menu asked first, then saved, stopped and cleared restart-when-idle')
         key('u', ('ctrl', 'alt'))
-        details = wait(lambda: (d := status().get('space_details')) and any(
-            row.startswith('Start the pmux server') for row in d['rows']) and d, 'Start in the menu')
-        target = next(i for i, row in enumerate(details['rows']) if row.startswith('Start the pmux server'))
-        for _ in range(len(details['rows']) + 2):
-            if status()['space_details']['selected'] == target:
-                break
-            key('Down')
+        select_row('Start the pmux server')
         capture('7-start-row')
         key('Return')
         wait(lambda: status()['server'] == 'running' and not status()['server_card'], 'Start', timeout=60)

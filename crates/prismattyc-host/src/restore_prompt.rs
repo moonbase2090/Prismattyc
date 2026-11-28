@@ -2,6 +2,9 @@
 
 use super::*;
 
+/// How long the restore choice waits once the user can see it.
+const RESTORE_COUNTDOWN: Duration = Duration::from_secs(3);
+
 pub(super) struct RestorePrompt {
     layout: attach_tabs::AttachTabsFile,
     pub(super) selected: usize,
@@ -10,6 +13,9 @@ pub(super) struct RestorePrompt {
     /// Esc arrived while the daemon was still starting. Apply it when that
     /// startup finishes, so a restore cannot put the sessions back afterwards.
     declined: bool,
+    /// The countdown was armed while the splash covered this choice.
+    /// Start it when the splash is gone and startup has finished.
+    held_for_splash: bool,
 }
 
 pub(super) fn cache_matches_space(
@@ -40,11 +46,12 @@ impl RestorePrompt {
                 automatic_at: None,
                 startup: None,
                 declined: false,
+                held_for_splash: false,
             })
     }
 
     pub(super) fn arm(&mut self, socket: PathBuf, pmux: PathBuf, wake: mux::Wake) {
-        self.automatic_at = Some(Instant::now() + Duration::from_secs(3));
+        self.automatic_at = Some(Instant::now() + RESTORE_COUNTDOWN);
         let (sender, receiver) = std::sync::mpsc::channel();
         self.startup = Some(receiver);
         std::thread::spawn(move || {
@@ -78,6 +85,7 @@ impl RestorePrompt {
     fn key(&mut self, key: &Key) -> Option<bool> {
         // Any deliberate navigation cancels the countdown.
         self.automatic_at = None;
+        self.held_for_splash = false;
         match key {
             Key::Named(NamedKey::Enter) => Some(self.selected == 0),
             Key::Named(NamedKey::Escape) => Some(false),
@@ -119,7 +127,9 @@ pub(super) fn dispatch_key(host: &mut HostState, key: &Key, repeat: bool) {
 
 /// A modal choice consumes pointer and IME input before guest dispatch.
 pub(super) fn handle_pointer(host: &mut HostState, event: &WindowEvent) -> bool {
-    if host.restore_prompt.is_none() {
+    // The splash is painted above this choice and owns the pointer until
+    // the user dismisses it.
+    if host.splash.is_some() || host.restore_prompt.is_none() {
         return false;
     }
     match event {
@@ -287,6 +297,7 @@ pub(super) fn poll(host: &mut HostState) {
                 Err(error) if declined => After::FailedThenDecline(error),
                 Err(error) => {
                     prompt.automatic_at = None;
+                    prompt.held_for_splash = false;
                     After::Failed(error)
                 }
                 Ok(()) if declined => After::Decline,
@@ -312,12 +323,62 @@ pub(super) fn poll(host: &mut HostState) {
         }
         After::Quiet => {}
     }
-    if host
-        .restore_prompt
-        .as_ref()
-        .is_some_and(|prompt| prompt.deadline().is_some_and(|at| Instant::now() >= at))
-    {
-        finish(host, true);
+    let step = host.restore_prompt.as_ref().map(|prompt| {
+        countdown_step(
+            host.splash.is_some(),
+            prompt.held_for_splash,
+            prompt.startup.is_some(),
+            prompt.automatic_at,
+            Instant::now(),
+        )
+    });
+    match step {
+        Some(CountdownStep::Hold) => {
+            if let Some(prompt) = host.restore_prompt.as_mut() {
+                prompt.held_for_splash = true;
+            }
+        }
+        Some(CountdownStep::Rearm) => {
+            if let Some(prompt) = host.restore_prompt.as_mut() {
+                prompt.automatic_at = Some(Instant::now() + RESTORE_COUNTDOWN);
+                prompt.held_for_splash = false;
+            }
+        }
+        Some(CountdownStep::Restore) => finish(host, true),
+        Some(CountdownStep::Wait) | None => {}
+    }
+}
+
+/// The splash covers the choice, so a key cannot cancel the countdown and
+/// the deadline must not restore the workspace until the splash is gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CountdownStep {
+    Hold,
+    Rearm,
+    Restore,
+    Wait,
+}
+
+fn countdown_step(
+    splash_up: bool,
+    held_for_splash: bool,
+    startup_pending: bool,
+    automatic_at: Option<Instant>,
+    now: Instant,
+) -> CountdownStep {
+    if automatic_at.is_none() {
+        return CountdownStep::Wait;
+    }
+    if splash_up {
+        return CountdownStep::Hold;
+    }
+    if held_for_splash && !startup_pending {
+        return CountdownStep::Rearm;
+    }
+    if !startup_pending && automatic_at.is_some_and(|at| now >= at) {
+        CountdownStep::Restore
+    } else {
+        CountdownStep::Wait
     }
 }
 
@@ -440,6 +501,21 @@ pub(super) fn paint(host: &mut HostState, buffer: &mut [u32], width: usize, heig
     );
 }
 
+#[cfg(all(test, target_os = "linux"))]
+pub(super) fn test_expire_countdown(host: &mut HostState) {
+    let prompt = host.restore_prompt.as_mut().expect("restore prompt");
+    prompt.startup = None;
+    prompt.declined = false;
+    prompt.held_for_splash = false;
+    prompt.automatic_at = Some(Instant::now() - Duration::from_secs(1));
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(super) fn test_countdown_remaining_ms(host: &HostState) -> Option<u128> {
+    let at = host.restore_prompt.as_ref()?.automatic_at?;
+    Some(at.saturating_duration_since(Instant::now()).as_millis())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -448,6 +524,48 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn real_window_choices() {
         crate::render_window_tests::restore_in_private_window();
+    }
+
+    #[test]
+    fn splash_holds_an_expired_countdown() {
+        let now = Instant::now();
+        let past = Some(now - Duration::from_secs(1));
+        assert_eq!(
+            countdown_step(true, false, false, past, now),
+            CountdownStep::Hold
+        );
+    }
+
+    #[test]
+    fn dismissing_the_splash_rearms_the_countdown() {
+        let now = Instant::now();
+        let past = Some(now - Duration::from_secs(1));
+        assert_eq!(
+            countdown_step(false, true, false, past, now),
+            CountdownStep::Rearm
+        );
+        assert_eq!(
+            countdown_step(false, true, true, past, now),
+            CountdownStep::Wait
+        );
+    }
+
+    #[test]
+    fn a_visible_expired_countdown_restores() {
+        let now = Instant::now();
+        let past = Some(now - Duration::from_secs(1));
+        assert_eq!(
+            countdown_step(false, false, false, past, now),
+            CountdownStep::Restore
+        );
+        assert_eq!(
+            countdown_step(false, false, false, Some(now + RESTORE_COUNTDOWN), now),
+            CountdownStep::Wait
+        );
+        assert_eq!(
+            countdown_step(false, false, false, None, now),
+            CountdownStep::Wait
+        );
     }
 
     fn prompt() -> RestorePrompt {

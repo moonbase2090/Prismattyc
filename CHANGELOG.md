@@ -4,6 +4,7 @@
 
 ### Changed
 
+- The launch splash shows on the first window even when sessions are already running or a workspace is restored. Dismissing it leaves those sessions as they were, and the restore countdown starts then. Later windows, the config editor, and completing an update still skip it. An explicit program, `--no-splash`, `PRISMATTYC_NO_SPLASH`, and `splash = false` still hide it.
 - **Esc** on the launch choice keeps the fresh window and releases the saved Space's running sessions. Those sessions keep running and can be attached again. The Space stays on the rail. Enter, and a countdown that ends with no key, still restore the Space.
 
 ## [0.3.80] - 2026-11-28

@@ -114,7 +114,7 @@ pub const CONFIG_KEYS: &[ConfigKey] = &[
     ConfigKey {
         name: "splash",
         group: ConfigGroup::Appearance,
-        doc: "Show the launch splash on bare launches",
+        doc: "Show the launch splash on the first window",
         range: "true|false",
         value: ConfigValue::Bool(true),
     },

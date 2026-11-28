@@ -531,9 +531,9 @@ struct Cli {
     /// Host groups these into tabs of panes (not one tab per session).
     attach_sessions: Vec<AttachTarget>,
     /// Suppress the launch splash (`--no-splash`; `PRISMATTYC_NO_SPLASH=1` also
-    /// works). Config `splash = false` is the durable opt-out. The splash only
-    /// appears on bare launches anyway: an explicit PROGRAM or
-    /// `--attach-session` skips it, matching the `prism` CLI.
+    /// works). Config `splash = false` is the durable opt-out. The splash
+    /// appears on the first window, including when sessions are already
+    /// running. An explicit PROGRAM skips it, matching the `prism` CLI.
     no_splash: bool,
     /// Animate the launch splash's word art (config `splash_animation`;
     /// default on). Off shows the art static and arms no frame timer.
@@ -996,9 +996,10 @@ Alt scrollback:  --alt-screen-scrollback or PRISMATTYC_ALT_SCREEN_SCROLLBACK=1
                  (or config alt_screen_scrollback = true). Default off:
                  full-screen TUIs keep the classic live-only view.
 GPU present:     --gpu or PRISMATTYC_GPU=1 (needs --features gpu; else errors)
-Launch splash:   shown on bare launches; --no-splash, PRISMATTYC_NO_SPLASH=1,
-                 or config splash = false opts out. An explicit PROGRAM or
-                 --attach-session skips it. Classic prismattyc has no config
+Launch splash:   shown on the first window, including when sessions are
+                 already running; --no-splash, PRISMATTYC_NO_SPLASH=1, or
+                 config splash = false opts out. An explicit PROGRAM skips
+                 it, as do later windows. Classic prismattyc has no config
                  file; use the flag or env there.
 Nested classic claim host: cargo run -p prismattyc -- /bin/sh
 
@@ -1279,9 +1280,9 @@ struct HostState {
     preedit: Preedit,
     /// Incremental find over the focused pane's history (PT-37).
     find: FindMode,
-    /// Launch splash overlay (first window of a bare launch). While shown
-    /// it owns all input and paints above everything; the session runs
-    /// underneath, untouched, until the splash is dismissed.
+    /// Launch splash overlay on the first window. While shown it owns all
+    /// input and paints above everything; sessions keep running underneath,
+    /// untouched, until the splash is dismissed.
     splash: Option<splash::Splash>,
     restore_prompt: Option<restore_prompt::RestorePrompt>,
     restart_modal: Option<restart_modal::RestartModal>,
@@ -4587,19 +4588,18 @@ impl App {
             spacing,
             space_rail.longest_name_cells(),
         );
-        // Splash on the first window of a bare launch only; attach targets
-        // and explicit programs skip it, as do later (Super+N) windows.
-        let show_splash = restore_prompt.is_none()
-            && startup_space.is_none()
-            && !config_editor
-            && !complete_update
-            && first_window
-            && splash::should_show(
-                self.cli.no_splash,
-                self.cli.explicit_program || !attach_sessions.is_empty(),
-                env_flag_enabled("PRISMATTYC_NO_SPLASH"),
-                self.file_config.splash(),
-            );
+        // Splash on the first window, including when sessions are already
+        // running or a workspace is restored. Later windows, the config
+        // editor, the complete-update flow, and an explicit program skip it.
+        let show_splash = splash::show_on_launch(
+            first_window,
+            config_editor,
+            complete_update,
+            self.cli.no_splash,
+            self.cli.explicit_program,
+            env_flag_enabled("PRISMATTYC_NO_SPLASH"),
+            self.file_config.splash(),
+        );
         // Preserve the single-pane 80×24 content baseline after configured
         // insets. A splash launch opens wide enough to fit the word art and
         // its flare margins, plus breathing room, so the art is not clipped.
@@ -21446,20 +21446,9 @@ impl ApplicationHandler<UserAction> for App {
                     session_prompt::dispatch_key(host, &event.logical_key, event.repeat);
                     return;
                 }
-                if host.restore_prompt.is_some() {
-                    restore_prompt::dispatch_key(host, &event.logical_key, event.repeat);
-                    return;
-                }
-                if host.restart_modal.is_some() {
-                    restart_modal::dispatch_key(host, &event.logical_key, event.repeat);
-                    return;
-                }
-                if host.space_rail.edit.is_some() {
-                    handle_space_name_key(host, &event);
-                    return;
-                }
-                // The splash owns all input while it is up: nothing reaches
-                // the session, the mux chords, or the new-window chord.
+                // The splash owns all input while it is up, including when a
+                // restore choice is waiting underneath. Nothing reaches the
+                // session, the mux chords, or the new-window chord.
                 if host.splash.is_some() {
                     let quit = host.splash.is_some_and(|splash_state| {
                         splash_key_plan(splash::key_action(
@@ -21476,6 +21465,18 @@ impl ApplicationHandler<UserAction> for App {
                     }
                     sync_chrome_hover(host);
                     host.window.request_redraw();
+                    return;
+                }
+                if host.restore_prompt.is_some() {
+                    restore_prompt::dispatch_key(host, &event.logical_key, event.repeat);
+                    return;
+                }
+                if host.restart_modal.is_some() {
+                    restart_modal::dispatch_key(host, &event.logical_key, event.repeat);
+                    return;
+                }
+                if host.space_rail.edit.is_some() {
+                    handle_space_name_key(host, &event);
                     return;
                 }
                 if settings::handle_key(host, &event) {

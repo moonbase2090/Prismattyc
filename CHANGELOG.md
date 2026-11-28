@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The launch splash shows on the first window even when sessions are already running or a workspace is restored. Dismissing it leaves those sessions as they were. Later windows, the config editor, and completing an update still skip it. An explicit program, `--no-splash`, `PRISMATTYC_NO_SPLASH`, and `splash = false` still hide it.
+
 ### Removed
 
 - The windowed host (`prismattyc-host`) no longer has the experimental rich mode: it does not paint overlays or a docked workspace that an app sends, and the `rich_focus` key action is gone. A `rich_focus` binding left in a config file is ignored with a warning. `--experimental-rich` and `PRISMATTYC_EXPERIMENTAL_RICH` are still accepted for one release, print a notice, and only turn on native sessions, as `--experimental-native` does. The render-status JSON no longer has the `workspace_layout` and `experimental_rich` fields.

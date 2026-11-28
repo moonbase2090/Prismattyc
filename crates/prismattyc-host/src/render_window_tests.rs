@@ -605,7 +605,12 @@ fn verify_startup_restore(app: &mut App, event_loop: &ActiveEventLoop) {
     {
         let host = app.windows.get_mut(&id).unwrap();
         assert!(host.restore_prompt.is_some());
-        assert!(host.splash.is_none());
+        assert!(
+            host.splash.is_some(),
+            "a saved workspace still shows the splash"
+        );
+        // The choice underneath is what the rest of this fixture drives.
+        host.splash = None;
         assert_eq!(host.mux.pane_count(), 1);
         assert!(host.attach_pane_sessions.is_empty());
         let pixels = frame(host);
@@ -783,6 +788,22 @@ fn verify_startup_restore(app: &mut App, event_loop: &ActiveEventLoop) {
     );
     assert!(host.attach_pane_sessions.is_empty());
     assert_eq!(host.mux.tab_count(), 1);
+
+    // Attaching a session is not a reason to skip the splash.
+    app.windows.clear();
+    app.cli.attach_sessions = vec![AttachTarget {
+        session: "live-one".into(),
+        title: "live".into(),
+    }];
+    app.cli.explicit_program = false;
+    app.cli.no_splash = false;
+    let attached = app.open_window(event_loop, false).unwrap();
+    assert!(
+        app.windows[&attached].splash.is_some(),
+        "a launch that attaches a session still shows the splash"
+    );
+    app.cli.attach_sessions.clear();
+    app.windows.clear();
 
     // An explicit later workspace update can still be restored.
     attach_tabs::persist_if_changed(&path, &mut None, saved.clone()).unwrap();

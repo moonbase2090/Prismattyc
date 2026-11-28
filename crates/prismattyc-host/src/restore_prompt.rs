@@ -115,7 +115,9 @@ pub(super) fn dispatch_key(host: &mut HostState, key: &Key, repeat: bool) {
 
 /// A modal choice consumes pointer and IME input before guest dispatch.
 pub(super) fn handle_pointer(host: &mut HostState, event: &WindowEvent) -> bool {
-    if host.restore_prompt.is_none() {
+    // The splash is painted above this choice and owns the pointer until
+    // the user dismisses it.
+    if host.splash.is_some() || host.restore_prompt.is_none() {
         return false;
     }
     match event {
@@ -172,7 +174,6 @@ pub(super) fn finish(host: &mut HostState, accept: bool) {
         return;
     };
     host.palette_layout = None;
-    host.splash = None;
     if accept {
         let result = (|| -> Result<_> {
             let space = prompt

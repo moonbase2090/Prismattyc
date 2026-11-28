@@ -1,9 +1,10 @@
-//! In-window launch splash for bare `prismattyc-host` launches — the same
-//! content as the `prismattyc` CLI splash (shared via `prismattyc_core::splash`),
-//! rasterized into the window instead of printed to a terminal. Shown on
-//! the first window only; `--no-splash`, `PRISMATTYC_NO_SPLASH=1`, and config
-//! `splash = false` opt out. Attach launches skip it (attaching drops you
-//! into live sessions, the same way an explicit PROGRAM skips the CLI splash).
+//! In-window launch splash for `prismattyc-host` — the same content as the
+//! `prismattyc` CLI splash (shared via `prismattyc_core::splash`), rasterized
+//! into the window instead of printed to a terminal. Shown on the first
+//! window, including when sessions are already running or a workspace is
+//! restored. Later windows skip it. `--no-splash`, `PRISMATTYC_NO_SPLASH=1`,
+//! and config `splash = false` opt out. An explicit PROGRAM skips it, matching
+//! the CLI splash.
 
 use std::time::{Duration, Instant};
 
@@ -142,16 +143,43 @@ impl Default for Splash {
 ///
 /// CLI `--no-splash` and `PRISMATTYC_NO_SPLASH` hide the splash even when
 /// config `splash` is true. Config `splash = false` hides it when CLI and
-/// env do not suppress. An explicit PROGRAM or `--attach-session` always
-/// skips the splash.
+/// env do not suppress. An explicit PROGRAM skips the splash. Running
+/// sessions, a restore choice, and a startup Space do not.
 #[must_use]
 pub fn should_show(
     no_splash_flag: bool,
-    explicit_target: bool,
+    explicit_program: bool,
     env_no_splash: bool,
     config_splash: bool,
 ) -> bool {
-    !no_splash_flag && !explicit_target && !env_no_splash && config_splash
+    !no_splash_flag && !explicit_program && !env_no_splash && config_splash
+}
+
+/// Whether this launch shows the splash.
+///
+/// A first window shows it by default. Later windows, the config editor, and
+/// the complete-update flow skip it. [`should_show`] applies the program and
+/// opt-out gates. Session count is not an input: a launch with sessions
+/// running uses the same decision as a launch with none.
+#[must_use]
+pub fn show_on_launch(
+    first_window: bool,
+    config_editor: bool,
+    complete_update: bool,
+    no_splash_flag: bool,
+    explicit_program: bool,
+    env_no_splash: bool,
+    config_splash: bool,
+) -> bool {
+    first_window
+        && !config_editor
+        && !complete_update
+        && should_show(
+            no_splash_flag,
+            explicit_program,
+            env_no_splash,
+            config_splash,
+        )
 }
 
 /// Map a keypress given the current page. Mirrors the CLI keymap: on the
@@ -747,7 +775,7 @@ mod tests {
         assert!(should_show(false, false, false, true));
         // CLI `--no-splash` hides even when config splash is on.
         assert!(!should_show(true, false, false, true));
-        // Explicit PROGRAM / attach skips the splash.
+        // An explicit PROGRAM skips the splash. Running sessions are not a gate.
         assert!(!should_show(false, true, false, true));
         // `PRISMATTYC_NO_SPLASH` hides even when config splash is on.
         assert!(!should_show(false, false, true, true));
@@ -756,6 +784,38 @@ mod tests {
         // Config on does not override CLI or env suppressors.
         assert!(!should_show(true, false, false, true));
         assert!(!should_show(false, false, true, true));
+    }
+
+    #[test]
+    fn first_window_shows_the_splash() {
+        assert!(show_on_launch(
+            true, false, false, false, false, false, true
+        ));
+    }
+
+    #[test]
+    fn later_windows_editor_update_program_and_opt_outs_skip_the_splash() {
+        assert!(!show_on_launch(
+            false, false, false, false, false, false, true
+        ));
+        assert!(!show_on_launch(
+            true, true, false, false, false, false, true
+        ));
+        assert!(!show_on_launch(
+            true, false, true, false, false, false, true
+        ));
+        assert!(!show_on_launch(
+            true, false, false, true, false, false, true
+        ));
+        assert!(!show_on_launch(
+            true, false, false, false, true, false, true
+        ));
+        assert!(!show_on_launch(
+            true, false, false, false, false, true, true
+        ));
+        assert!(!show_on_launch(
+            true, false, false, false, false, false, false
+        ));
     }
 
     #[test]

@@ -3020,6 +3020,173 @@ fn strip_close_and_detach_drop_the_saved_overlay() {
     std::fs::write(std::env::var_os(RESULT_ENV).unwrap(), b"complete").unwrap();
 }
 
+/// The floating pane's Dock is within reach: the key floats the focused
+/// pane, a drag moves it, its title-row Dock button docks it, the tile's menu
+/// offers Dock while the floating pane had focus, and after a reopen restores
+/// the saved overlay the key docks it again. Each dock drops the saved record.
+#[test]
+fn a_floating_pane_docks_from_its_button_menu_and_key_after_a_reopen() {
+    const NAME: &str =
+        "render_window_tests::a_floating_pane_docks_from_its_button_menu_and_key_after_a_reopen";
+    if std::env::var_os(CHILD_ENV).is_none() {
+        run_in_private_display(NAME);
+        return;
+    }
+    struct Proof {
+        app: App,
+        completed: bool,
+    }
+    fn float_key(host: &mut HostState) {
+        assert!(!super::handle_mux_command(
+            host,
+            super::MuxCommand::FloatPane,
+            keybind::Action::FloatPane,
+            "/bin/cat",
+            &[],
+        ));
+    }
+    fn saved() -> usize {
+        prismattyc_mux::load_floats(&prismattyc_mux::spaces_dir())
+            .unwrap()
+            .floats
+            .len()
+    }
+    fn slot_of(host: &HostState, pane: PaneId) -> graphite::Rect {
+        let geom = host.mux.geom();
+        let (_, rect) = host
+            .mux
+            .rects()
+            .find(|(id, _)| *id == pane)
+            .expect("the pane is laid out");
+        let (x, y, width, height) = geom.pane_slot_px(rect);
+        graphite::Rect::new(x, y, width, height)
+    }
+    impl ApplicationHandler<UserAction> for Proof {
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+            let id = self.app.open_window(event_loop, false).unwrap();
+            let host = self.app.windows.get_mut(&id).unwrap();
+            host.space_rail.set_current(Some("work".into()));
+            host.mux.new_tab("/bin/cat", &[]).unwrap();
+            let left = host.mux.focused_id();
+            let right = host
+                .mux
+                .split_focused("/bin/cat", &[], prismattyc_mux::Axis::Horizontal, 0.5)
+                .unwrap();
+            assert!(host.mux.focus(right) || host.mux.focused_id() == right);
+
+            // The key floats the focused pane, and the overlay is saved.
+            float_key(host);
+            assert_eq!(host.mux.floated_pane(), Some(right));
+            assert_eq!(saved(), 1);
+
+            // A drag on the overlay moves it and keeps its size.
+            let before = slot_of(host, right);
+            let (x, y) = (before.x + before.w / 2, before.y + before.h / 2);
+            assert!(host.mux.begin_float_drag(x, y));
+            let cell = host.mux.geom().cell_w.max(1);
+            host.mux
+                .update_float_drag(x.saturating_sub(4 * cell), y)
+                .unwrap();
+            assert!(host.mux.end_float_drag());
+            let moved = slot_of(host, right);
+            assert_ne!(
+                (moved.x, moved.y),
+                (before.x, before.y),
+                "the drag moves it"
+            );
+            assert_eq!(
+                (moved.w, moved.h),
+                (before.w, before.h),
+                "the drag keeps its size"
+            );
+
+            // The Dock button in its title row docks it.
+            let button = graphite::pane_dock_rect(host.mux.geom().chrome, moved)
+                .expect("the floating pane shows a Dock button");
+            host.pointer_px = Some((
+                (button.x + button.w / 2) as f64,
+                (button.y + button.h / 2) as f64,
+            ));
+            assert!(super::handle_dock_button_press(host, MouseButton::Left));
+            assert_eq!(host.mux.floated_pane(), None, "the button docks the pane");
+            assert_eq!(saved(), 0, "docking drops the saved overlay");
+
+            // With the floating pane focused, a right-click on the tile still
+            // offers Dock, and choosing it docks the floating pane.
+            assert!(host.mux.focus(right) || host.mux.focused_id() == right);
+            float_key(host);
+            assert_eq!(host.mux.floated_pane(), Some(right));
+            assert!(host.mux.focus(left));
+            super::open_context_menu(host, super::ContextMenuTarget::Pane(left));
+            host.context_menu_float = Some(right);
+            let (_, rows) = super::context_menu_rows(host).expect("the pane menu");
+            assert_eq!(rows[super::FLOAT_MENU_ROW].name, "Dock pane");
+            assert!(
+                !rows[super::FLOAT_MENU_ROW].chord_label.is_empty(),
+                "the row names its key binding"
+            );
+            let _ = super::apply_pane_context_action(
+                host,
+                left,
+                super::PaneContextAction::Float,
+                "/bin/cat",
+                &[],
+            );
+            assert_eq!(
+                host.mux.floated_pane(),
+                None,
+                "the tile's menu docks the float"
+            );
+            assert_eq!(saved(), 0);
+
+            // Reopen: the saved overlay comes back, and the key docks it.
+            assert!(host.mux.focus(right) || host.mux.focused_id() == right);
+            float_key(host);
+            let records = prismattyc_mux::load_floats(&prismattyc_mux::spaces_dir()).unwrap();
+            assert!(host.mux.dock_float().unwrap());
+            assert!(
+                host.mux.restore_space_float("work", &records).unwrap(),
+                "reopening restores the overlay"
+            );
+            assert_eq!(host.mux.floated_pane(), Some(right));
+            assert!(host.mux.focus(left));
+            float_key(host);
+            assert_eq!(
+                host.mux.floated_pane(),
+                None,
+                "the key docks the restored overlay from the tile"
+            );
+            assert_eq!(saved(), 0);
+
+            self.completed = true;
+            self.app.windows.clear();
+            event_loop.exit();
+        }
+        fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
+    }
+    let event_loop = EventLoop::<UserAction>::with_user_event()
+        .with_x11()
+        .with_any_thread(true)
+        .build()
+        .unwrap();
+    let cli = Cli::parse(["--no-splash", "/bin/cat"].into_iter().map(String::from)).unwrap();
+    let config = config::ConfigFile {
+        a11y: Some(config::A11ySection {
+            os_tree: Some(false),
+            announce: Some(false),
+        }),
+        ..Default::default()
+    };
+    let app = App::new(cli, config, None, event_loop.create_proxy()).unwrap();
+    let mut proof = Proof {
+        app,
+        completed: false,
+    };
+    event_loop.run_app(&mut proof).unwrap();
+    assert!(proof.completed);
+    std::fs::write(std::env::var_os(RESULT_ENV).unwrap(), b"complete").unwrap();
+}
+
 fn lift_overlay_on_the_open_tab(host: &mut HostState) {
     host.space_rail.set_current(Some("work".into()));
     host.mux.new_tab("/bin/cat", &[]).unwrap();

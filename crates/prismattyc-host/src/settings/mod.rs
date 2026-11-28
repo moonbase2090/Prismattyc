@@ -11,8 +11,10 @@ use std::sync::mpsc::{self, Receiver};
 use anyhow::{Context, Result};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
+use crate::config;
 use crate::config_document::{Change, Destination, Edit};
-use crate::{config, palette::PaletteRow};
+use crate::palette::{PaletteRow, StatusTone};
+use crate::server_state::{CardAction, ServerState};
 use controls::{Control, Kind, Section};
 
 #[derive(Clone, Debug)]
@@ -87,6 +89,11 @@ pub(super) enum InputResult {
     Paste,
 }
 
+enum StopConfirmation {
+    Counting(Receiver<Option<usize>>),
+    Ready(usize),
+}
+
 pub(super) struct Panel {
     plugins: plugins::Page,
     path: PathBuf,
@@ -105,6 +112,11 @@ pub(super) struct Panel {
     font_choices: Vec<fonts::Choice>,
     notice: String,
     effective_font: String,
+    server: ServerState,
+    server_busy: bool,
+    server_socket: Option<PathBuf>,
+    server_request: Option<CardAction>,
+    stop_confirmation: Option<StopConfirmation>,
     pub scroll: usize,
 }
 
@@ -133,6 +145,11 @@ impl Panel {
             font_choices: fonts::bundled(),
             notice: String::new(),
             effective_font: String::new(),
+            server: ServerState::Running,
+            server_busy: false,
+            server_socket: None,
+            server_request: None,
+            stop_confirmation: None,
             scroll: 0,
         })
     }
@@ -173,11 +190,124 @@ impl Panel {
             .collect()
     }
 
+    fn server_action(&self) -> Option<CardAction> {
+        if self.server_busy {
+            return None;
+        }
+        match self.server {
+            ServerState::Running => Some(CardAction::Stop),
+            ServerState::Stopped { .. } | ServerState::Failed(_) => Some(CardAction::Start),
+            ServerState::Starting => None,
+        }
+    }
+
+    fn mux_action(&self) -> Option<CardAction> {
+        (Section::ALL[self.section] == Section::Mux)
+            .then(|| self.server_action())
+            .flatten()
+    }
+
+    fn control_offset(&self) -> usize {
+        usize::from(self.mux_action().is_some())
+    }
+
+    fn control_at(&self, row: usize) -> Option<usize> {
+        self.indices()
+            .get(row.checked_sub(self.control_offset())?)
+            .copied()
+    }
+
     fn row_count(&self) -> usize {
         if Section::ALL[self.section] == Section::Plugins {
             self.plugins.rows().len()
         } else {
-            self.indices().len()
+            self.indices().len() + self.control_offset()
+        }
+    }
+
+    fn server_rows(&self, rows: &mut Vec<PaletteRow>) {
+        let (badge, tone) = match self.server {
+            ServerState::Running => ("Running", StatusTone::Good),
+            ServerState::Starting => ("Starting", StatusTone::Notice),
+            ServerState::Stopped { .. } => ("Stopped", StatusTone::Notice),
+            ServerState::Failed(_) => ("Failed", StatusTone::Failed),
+        };
+        let status = match &self.server {
+            _ if self.server_busy => "Update or restart in progress",
+            ServerState::Failed(message) => message.lines().next().unwrap_or(""),
+            _ => "pmux server",
+        };
+        rows.push(PaletteRow::status(tone, badge.into(), status.into()));
+        let (label, detail) = match self.mux_action() {
+            Some(CardAction::Start) => (
+                "Start the pmux server",
+                "Start the server and restore saved sessions".to_owned(),
+            ),
+            Some(CardAction::Stop) => (
+                "Stop the pmux server…",
+                match self.stop_confirmation {
+                    Some(StopConfirmation::Counting(_)) => "Counting running sessions…".into(),
+                    Some(StopConfirmation::Ready(count)) => {
+                        let sessions = if count == 1 { "session" } else { "sessions" };
+                        format!("Enter or click again to save {count} {sessions} and stop · Esc cancels")
+                    }
+                    None => "Save every session, then stop the server".into(),
+                },
+            ),
+            _ => return,
+        };
+        rows.push(PaletteRow::plain(label.into(), detail, "Enter".into()));
+    }
+
+    fn update_server(&mut self, server: &ServerState, busy: bool) -> bool {
+        if self.server == *server && self.server_busy == busy {
+            return false;
+        }
+        let before = usize::from(self.server_action().is_some());
+        self.server = server.clone();
+        self.server_busy = busy;
+        let after = usize::from(self.server_action().is_some());
+        self.stop_confirmation = None;
+        if before != after {
+            let mux = Section::ALL
+                .iter()
+                .position(|section| *section == Section::Mux)
+                .unwrap();
+            let remap = |row: usize| row.saturating_sub(before) + after;
+            self.remembered[mux] = remap(self.remembered[mux]);
+            if self.section == mux {
+                if let Focus::Rows(row) = &mut self.focus {
+                    *row = remap(*row);
+                }
+                self.scroll = 0;
+            }
+        }
+        Section::ALL[self.section] == Section::Mux
+    }
+
+    fn activate_server(&mut self, action: CardAction) {
+        match (action, &self.stop_confirmation) {
+            (CardAction::Start, _) | (CardAction::Stop, Some(StopConfirmation::Ready(_))) => {
+                self.stop_confirmation = None;
+                self.server_request = Some(action);
+            }
+            (CardAction::Stop, None) => {
+                let Some(socket) = self.server_socket.clone() else {
+                    self.notice = "Could not find the pmux server socket".into();
+                    return;
+                };
+                self.notice.clear();
+                let (tx, rx) = mpsc::channel();
+                let wake = self.wake.clone();
+                self.stop_confirmation = Some(StopConfirmation::Counting(rx));
+                std::thread::spawn(move || {
+                    let count = crate::attach_log::live_snapshot_at(&socket)
+                        .map(|snapshot| snapshot.sessions.len());
+                    let _ = tx.send(count);
+                    wake();
+                });
+            }
+            _ => {}
         }
     }
 
@@ -215,6 +345,9 @@ impl Panel {
             },
             String::new(),
         )];
+        if Section::ALL[self.section] == Section::Mux {
+            self.server_rows(&mut rows);
+        }
         rows.extend(self.indices().into_iter().map(|index| {
             let control = &self.controls[index];
             let mut detail = format!("{} · {}", self.shown(control), control.timing);
@@ -294,6 +427,9 @@ impl Panel {
 
     /// Mouse selection uses the exact same row addresses as keyboard input.
     pub fn select(&mut self, index: usize) {
+        if index != self.selected() {
+            self.stop_confirmation = None;
+        }
         let editor_len = if let Focus::Editing(editor) = &self.focus {
             self.editor_rows(editor).len()
         } else {
@@ -325,7 +461,12 @@ impl Panel {
         ) {
             return;
         }
-        let len = self.rows().1.len();
+        let len = self
+            .rows()
+            .1
+            .iter()
+            .filter(|row| row.kind.focusable())
+            .count();
         let selected = self
             .selected()
             .saturating_add_signed(rows as isize)
@@ -442,10 +583,11 @@ impl Panel {
                 }
             }
             Focus::Rows(mut row) => {
-                let indices = self.indices();
-                row = row.min(indices.len().saturating_sub(1));
+                let row_count = self.row_count();
+                row = row.min(row_count.saturating_sub(1));
                 self.focus = Focus::Rows(row);
                 match key {
+                    Key::Named(NamedKey::Escape) if self.stop_confirmation.take().is_some() => {}
                     Key::Named(NamedKey::Escape) => self.focus = Focus::Sections,
                     Key::Named(NamedKey::ArrowUp) => {
                         self.focus = if row == 0 {
@@ -455,17 +597,19 @@ impl Panel {
                         }
                     }
                     Key::Named(NamedKey::ArrowDown) => {
-                        self.focus = Focus::Rows((row + 1).min(indices.len().saturating_sub(1)))
+                        self.focus = Focus::Rows((row + 1).min(row_count.saturating_sub(1)))
                     }
                     Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight)
                         if self.pending.is_none() =>
                     {
-                        if let Some(&index) = indices.get(row) {
+                        if let Some(index) = self.control_at(row) {
                             self.step(index, matches!(key, Key::Named(NamedKey::ArrowRight)));
                         }
                     }
                     Key::Named(NamedKey::Enter) if self.pending.is_none() => {
-                        if let Some(&index) = indices.get(row) {
+                        if let Some(action) = self.mux_action().filter(|_| row == 0) {
+                            self.activate_server(action);
+                        } else if let Some(index) = self.control_at(row) {
                             if mods.shift_key() || !self.controls[index].kind.cycles_on_enter() {
                                 self.edit(index)
                             } else {
@@ -477,6 +621,9 @@ impl Panel {
                 }
                 if let Focus::Rows(row) = self.focus {
                     self.remembered[self.section] = row;
+                }
+                if !matches!(self.focus, Focus::Rows(0)) {
+                    self.stop_confirmation = None;
                 }
             }
             Focus::Editing(mut editor) => {
@@ -700,6 +847,20 @@ impl Panel {
     /// The watcher may legitimately coalesce several saves into a later snapshot.
     pub fn poll(&mut self) -> (bool, bool) {
         let mut changed = self.plugins.poll();
+        if let Some(StopConfirmation::Counting(receiver)) = &self.stop_confirmation {
+            match receiver.try_recv() {
+                Ok(Some(count)) => {
+                    self.stop_confirmation = Some(StopConfirmation::Ready(count));
+                    changed = true;
+                }
+                Ok(None) | Err(mpsc::TryRecvError::Disconnected) => {
+                    self.stop_confirmation = None;
+                    self.notice = "Could not count running sessions. Try again.".into();
+                    changed = true;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
         let editing_text = matches!(
             self.focus,
             Focus::Editing(Editor {
@@ -1510,9 +1671,11 @@ pub(super) fn open(host: &mut crate::HostState) {
         }
     };
     panel.wake = host.ui_wake.clone();
+    panel.server_socket = crate::host_mux_socket();
+    panel.update_server(&host.server, host.server_busy);
     panel
         .plugins
-        .bind(crate::host_mux_socket(), host.ui_wake.clone());
+        .bind(panel.server_socket.clone(), host.ui_wake.clone());
     panel.effective_font = host.font.primary_name().to_string();
     host.palette = None;
     host.theme_picker = None;
@@ -1561,14 +1724,28 @@ pub(super) fn open_plugins(host: &mut crate::HostState) {
     }
 }
 
-/// After input on the settings panel: Restart now closes the panel and asks
-/// for one confirm, which lists the sessions and can restart the pmux server.
+pub(super) fn activate(host: &mut crate::HostState, index: usize) -> bool {
+    let Some(panel) = host.settings.as_mut() else {
+        return false;
+    };
+    panel.activate(index);
+    if let Some(menu) = host.context_menu.as_mut() {
+        menu.selected = panel.selected();
+    }
+    follow_up(host);
+    host.dirty = true;
+    host.window.request_redraw();
+    true
+}
+
 pub(super) fn follow_up(host: &mut crate::HostState) {
-    if host
-        .settings
-        .as_mut()
-        .is_some_and(|panel| panel.plugins.take_restart_request())
-    {
+    let Some(panel) = host.settings.as_mut() else {
+        return;
+    };
+    if let Some(action) = panel.server_request.take() {
+        host.server_card_request = Some(action);
+    }
+    if panel.plugins.take_restart_request() {
         crate::close_context_menu(host);
         host.toast_update_action = Some(crate::update_flow::Action::StartOneConfirm);
     }
@@ -1623,6 +1800,10 @@ pub(super) fn poll(host: &mut crate::HostState) {
     if font_changed {
         panel.effective_font = host.font.primary_name().to_string();
     }
+    let server_changed = panel.update_server(&host.server, host.server_busy);
+    if server_changed {
+        host.palette_layout = None;
+    }
     let (changed, disabled) = panel.poll();
     if disabled {
         crate::close_context_menu(host);
@@ -1632,7 +1813,7 @@ pub(super) fn poll(host: &mut crate::HostState) {
     if let Some(menu) = host.context_menu.as_mut() {
         menu.selected = panel.selected();
     }
-    if changed || font_changed {
+    if changed || font_changed || server_changed {
         host.dirty = true;
         host.window.request_redraw();
     }

@@ -5583,10 +5583,23 @@ fn document_for_content(
 fn chrome_overlay(host: &HostState) -> a11y::OverlayKind {
     if let Some(panel) = host.settings.as_ref() {
         let (header, rows) = panel.rows();
+        let status = rows.iter().find_map(|row| {
+            matches!(row.kind, palette::RowKind::Status(_))
+                .then(|| format!(" · {} {}", row.describe, row.name))
+        });
         return a11y::OverlayKind::Palette {
             rows: rows
                 .into_iter()
-                .map(|row| format!("{header}: {} {}", row.name, row.describe))
+                .filter(|row| row.kind.focusable())
+                .enumerate()
+                .map(|(index, row)| {
+                    let status = if index == 0 {
+                        status.as_deref().unwrap_or("")
+                    } else {
+                        ""
+                    };
+                    format!("{header}: {} {}{status}", row.name, row.describe)
+                })
                 .collect(),
             selected: panel.selected(),
         };
@@ -5731,15 +5744,7 @@ fn dispatch_overlay_activate(
         apply_transparency_input(host, transparency::Input::Enter);
         return Dispatch::Handled;
     }
-    if let Some(panel) = host.settings.as_mut() {
-        panel.activate(index);
-        let selected = panel.selected();
-        if let Some(menu) = host.context_menu.as_mut() {
-            menu.selected = selected;
-        }
-        settings::follow_up(host);
-        host.dirty = true;
-        host.window.request_redraw();
+    if settings::activate(host, index) {
         return Dispatch::Handled;
     }
     if host.space_panel.is_some() {
@@ -6379,6 +6384,10 @@ fn open_modal(host: &HostState) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+fn server_card_accepts_input(host: &HostState) -> bool {
+    host.server_card_shown && open_modal(host).is_none() && host.splash.is_none()
 }
 
 /// Paint the modal scrim when a modal is open, and keep frames coming while
@@ -8152,6 +8161,23 @@ fn rasterize_frame(
             );
         }
     }
+    // The server card sits over dead panes, under every dialog and menu.
+    let local_live = host.mux.panes_and_rects().any(|(id, runtime, _)| {
+        runtime.child_alive && !host.attach_pane_sessions.contains_key(&id)
+    });
+    host.server_card_shown = server_state::shows_card(
+        &host.server,
+        SystemTime::now(),
+        local_live,
+        host.server_card_dismissed,
+        host.server_busy,
+    );
+    if host.server_card_shown {
+        let server = host.server.clone();
+        host.server_card_buttons =
+            server_state::paint(host, &server, buffer, width as usize, height as usize);
+    }
+
     // Everything above sits behind a modal; everything below is one.
     paint_modal_scrim(host, buffer, width as usize, height as usize);
     if let Some(picker) = host.theme_picker.as_ref() {
@@ -8666,22 +8692,6 @@ fn rasterize_frame(
                 animation_ms.filter(|_| fitted.animated_art()),
             );
         }
-    }
-    // The server card sits over dead panes, under every dialog and menu.
-    let local_live = host.mux.panes_and_rects().any(|(id, runtime, _)| {
-        runtime.child_alive && !host.attach_pane_sessions.contains_key(&id)
-    });
-    host.server_card_shown = server_state::shows_card(
-        &host.server,
-        SystemTime::now(),
-        local_live,
-        host.server_card_dismissed,
-        host.server_busy,
-    );
-    if host.server_card_shown {
-        let server = host.server.clone();
-        host.server_card_buttons =
-            server_state::paint(host, &server, buffer, width as usize, height as usize);
     }
     restore_prompt::paint(host, buffer, width as usize, height as usize);
     restart_modal::paint(host, buffer, width as usize, height as usize);
@@ -12019,6 +12029,9 @@ fn activate_context_menu(
     program: &str,
     child_args: &[String],
 ) -> Dispatch {
+    if settings::activate(host, index) {
+        return Dispatch::Handled;
+    }
     if host.space_panel.is_some() {
         space_panel::activate(host, index);
         return Dispatch::Handled;
@@ -21611,7 +21624,7 @@ impl ApplicationHandler<UserAction> for App {
         if restart_modal::handle_pointer(host, &event) {
             return;
         }
-        if host.server_card_shown {
+        if server_card_accepts_input(host) {
             if let WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
@@ -21918,13 +21931,7 @@ impl ApplicationHandler<UserAction> for App {
                     restart_modal::dispatch_key(host, &event.logical_key, event.repeat);
                     return;
                 }
-                if host.server_card_shown
-                    && host.palette.is_none()
-                    && host.space_picker.is_none()
-                    && host.context_menu.is_none()
-                    && host.settings.is_none()
-                    && host.theme_picker.is_none()
-                {
+                if server_card_accepts_input(host) {
                     match server_state::key(&host.server, &event.logical_key) {
                         server_state::CardKey::Act(action) => {
                             host.server_card_request = Some(action);

@@ -42,6 +42,10 @@ def main():
                    XDG_CONFIG_HOME=str(root / 'config'), XDG_STATE_HOME=str(root / 'state'),
                    XDG_RUNTIME_DIR=tmp, PMUX_SOCKET=str(sock), PMUX_SERVER=str(bins / 'pmuxd'),
                    PATH=str(bins) + os.pathsep + env['PATH'])
+        # This test covers the restart that relaunches each program, so the
+        # sessions must not be handed to the new server live.
+        (root / 'config' / 'prismattyc').mkdir(parents=True, exist_ok=True)
+        (root / 'config' / 'prismattyc' / 'config.toml').write_text('[mux]\nlive_update = false\n')
 
         def cli(*argv, success=True, cwd=None):
             result = subprocess.run([str(bins / 'pmux'), *argv], env=env, cwd=cwd, capture_output=True,

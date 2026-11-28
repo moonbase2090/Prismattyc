@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- On macOS and Linux, **Save and restart** keeps the programs in your sessions running through a pmux server update. The new pmux server takes over every pane in the same process, with its screen and scrollback, and app windows reconnect to it. If the new server cannot take the sessions, or does not start, the update restarts them as before and they come back from the saved workspace. `live_update = false` in `[mux]` turns this off. A `pmux attach` in another terminal still ends when the server changes. Windows is unchanged.
+
 ### Changed
 
 - The launch splash shows on the first window even when sessions are already running or a workspace is restored. Dismissing it leaves those sessions as they were. Later windows, the config editor, and completing an update still skip it. An explicit program, `--no-splash`, `PRISMATTYC_NO_SPLASH`, and `splash = false` still hide it.

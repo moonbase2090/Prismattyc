@@ -446,16 +446,176 @@ def service(f):
         f.cli("login", "disable")
 
 
+def live_update(f):
+    """A live update keeps the pane's program: same pid, same screen, input still works."""
+    daemon = f.daemon()
+    f.cli("new", "--no-attach", "live", "--", "/bin/sh", "-i")
+    pane = next(s for s in f.snapshot() if s["name"] == "live")["windows"][0]["panes"][0]
+    pane_id, pid = pane["id"], pane["child_pid"]
+    def screen():
+        return f.cli("save-buffer", pane_id, "-")
+    f.cli("send", pane_id, "echo before-$$", "--enter")
+    wait_for(lambda: f"before-{pid}" in screen(), "output before the update")
+    server_pid = int(f.socket.with_suffix(".pid").read_text())
+
+    # The request a restart sends: hand everything to this same pmuxd binary.
+    with socket.socket(socket.AF_UNIX) as client:
+        client.settimeout(10)
+        client.connect(str(f.socket))
+        lines = client.makefile()
+        def send(kind, request_id, **fields):
+            client.sendall((json.dumps(dict(type=kind, version=1, request_id=request_id, **fields)) + "\n").encode())
+            return json.loads(lines.readline())
+        registered = send("register_client", 1)
+        assert registered["status"] == "ok", registered
+        client_id = registered["response"]["client_id"]
+        accepted = send("handoff_upgrade", 2, client_id=client_id, binary=str(f.binaries / "pmuxd"))
+        assert accepted["status"] == "ok" and "shutdown_accepted" in json.dumps(accepted), accepted
+    def new_server():
+        # The old server answers "shutting down" until it execs the new one.
+        try:
+            return f.request("server_info")["pid"] == server_pid
+        except AssertionError:
+            return False
+    wait_for(new_server, "the new server on the same socket")
+    current = next(s for s in f.snapshot() if s["name"] == "live")["windows"][0]["panes"][0]
+    assert current["id"] == pane_id and current["child_pid"] == pid, current
+    os.kill(pid, 0)
+    assert f"before-{pid}" in screen(), "the screen did not carry over"
+    f.cli("send", pane_id, "echo after-$$", "--enter")
+    wait_for(lambda: f"after-{pid}" in screen(), "input after the update")
+    assert daemon.poll() is None, "the server process exited instead of exec'ing"
+
+    # The same through the update flow's restart, with consent to keep sessions.
+    consent = f.root / "consent.json"
+    f.cli("session-config", "save", consent)
+    receipt = json.loads(f.cli("restart", "--daemon", "--stop-sessions", "--consented-config", consent,
+                               "--worker", "--json").strip().splitlines()[-1])
+    statuses = [c["status"] for c in receipt["components"] if c["component"] == "daemon"]
+    assert statuses == ["updated_live"], receipt
+    current = next(s for s in f.snapshot() if s["name"] == "live")["windows"][0]["panes"][0]
+    assert current["child_pid"] == pid, current
+    f.cli("send", pane_id, "echo again-$$", "--enter")
+    wait_for(lambda: f"again-{pid}" in screen(), "input after the restart")
+    return {"case": "live-update", "program": "kept", "screen": "kept", "restart": "updated_live",
+            "result": "PASS"}
+
+
+def request_handoff(f, binary):
+    """Send a live-update request for `binary` and return the server's answer."""
+    with socket.socket(socket.AF_UNIX) as client:
+        client.settimeout(10)
+        client.connect(str(f.socket))
+        lines = client.makefile()
+        def send(kind, request_id, **fields):
+            client.sendall((json.dumps(dict(type=kind, version=1, request_id=request_id, **fields)) + "\n").encode())
+            return json.loads(lines.readline())
+        client_id = send("register_client", 1)["response"]["client_id"]
+        return send("handoff_upgrade", 2, client_id=client_id, binary=str(binary))
+
+
+def stand_in(f, name, body):
+    """A stand-in pmuxd: a shell script with `body`, next to the real one."""
+    path = f.root / name
+    path.write_text("#!/bin/sh\nREAL=" + str(f.binaries / "pmuxd") + "\n" + body)
+    path.chmod(0o755)
+    return path
+
+
+def live_session(f, name="live"):
+    f.cli("new", "--no-attach", name, "--", "/bin/sh", "-i")
+    pane = next(s for s in f.snapshot() if s["name"] == name)["windows"][0]["panes"][0]
+    return pane["id"], pane["child_pid"]
+
+
+def restored_after_crash(f, daemon, old_pid, name="live"):
+    """The old server is gone; a normal restore brings the session back with a new program."""
+    assert daemon.wait(timeout=20) != 0, "the server should exit when the live update cannot finish"
+    f.cli("up", "--restore-workspace")
+    session = wait_for(lambda: next(s for s in f.snapshot() if s["name"] == name), "restored session")
+    new_pid = session["windows"][0]["panes"][0]["child_pid"]
+    assert new_pid != old_pid, "a restore after a failed update must start the program again"
+    return session
+
+
+def live_update_fallbacks(f):
+    # Pane logs on, as for a socket in the instance directory.
+    f.env["PMUX_PANE_LOG"] = str(f.root / "pane-log.json")
+    # 1. Probe refused: nothing changes.
+    daemon = f.daemon()
+    pane_id, pid = live_session(f)
+    refuser = stand_in(f, "pmuxd-old", 'exit 1\n')
+    answer = request_handoff(f, refuser)
+    assert answer["status"] == "error" and "refused" in answer["error"]["message"], answer
+    assert daemon.poll() is None
+    current = next(s for s in f.snapshot() if s["name"] == "live")["windows"][0]["panes"][0]
+    assert current["child_pid"] == pid
+    f.cli("send", pane_id, "echo still-$$", "--enter")
+    wait_for(lambda: f"still-{pid}" in f.cli("save-buffer", pane_id, "-"), "the pane still reads after a refusal")
+
+    # 2. Exec fails: the binary answers the probe, then is gone. The pane's
+    # scrollback must survive in the pane-log checkpoint for the restore.
+    f.cli("send", pane_id, "echo kept-in-scrollback-$$", "--enter")
+    wait_for(lambda: f"kept-in-scrollback-{pid}" in f.cli("save-buffer", pane_id, "-"), "the marker line")
+    vanishing = stand_in(f, "pmuxd-vanishing",
+                         'case " $* " in *" --handoff-probe "*) probe=1;; esac\nif [ -n "$probe" ]; then "$REAL" "$@"; rm -f "$0"; exit 0; fi\nexit 1\n')
+    answer = request_handoff(f, vanishing)
+    assert answer["status"] == "ok", answer
+    session = restored_after_crash(f, daemon, pid)
+    restored_pane = session["windows"][0]["panes"][0]["id"]
+    history = f.cli("save-buffer", restored_pane, "-", "--history")
+    assert f"kept-in-scrollback-{pid}" in history, history[-2000:]
+
+    # 3. Import fails: the new server cannot read the record.
+    f.cli("stop")
+    daemon = f.daemon()
+    pane_id, pid = live_session(f, "live-two")
+    unreadable = stand_in(f, "pmuxd-unreadable",
+                          'case " $* " in *" --handoff-probe "*) probe=1;; esac\nif [ -n "$probe" ]; then exec "$REAL" "$@"; fi\n'
+                          'fd=; prev=; for a in "$@"; do [ "$prev" = "--handoff-fd" ] && fd=$a; prev=$a; done\n'
+                          'eval "exec $fd<&-"\nexec "$REAL" "$@"\n')
+    answer = request_handoff(f, unreadable)
+    assert answer["status"] == "ok", answer
+    restored_after_crash(f, daemon, pid, "live-two")
+    return {"case": "live-update-fallbacks", "probe_refused": "unchanged", "exec_failed": "restored",
+            "import_failed": "restored", "result": "PASS"}
+
+
+def live_update_launch_forms(f):
+    """The first pane's program keeps its pid whether it was given after -- or positionally."""
+    kept = []
+    for form in (["/bin/sh", "-i"], ["--", "/bin/sh", "-i"]):
+        daemon = f.spawn("pmuxd", "--socket", f.socket, *form)
+        session = wait_for(lambda: f.snapshot()[0], "the first session")
+        pane = session["windows"][0]["panes"][0]
+        server_pid = int(wait_for(lambda: f.socket.with_suffix(".pid").read_text(), "pid file"))
+        answer = request_handoff(f, f.binaries / "pmuxd")
+        assert answer["status"] == "ok", answer
+        def new_server():
+            try:
+                return f.request("server_info")["pid"] == server_pid
+            except AssertionError:
+                return False
+        wait_for(new_server, "the new server")
+        current = f.snapshot()[0]["windows"][0]["panes"][0]
+        assert current["child_pid"] == pane["child_pid"], (form, pane, current)
+        assert daemon.poll() is None, ("the server exited instead of exec'ing", form)
+        kept.append(" ".join(form))
+        f.cli("stop")
+        daemon.wait(timeout=20)
+    return {"case": "live-update-launch-forms", "kept": kept, "result": "PASS"}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bins", type=Path, required=True)
-    parser.add_argument("--case", choices=["single-instance", "concurrent", "foreground", "stable-replay", "reboot", "supervisor", "new-install", "migration", "corrupt", "service", "all"], default="all")
+    parser.add_argument("--case", choices=["single-instance", "concurrent", "foreground", "stable-replay", "reboot", "supervisor", "new-install", "migration", "corrupt", "service", "live-update", "live-update-fallbacks", "live-update-launch-forms", "all"], default="all")
     parser.add_argument("--host", action="store_true")
     parser.add_argument("--out", type=Path)
     parser.add_argument("--capture", type=Path)
     args = parser.parse_args()
     bins = args.bins.resolve()
-    for name in ([args.case] if args.case != "all" else ["single-instance", "concurrent", "foreground", "stable-replay", "reboot", "supervisor", "new-install", "migration", "corrupt"]):
+    for name in ([args.case] if args.case != "all" else ["single-instance", "concurrent", "foreground", "stable-replay", "reboot", "supervisor", "new-install", "migration", "corrupt", "live-update", "live-update-fallbacks", "live-update-launch-forms"]):
         with tempfile.TemporaryDirectory(prefix="plogin-", dir="/tmp") as directory:
             fixture = Fixture(bins, Path(directory).resolve())
             try:
@@ -465,7 +625,10 @@ def main():
                           "reboot": lambda: reboot(fixture, args.host, args.capture),
                           "supervisor": lambda: supervisor(fixture), "new-install": lambda: new_install(fixture),
                           "migration": lambda: migration(fixture, args.host),
-                          "corrupt": lambda: corrupt_checkpoint(fixture), "service": lambda: service(fixture)}[name]()
+                          "corrupt": lambda: corrupt_checkpoint(fixture), "service": lambda: service(fixture),
+                          "live-update": lambda: live_update(fixture),
+                          "live-update-fallbacks": lambda: live_update_fallbacks(fixture),
+                          "live-update-launch-forms": lambda: live_update_launch_forms(fixture)}[name]()
                 print(json.dumps(result), flush=True)
             finally:
                 if args.out:

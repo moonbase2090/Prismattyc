@@ -461,8 +461,10 @@ fn restart_plans_and_cooperative_components() {
     let answered = answer_host(&missing);
     let restarted = ok(&pmux(&missing, &root, &[], &["restart", "--host"]));
     answered.join().unwrap();
+    // A live update or a restart: either way the server comes back.
     assert!(
-        restarted.contains("\"status\":\"restarted\""),
+        restarted.contains("\"status\":\"restarted\"")
+            || restarted.contains("\"status\":\"updated_live\""),
         "{restarted}"
     );
     assert!(restarted.contains("test host"), "{restarted}");
@@ -1336,8 +1338,10 @@ fn session_configuration_restart_stops_only_consented_sessions() {
         ],
     );
     let restarted = ok(&output);
+    // A live update or a restart: either way the server comes back.
     assert!(
-        restarted.contains("\"status\":\"restarted\""),
+        restarted.contains("\"status\":\"restarted\"")
+            || restarted.contains("\"status\":\"updated_live\""),
         "{restarted}"
     );
     // Without --progress, each step is a plain line with the same words the
@@ -1371,6 +1375,13 @@ fn session_configuration_restart_stops_only_consented_sessions() {
 #[test]
 fn saved_restart_restores_sessions_with_their_ids_and_scrollback() {
     let root = temp_root("cfg-keep");
+    // This test covers the restart that relaunches each program; keep the
+    // sessions from being handed over live instead.
+    std::fs::write(
+        root.join("config").join("prismattyc.toml"),
+        "[mux]\nlive_update = false\n",
+    )
+    .unwrap();
     let socket = socket_path(&root);
     let pane_log = root.join("pane-log.json");
     let env = [("PMUX_PANE_LOG", pane_log.to_str().unwrap())];
@@ -1567,8 +1578,10 @@ fn consented_restart_and_restore_keep_every_space_member() {
         "--worker",
         "--json",
     ]));
+    // A live update or a restart: either way the server comes back.
     assert!(
-        restarted.contains("\"status\":\"restarted\""),
+        restarted.contains("\"status\":\"restarted\"")
+            || restarted.contains("\"status\":\"updated_live\""),
         "{restarted}"
     );
     ok(&pmux(&[
@@ -1786,6 +1799,12 @@ fn write_pane_command_line(socket: &Path, session_name: &str, command_line: &str
 #[test]
 fn session_config_check_and_consented_restart_ignore_transient_agent_children() {
     let root = temp_root("cfg-transient-child");
+    // The agents must be resumed by the restart, not handed over live.
+    std::fs::write(
+        root.join("config").join("prismattyc.toml"),
+        "[mux]\nlive_update = false\n",
+    )
+    .unwrap();
     let socket = socket_path(&root);
     let bin = root.join("bin");
     let state = root.join("state");
@@ -1926,8 +1945,10 @@ fn session_config_check_and_consented_restart_ignore_transient_agent_children() 
             "--json",
         ],
     ));
+    // A live update or a restart: either way the server comes back.
     assert!(
-        restarted.contains("\"status\":\"restarted\""),
+        restarted.contains("\"status\":\"restarted\"")
+            || restarted.contains("\"status\":\"updated_live\""),
         "{restarted}"
     );
 
@@ -2226,8 +2247,10 @@ fn plain_saved_restart_resumes_exact_conversations_and_monitor_socket_ready() {
             "--json",
         ],
     ));
+    // A live update or a restart: either way the server comes back.
     assert!(
-        restarted.contains("\"status\":\"restarted\""),
+        restarted.contains("\"status\":\"restarted\"")
+            || restarted.contains("\"status\":\"updated_live\""),
         "{restarted}"
     );
 

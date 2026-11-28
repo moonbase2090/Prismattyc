@@ -316,6 +316,8 @@ activity_graph_style = "braille"
 # resume_trusted = ["nvim", "lazygit"]
 # Take program resume reports and resume programs while the pmux server runs as root. true|false; default false.
 resume_allow_elevated = false
+# Keep sessions running through a pmux server update (macOS and Linux); false restarts them. true|false; default true.
+live_update = true
 
 [keys]
 # Host actions. An entry replaces that action's default chords.
@@ -899,6 +901,7 @@ instance = "default"                 # $XDG_RUNTIME_DIR/prismattyc/pmux.sock
 # shell = "pwsh.exe"                    # unset: COMSPEC or cmd.exe on Windows
 # resume_trusted = ["nvim", "lazygit"]  # commands a program may ask to resume; "*" trusts all (program-resume.md)
 # resume_allow_elevated = false         # default false: a root pmux server takes no resume reports
+# live_update = true                    # default true: Save and restart hands running sessions to the new pmux server
 ```
 
 Cmd+Q (quit) and Cmd+N (new window) are available by default.

@@ -80,11 +80,16 @@ class Keys:
 
     def front(self):
         if sys.platform == "darwin":
-            subprocess.run(
-                ["osascript", "-e",
-                 'tell application "System Events" to set frontmost of '
-                 f'(first process whose unix id is {self.pid}) to true'],
-                capture_output=True, timeout=20)
+            # Keys are posted to the pid, so focus is a courtesy. In a fresh
+            # VM System Events waits on a permission prompt; do not wait on it.
+            try:
+                subprocess.run(
+                    ["osascript", "-e",
+                     'tell application "System Events" to set frontmost of '
+                     f'(first process whose unix id is {self.pid}) to true'],
+                    capture_output=True, timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
             return
         subprocess.run(
             ["xdotool", "windowfocus", "--sync", self.wid],

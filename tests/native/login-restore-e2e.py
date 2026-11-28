@@ -11,11 +11,14 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import select
 import shutil
 import signal
 import socket
+import struct
 import subprocess
 import tempfile
+import termios
 import time
 
 
@@ -528,6 +531,51 @@ def live_session(f, name="live"):
     return pane["id"], pane["child_pid"]
 
 
+def live_update_attach(f):
+    daemon = f.daemon()
+    pane_id, child_pid = live_session(f)
+    before = f"before-{child_pid}".encode()
+    after = f"after-{child_pid}".encode()
+    f.cli("send", pane_id, "echo before-$$", "--enter")
+    master, slave = os.openpty()
+    with os.fdopen(master, "rb", buffering=0) as terminal, os.fdopen(slave, "rb") as tty:
+        fcntl.ioctl(tty, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+        attach = subprocess.Popen([f.binaries / "pmux", "--socket", f.socket, "attach", "live"],
+                                  cwd=f.root, env=f.env, stdin=tty, stdout=tty, stderr=tty,
+                                  start_new_session=True)
+        f.children.append(attach)
+
+        def expect(marker):
+            output = bytearray()
+            deadline = time.monotonic() + 15
+            while marker not in output:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not select.select([terminal], [], [], remaining)[0]:
+                    raise AssertionError((marker, attach.poll(), output[-600:]))
+                data = os.read(master, 65536)
+                assert data, ("attach closed", attach.poll(), output[-600:])
+                output.extend(data)
+
+        expect(before)
+        consent = f.root / "consent.json"
+        f.cli("session-config", "save", consent)
+        receipt = json.loads(f.cli("restart", "--daemon", "--stop-sessions", "--consented-config",
+                                   consent, "--worker", "--json").strip().splitlines()[-1])
+        assert any(c["component"] == "daemon" and c["status"] == "updated_live"
+                   for c in receipt["components"]), receipt
+        # This marker can only reach the terminal after the updated daemon is serving frames.
+        f.cli("send", pane_id, "echo resumed-$$", "--enter")
+        expect(f"resumed-{child_pid}".encode())
+        os.write(master, b"echo after-$$\r")
+        expect(after)
+        assert f.request("server_info")["pid"] == daemon.pid
+        os.write(master, b"\x1cd")
+        assert attach.wait(timeout=10) == 0
+        assert after.decode() in f.cli("save-buffer", pane_id, "-")
+    return {"case": "live-update-attach", "pane": pane_id, "shell_pid": child_pid,
+            "observed": after.decode(), "result": "PASS"}
+
+
 def restored_after_crash(f, daemon, old_pid, name="live"):
     """The old server is gone; a normal restore brings the session back with a new program."""
     assert daemon.wait(timeout=20) != 0, "the server should exit when the live update cannot finish"
@@ -609,13 +657,13 @@ def live_update_launch_forms(f):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bins", type=Path, required=True)
-    parser.add_argument("--case", choices=["single-instance", "concurrent", "foreground", "stable-replay", "reboot", "supervisor", "new-install", "migration", "corrupt", "service", "live-update", "live-update-fallbacks", "live-update-launch-forms", "all"], default="all")
+    parser.add_argument("--case", choices=["single-instance", "concurrent", "foreground", "stable-replay", "reboot", "supervisor", "new-install", "migration", "corrupt", "service", "live-update", "live-update-attach", "live-update-fallbacks", "live-update-launch-forms", "all"], default="all")
     parser.add_argument("--host", action="store_true")
     parser.add_argument("--out", type=Path)
     parser.add_argument("--capture", type=Path)
     args = parser.parse_args()
     bins = args.bins.resolve()
-    for name in ([args.case] if args.case != "all" else ["single-instance", "concurrent", "foreground", "stable-replay", "reboot", "supervisor", "new-install", "migration", "corrupt", "live-update", "live-update-fallbacks", "live-update-launch-forms"]):
+    for name in ([args.case] if args.case != "all" else ["single-instance", "concurrent", "foreground", "stable-replay", "reboot", "supervisor", "new-install", "migration", "corrupt", "live-update", "live-update-attach", "live-update-fallbacks", "live-update-launch-forms"]):
         with tempfile.TemporaryDirectory(prefix="plogin-", dir="/tmp") as directory:
             fixture = Fixture(bins, Path(directory).resolve())
             try:
@@ -627,6 +675,7 @@ def main():
                           "migration": lambda: migration(fixture, args.host),
                           "corrupt": lambda: corrupt_checkpoint(fixture), "service": lambda: service(fixture),
                           "live-update": lambda: live_update(fixture),
+                          "live-update-attach": lambda: live_update_attach(fixture),
                           "live-update-fallbacks": lambda: live_update_fallbacks(fixture),
                           "live-update-launch-forms": lambda: live_update_launch_forms(fixture)}[name]()
                 print(json.dumps(result), flush=True)

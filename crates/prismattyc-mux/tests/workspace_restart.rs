@@ -109,3 +109,9 @@ fn a_live_update_keeps_the_first_pane_with_either_launch_form() {
         serde_json::json!(["/bin/sh -i", "-- /bin/sh -i"])
     );
 }
+
+#[test]
+fn interactive_attach_repaints_and_forwards_input_after_a_live_update() {
+    let proof = run("live-update-attach");
+    assert_eq!(proof["observed"], format!("after-{}", proof["shell_pid"]));
+}

@@ -161,6 +161,82 @@ pub fn route_seat_to_host(socket: &Path, session_id: &str, title: &str) -> std::
     Ok(true)
 }
 
+/// What routing a session into the registered host needs first.
+///
+/// The host applies a Space-tagged attach-tabs cache only when that Space owns
+/// every session in it. Appending a session the Space does not own makes the
+/// host refuse the whole cache ("space ownership could not be verified").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SeatOwnership {
+    /// The cache has no Space, or there is no cache: route as is.
+    Unbound,
+    /// The cache's Space already owns the session: route as is.
+    Owned,
+    /// The session has no saved Space owner: add it to `space`, then route.
+    Adopt { space: String },
+    /// The session cannot join the cache's Space; nothing is routed.
+    Refuse(String),
+}
+
+/// Decide [`SeatOwnership`] for `session` from the host's cache Space.
+///
+/// `space_id` maps a saved Space name to its stable id (None when the file
+/// is missing). `owner_name` maps an owner id to a saved Space name, when
+/// one exists; an owner with no saved file can be taken over like `space
+/// add` does.
+pub fn seat_ownership(
+    cache_space: Option<&str>,
+    session: &str,
+    session_owner: Option<&str>,
+    space_id: impl Fn(&str) -> Option<String>,
+    owner_name: impl Fn(&str) -> Option<String>,
+) -> SeatOwnership {
+    let Some(space) = cache_space else {
+        return SeatOwnership::Unbound;
+    };
+    let Some(id) = space_id(space) else {
+        return SeatOwnership::Refuse(format!(
+            "the app's current Space {space:?} has no saved file, so {session:?} cannot join it"
+        ));
+    };
+    match session_owner {
+        Some(owner) if owner == id => SeatOwnership::Owned,
+        Some(owner) => match owner_name(owner) {
+            Some(other) => SeatOwnership::Refuse(format!(
+                "{session:?} belongs to the Space {other:?}; run `pmux space move {space} --session {session}` to bring it here, or open {other:?}"
+            )),
+            None => SeatOwnership::Adopt {
+                space: space.to_string(),
+            },
+        },
+        None => SeatOwnership::Adopt {
+            space: space.to_string(),
+        },
+    }
+}
+
+/// After a seat route, wait for the host's acknowledgement of the cache it
+/// was sent. A missing acknowledgement is an error: nothing proves the app
+/// opened `name`, so the caller must not report success or exit 0.
+pub fn confirm_seat_route(socket: &Path, name: &str, timeout: Duration) -> std::io::Result<()> {
+    let ack = host_ack_path_from_socket(socket);
+    let cache = crate::attach_tabs::layout_path_from_socket(socket);
+    let since = fs::metadata(&cache)
+        .and_then(|meta| meta.modified())
+        .unwrap_or_else(|_| SystemTime::now());
+    if wait_host_ack(&ack, since, timeout) {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!(
+                "sent {name} to the app, but the app did not confirm it within {} seconds",
+                timeout.as_secs()
+            ),
+        ))
+    }
+}
+
 /// Wait until `ack` exists and its mtime is at least `since`.
 #[must_use]
 pub fn wait_host_ack(ack: &Path, since: SystemTime, timeout: Duration) -> bool {
@@ -186,6 +262,85 @@ fn ack_is_fresh(ack: &Path, since: SystemTime) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_seat_route_without_the_hosts_acknowledgement_is_an_error() {
+        let dir = std::env::temp_dir().join(format!(
+            "pmux-seat-ack-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("pmux.sock");
+        let cache = crate::attach_tabs::layout_path_from_socket(&socket);
+        fs::write(&cache, b"{}").unwrap();
+        let error = confirm_seat_route(&socket, "api", Duration::from_millis(200))
+            .expect_err("no acknowledgement");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("did not confirm"), "{error}");
+        // An acknowledgement written after the cache counts.
+        touch_host_ack(&host_ack_path_from_socket(&socket)).unwrap();
+        confirm_seat_route(&socket, "api", Duration::from_millis(200)).expect("acknowledged");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seat_ownership_adopts_loose_sessions_and_refuses_foreign_ones() {
+        let space_id = |name: &str| match name {
+            "work" => Some("id-work".to_string()),
+            "release" => Some("id-release".to_string()),
+            _ => None,
+        };
+        let owner_name = |id: &str| match id {
+            "id-work" => Some("work".to_string()),
+            "id-release" => Some("release".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            seat_ownership(None, "api", None, space_id, owner_name),
+            SeatOwnership::Unbound
+        );
+        assert_eq!(
+            seat_ownership(Some("work"), "api", Some("id-work"), space_id, owner_name),
+            SeatOwnership::Owned
+        );
+        // The case behind "space ownership could not be verified": a loose
+        // session appended to a Space-tagged cache. It must join first.
+        assert_eq!(
+            seat_ownership(Some("work"), "api", None, space_id, owner_name),
+            SeatOwnership::Adopt {
+                space: "work".into()
+            }
+        );
+        // An owner with no saved file is taken over, as `space add` does.
+        assert_eq!(
+            seat_ownership(Some("work"), "api", Some("id-gone"), space_id, owner_name),
+            SeatOwnership::Adopt {
+                space: "work".into()
+            }
+        );
+        let SeatOwnership::Refuse(reason) = seat_ownership(
+            Some("work"),
+            "build",
+            Some("id-release"),
+            space_id,
+            owner_name,
+        ) else {
+            panic!("a session owned by another Space is refused");
+        };
+        assert!(
+            reason.contains("\"release\"")
+                && reason.contains("pmux space move work --session build"),
+            "{reason}"
+        );
+        assert!(matches!(
+            seat_ownership(Some("gone"), "api", None, space_id, owner_name),
+            SeatOwnership::Refuse(_)
+        ));
+    }
     use std::process::{Child, Command, Stdio};
     use std::thread;
 

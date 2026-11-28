@@ -2071,7 +2071,8 @@ fn verify_decision_handlers(host: &mut HostState) {
 
     host.context_menu_target = Some(ContextMenuTarget::SpaceChip(0));
     host.context_menu = Some(ContextMenu::new(ContextMenuKind::SpaceChip));
-    activate_context_menu(host, 4, "/bin/sh", &args);
+    // Row 5 is Rename; Attach running session… is row 2.
+    activate_context_menu(host, 5, "/bin/sh", &args);
     assert_eq!(
         host.space_rail.edit.as_ref().and_then(|edit| edit.target),
         Some(0),
@@ -2082,10 +2083,11 @@ fn verify_decision_handlers(host: &mut HostState) {
 
     host.context_menu_target = Some(ContextMenuTarget::SpaceChip(99));
     host.context_menu = Some(ContextMenu::new(ContextMenuKind::SpaceChip));
-    activate_context_menu(host, 3, "/bin/sh", &args);
+    // Row 4 is Save current space.
+    activate_context_menu(host, 4, "/bin/sh", &args);
     assert_eq!(
         host.context_menu.as_ref().and_then(|menu| menu.confirm),
-        Some(3),
+        Some(4),
         "the first save activation must arm confirmation"
     );
     close_context_menu(host);

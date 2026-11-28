@@ -391,13 +391,7 @@ impl App {
                 "space_rail_position": host.spacing.space_rail.as_str(),
                 "space_undo_available": host.space_polish.undo.is_some(),
                 "space_picker_open": host.space_picker.is_some(),
-                "server": match &host.server {
-                    crate::server_state::ServerState::Running => "running".to_string(),
-                    crate::server_state::ServerState::Starting => "starting".to_string(),
-                    crate::server_state::ServerState::Stopped { .. } => "stopped".to_string(),
-                    crate::server_state::ServerState::Failed(message) => format!("failed: {message}"),
-                },
-                "server_card": host.server_card_shown,
+                "attach_picker": crate::attach_picker::status(host),
                 "space_open_pending": host.space_opens.busy(),
                 "last_space_open": host.last_space_open,
                 "space_chips": chips,
@@ -417,6 +411,7 @@ impl App {
                         super::ContextMenuTarget::RailSessionSolo(_) => "rail-session-solo",
                         super::ContextMenuTarget::RailPane(_) => "rail-pane",
                         super::ContextMenuTarget::RailTab(_) => "rail-tab",
+                        super::ContextMenuTarget::NewTab => "new-tab",
                     }),
                 })),
                 "space_session_names": host.space_rail.live_pane_names,
@@ -426,6 +421,14 @@ impl App {
                 "current_panes": panes,
                 "native_transport": native_transport_status(),
             });
+            // Kept out of the macro above, which is at its recursion limit.
+            status["server"] = match &host.server {
+                crate::server_state::ServerState::Running => "running".into(),
+                crate::server_state::ServerState::Starting => "starting".into(),
+                crate::server_state::ServerState::Stopped { .. } => "stopped".into(),
+                crate::server_state::ServerState::Failed(message) => format!("failed: {message}").into(),
+            };
+            status["server_card"] = host.server_card_shown.into();
             if let Some(status) = status.as_object_mut() {
                 status.insert("pump".into(), pump.clone());
                 status.insert("sidebar_rows".into(), serde_json::Value::Array(sidebar_rows));

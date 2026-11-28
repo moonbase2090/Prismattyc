@@ -375,6 +375,8 @@ session_split_right = "ctrl+alt+shift+r"
 session_split_down = "ctrl+alt+shift+b"
 # find a terminal across Spaces.
 terminal_switcher = "ctrl+shift+o"
+# Attach running session: bring a live session into this Space.
+# attach_session = []
 # view pending mail and pane input queue receipts.
 # agent_messages = []
 # open the Activity Monitor Space.

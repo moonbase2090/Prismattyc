@@ -359,11 +359,13 @@ fn verify_menu_and_pointer(host: &mut HostState) {
     host.space_rail.names = vec!["missing-contract-space".into()];
     host.context_menu_target = Some(ContextMenuTarget::SpaceChip(0));
     host.context_menu = Some(ContextMenu::new(ContextMenuKind::SpaceChip));
-    host.context_menu.as_mut().unwrap().confirm = Some(6);
+    // Row 2 is Attach running session…, so Move is row 6 and Delete row 7.
+    host.context_menu.as_mut().unwrap().confirm = Some(7);
     let (header, rows) = context_menu_rows(host).unwrap();
     assert_eq!(header, "missing-contract-space · saved space");
-    assert_eq!(rows[5].name, "Move focused pane here");
-    assert!(rows[6].describe.contains("press Enter again to confirm"));
+    assert_eq!(rows[2].name, "Attach running session…");
+    assert_eq!(rows[6].name, "Move focused pane here");
+    assert!(rows[7].describe.contains("press Enter again to confirm"));
     close_context_menu(host);
 }
 

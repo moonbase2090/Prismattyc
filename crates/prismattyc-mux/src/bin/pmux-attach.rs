@@ -41,13 +41,12 @@ use prismattyc_core::{
 };
 use prismattyc_mux::{
     attach_pty_fallback, attach_tabs, classify_control_request_id, default_socket_path,
-    diagnose_runtime_dir_miss_from_env, expand_empty_bracketed_paste, host_ack_path_from_socket,
-    list_spaces, load_space, next_stale_skip, prism_config_path, probe_socket_liveness,
-    route_seat_to_host, should_host_route_seat, space_sessions_in_tab_order, spaces_dir,
-    wait_host_ack, ArrangementWire, ColorWire, ControlError, ControlErrorCode, ControlIdMatch,
-    ControlRequest, ControlResponse, ControlResponseBody, ControlResponseData, Event, OverlayKind,
-    PaneContent, PaneOverlay, PaneStyled, Snapshot, SocketLiveness, SpawnSpec, StyleRun,
-    PROTOCOL_VERSION,
+    diagnose_runtime_dir_miss_from_env, expand_empty_bracketed_paste, list_spaces, load_space,
+    next_stale_skip, prism_config_path, probe_socket_liveness, route_seat_to_host,
+    should_host_route_seat, space_sessions_in_tab_order, spaces_dir, ArrangementWire, ColorWire,
+    ControlError, ControlErrorCode, ControlIdMatch, ControlRequest, ControlResponse,
+    ControlResponseBody, ControlResponseData, Event, OverlayKind, PaneContent, PaneOverlay,
+    PaneStyled, Snapshot, SocketLiveness, SpawnSpec, StyleRun, PROTOCOL_VERSION,
 };
 #[cfg(unix)]
 use rustix::{
@@ -1216,17 +1215,87 @@ fn try_host_route_after_resolve(cli: &Cli, snapshot: &Snapshot, pane_id: u64) ->
         return Ok(false);
     };
     let name = pane_session_name(snapshot, pane_id).unwrap_or("session");
+    // The app shows a Space's cache only when the Space owns every session
+    // in it, so the session joins the app's current Space first.
+    let cache_space = attach_tabs::load(&attach_tabs::layout_path_from_socket(&cli.socket))
+        .and_then(|file| file.space);
+    let owner = snapshot
+        .sessions
+        .iter()
+        .find(|session| session.id == session_id)
+        .and_then(|session| session.space_id.clone());
+    let saved: Vec<_> = list_spaces(&spaces_dir())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|entry| {
+            load_space(&spaces_dir(), &entry.name)
+                .ok()
+                .map(|space| (entry.name, space))
+        })
+        .collect();
+    match prismattyc_mux::seat_ownership(
+        cache_space.as_deref(),
+        name,
+        owner.as_deref(),
+        |space| {
+            saved
+                .iter()
+                .find(|(saved_name, _)| saved_name == space)
+                .and_then(|(_, saved)| saved.id.clone())
+        },
+        |owner| {
+            saved
+                .iter()
+                .find(|(_, saved)| saved.id.as_deref() == Some(owner))
+                .map(|(saved_name, _)| saved_name.clone())
+        },
+    ) {
+        prismattyc_mux::SeatOwnership::Unbound | prismattyc_mux::SeatOwnership::Owned => {}
+        prismattyc_mux::SeatOwnership::Adopt { space } => {
+            if let Err(error) = join_space(&cli.socket, &space, name) {
+                eprintln!("pmux-attach: {name} could not join the Space {space}: {error:#}; attaching here instead");
+                return Ok(false);
+            }
+        }
+        prismattyc_mux::SeatOwnership::Refuse(reason) => {
+            eprintln!("pmux-attach: {reason}; attaching here instead");
+            return Ok(false);
+        }
+    }
     if !route_seat_to_host(&cli.socket, &session_id.to_string(), name)? {
         return Ok(false);
     }
-    let ack = host_ack_path_from_socket(&cli.socket);
-    let cache = attach_tabs::layout_path_from_socket(&cli.socket);
-    let since = std::fs::metadata(&cache)
-        .and_then(|meta| meta.modified())
-        .unwrap_or_else(|_| SystemTime::now());
-    let _ = wait_host_ack(&ack, since, Duration::from_secs(2));
-    eprintln!("attached {name} in the host as a log replica");
+    // Without the app's acknowledgement nothing proves the session opened:
+    // fail, so a script or shell sees a nonzero exit instead of success.
+    prismattyc_mux::confirm_seat_route(&cli.socket, name, Duration::from_secs(2))?;
+    eprintln!("opened {name} in the app");
     Ok(true)
+}
+
+/// `pmux space add SPACE --session NAME`, through the pmux beside this binary.
+fn join_space(socket: &Path, space: &str, session: &str) -> Result<()> {
+    let pmux = std::env::var_os("PMUX")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|me| prismattyc_mux::executable::sibling(&me, &["pmux"]))
+        })
+        .context("pmux not found beside pmux-attach")?;
+    let output = prismattyc_process::spawn(
+        prismattyc_mux::platform::hidden_capture_command(pmux)
+            .arg("--socket")
+            .arg(socket)
+            .args(["space", "add", space, "--session", session])
+            .stdin(std::process::Stdio::null()),
+    )
+    .and_then(std::process::Child::wait_with_output)
+    .context("run pmux space add")?;
+    if !output.status.success() {
+        bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    Ok(())
 }
 
 fn control_code(err: &anyhow::Error) -> Option<ControlErrorCode> {
@@ -5807,6 +5876,11 @@ mod tests {
                 !try_host_route_after_resolve(&interactive, &snapshot, 1).unwrap(),
                 "unknown pane"
             );
+            // A live host that never acknowledges: the route is an error,
+            // not a success, so the command exits nonzero.
+            let error = try_host_route_after_resolve(&interactive, &snapshot, 42)
+                .expect_err("a missing acknowledgement must fail");
+            assert!(error.to_string().contains("did not confirm"), "{error:#}");
             prismattyc_mux::unregister_host_pid(
                 &prismattyc_mux::host_pid_path_from_socket(&socket),
                 live,

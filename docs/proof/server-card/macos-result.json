@@ -1,0 +1,11 @@
+{
+  "status": "PASS",
+  "platform": "darwin",
+  "checks": [
+    "failed start: the window opened with the card and the reason",
+    "try again: Enter started the server and the card went away",
+    "stop: one card replaced the attached pane after the grace",
+    "start: Enter started the server and the card went away",
+    "local shell: the new-tab key opened a local shell and the card stepped aside"
+  ]
+}

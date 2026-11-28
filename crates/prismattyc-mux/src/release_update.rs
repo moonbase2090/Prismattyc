@@ -3731,6 +3731,58 @@ mod tests {
         assert!(!is_pid_suffix("abc"));
     }
 
+    /// Windows pane holders run pmuxd from the version directory of the
+    /// release that started them, possibly long after a newer release is
+    /// current. The update cleanup must never remove a version directory.
+    #[test]
+    fn update_cleanup_never_removes_a_version_directory() {
+        let dir = temporary();
+        let target = "x86_64-pc-windows-msvc";
+        let older = versioned_dir_name(&Version::parse("0.3.80").unwrap(), target).unwrap();
+        let newer = versioned_dir_name(&Version::parse("0.3.81").unwrap(), target).unwrap();
+        for name in ["legacy", older.as_str(), newer.as_str()] {
+            fs::create_dir(dir.join(name)).unwrap();
+            fs::write(dir.join(name).join("pmuxd.exe"), b"server").unwrap();
+        }
+        fs::create_dir(dir.join(".stage-77")).unwrap();
+        clear_abandoned_stages(&dir).unwrap();
+        for name in ["legacy", older.as_str(), newer.as_str()] {
+            assert!(dir.join(name).join("pmuxd.exe").is_file(), "{name} kept");
+        }
+        assert!(!dir.join(".stage-77").exists(), "an abandoned stage goes");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The same with a process running from the older version directory, as
+    /// a pane holder of that release would be.
+    #[cfg(windows)]
+    #[test]
+    fn update_cleanup_keeps_a_version_directory_a_running_process_uses() {
+        let dir = temporary();
+        let older =
+            versioned_dir_name(&Version::parse("0.3.80").unwrap(), "x86_64-pc-windows-msvc")
+                .unwrap();
+        fs::create_dir(dir.join(&older)).unwrap();
+        let running = dir.join(&older).join("holder.exe");
+        let system = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap();
+        fs::copy(system.join("System32").join("ping.exe"), &running).unwrap();
+        let mut holder = prismattyc_process::spawn(
+            Command::new(&running)
+                .args(["-n", "60", "127.0.0.1"])
+                .stdout(Stdio::null()),
+        )
+        .unwrap();
+        fs::create_dir(dir.join(".stage-5")).unwrap();
+        let cleaned = clear_abandoned_stages(&dir);
+        let kept = running.is_file();
+        let _ = holder.kill();
+        let _ = holder.wait();
+        cleaned.unwrap();
+        assert!(kept, "the running version directory was removed");
+        assert!(!dir.join(".stage-5").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn clear_abandoned_stages_removes_only_stage_pid_dirs() {
         let dir = temporary();

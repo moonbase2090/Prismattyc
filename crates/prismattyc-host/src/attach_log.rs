@@ -2202,7 +2202,7 @@ mod tests {
             .unwrap()
             .to_path_buf();
         let socket = mux_socket().unwrap();
-        let daemon = Daemon(
+        let mut daemon = Daemon(
             prismattyc_process::spawn(
                 std::process::Command::new(binaries.join("pmuxd"))
                     .arg("--socket")
@@ -2217,7 +2217,9 @@ mod tests {
         // pmuxd answers on its socket before it adopts its first session into
         // the default Space, and publishes its pid only after that. Every
         // snapshot below must see the session's final Space, so wait for the
-        // pid rather than for the socket.
+        // pid rather than for the socket. Starting the daemon and its first
+        // shell on a cold, loaded runner can take several seconds, so allow
+        // 10 s; a daemon that exits fails at once with its status.
         let pid_path = socket.with_extension("pid");
         let daemon_pid = daemon.0.id().to_string();
         let started = Instant::now();
@@ -2229,9 +2231,13 @@ mod tests {
                     break snapshot;
                 }
             }
+            if let Some(status) = daemon.0.try_wait().unwrap() {
+                panic!("pmuxd exited before publishing its pid: {status}");
+            }
             assert!(
-                started.elapsed() < prismattyc_core::test_time_budget(Duration::from_secs(3)),
-                "pmuxd did not publish its pid"
+                started.elapsed() < prismattyc_core::test_time_budget(Duration::from_secs(10)),
+                "pmuxd did not publish its pid within {:?}",
+                started.elapsed()
             );
             thread::sleep(Duration::from_millis(20));
         };

@@ -2532,16 +2532,15 @@ fn try_host_route_seat(
     if !route_seat_to_host(&paths.socket, &id.to_string(), &name)? {
         return Ok(false);
     }
-    let shown = wait_host_seat_ack(paths);
-    match (shown, cache_space.as_deref()) {
-        (true, Some(space)) if joined.is_some() => {
+    // Without the app's acknowledgement nothing proves the session opened:
+    // fail, so a script or shell sees a nonzero exit instead of success.
+    prismattyc_mux::confirm_seat_route(&paths.socket, &name, Duration::from_secs(2))?;
+    match cache_space.as_deref() {
+        Some(space) if joined.is_some() => {
             println!("opened {name} in the app; it joined the Space {space}")
         }
-        (true, Some(space)) => println!("opened {name} in the app, in the Space {space}"),
-        (true, None) => println!("opened {name} in the app"),
-        (false, _) => {
-            println!("sent {name} to the app, but the app did not confirm it within 2 seconds")
-        }
+        Some(space) => println!("opened {name} in the app, in the Space {space}"),
+        None => println!("opened {name} in the app"),
     }
     Ok(true)
 }
@@ -2557,19 +2556,6 @@ fn space_definitions() -> Vec<(String, prismattyc_mux::SavedSpace)> {
                 .map(|space| (entry.name, space))
         })
         .collect()
-}
-
-/// Wait for `{stem}.host.ack` after a seat-route cache write.
-///
-/// Body/`()` mutants are follow-up coverage (PT-306 mux scrollbar/seat-route).
-#[mutants::skip]
-fn wait_host_seat_ack(paths: &Paths) -> bool {
-    let ack = host_ack_path_from_socket(&paths.socket);
-    let cache = attach_tabs::layout_path_from_socket(&paths.socket);
-    let since = std::fs::metadata(&cache)
-        .and_then(|meta| meta.modified())
-        .unwrap_or_else(|_| SystemTime::now());
-    wait_host_ack(&ack, since, Duration::from_secs(2))
 }
 
 fn exec_attach_session(paths: &Paths, session: &str, space: Option<&str>) -> Result<()> {

@@ -215,6 +215,28 @@ pub fn seat_ownership(
     }
 }
 
+/// After a seat route, wait for the host's acknowledgement of the cache it
+/// was sent. A missing acknowledgement is an error: nothing proves the app
+/// opened `name`, so the caller must not report success or exit 0.
+pub fn confirm_seat_route(socket: &Path, name: &str, timeout: Duration) -> std::io::Result<()> {
+    let ack = host_ack_path_from_socket(socket);
+    let cache = crate::attach_tabs::layout_path_from_socket(socket);
+    let since = fs::metadata(&cache)
+        .and_then(|meta| meta.modified())
+        .unwrap_or_else(|_| SystemTime::now());
+    if wait_host_ack(&ack, since, timeout) {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!(
+                "sent {name} to the app, but the app did not confirm it within {} seconds",
+                timeout.as_secs()
+            ),
+        ))
+    }
+}
+
 /// Wait until `ack` exists and its mtime is at least `since`.
 #[must_use]
 pub fn wait_host_ack(ack: &Path, since: SystemTime, timeout: Duration) -> bool {
@@ -240,6 +262,30 @@ fn ack_is_fresh(ack: &Path, since: SystemTime) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_seat_route_without_the_hosts_acknowledgement_is_an_error() {
+        let dir = std::env::temp_dir().join(format!(
+            "pmux-seat-ack-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("pmux.sock");
+        let cache = crate::attach_tabs::layout_path_from_socket(&socket);
+        fs::write(&cache, b"{}").unwrap();
+        let error = confirm_seat_route(&socket, "api", Duration::from_millis(200))
+            .expect_err("no acknowledgement");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("did not confirm"), "{error}");
+        // An acknowledgement written after the cache counts.
+        touch_host_ack(&host_ack_path_from_socket(&socket)).unwrap();
+        confirm_seat_route(&socket, "api", Duration::from_millis(200)).expect("acknowledged");
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn seat_ownership_adopts_loose_sessions_and_refuses_foreign_ones() {

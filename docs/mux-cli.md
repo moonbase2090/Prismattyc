@@ -246,8 +246,8 @@ in a new Space instead.
 `pmux attach SESSION` from a shell inside the app does the same for the
 app's current Space: a session with no Space joins it, and one owned by
 another Space is not moved; the command names that Space and the
-`pmux space move` command to run. It reports the outcome only after the app
-confirms it.
+`pmux space move` command to run. It reports success only after the app
+confirms it; without that confirmation within 2 seconds it exits nonzero.
 
 Right-click a pane for separate Move pane and Move session actions. Use
 Shift+right-click to send the event to the application. Use Menu or

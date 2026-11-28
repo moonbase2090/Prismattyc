@@ -41,13 +41,12 @@ use prismattyc_core::{
 };
 use prismattyc_mux::{
     attach_pty_fallback, attach_tabs, classify_control_request_id, default_socket_path,
-    diagnose_runtime_dir_miss_from_env, expand_empty_bracketed_paste, host_ack_path_from_socket,
-    list_spaces, load_space, next_stale_skip, prism_config_path, probe_socket_liveness,
-    route_seat_to_host, should_host_route_seat, space_sessions_in_tab_order, spaces_dir,
-    wait_host_ack, ArrangementWire, ColorWire, ControlError, ControlErrorCode, ControlIdMatch,
-    ControlRequest, ControlResponse, ControlResponseBody, ControlResponseData, Event, OverlayKind,
-    PaneContent, PaneOverlay, PaneStyled, Snapshot, SocketLiveness, SpawnSpec, StyleRun,
-    PROTOCOL_VERSION,
+    diagnose_runtime_dir_miss_from_env, expand_empty_bracketed_paste, list_spaces, load_space,
+    next_stale_skip, prism_config_path, probe_socket_liveness, route_seat_to_host,
+    should_host_route_seat, space_sessions_in_tab_order, spaces_dir, ArrangementWire, ColorWire,
+    ControlError, ControlErrorCode, ControlIdMatch, ControlRequest, ControlResponse,
+    ControlResponseBody, ControlResponseData, Event, OverlayKind, PaneContent, PaneOverlay,
+    PaneStyled, Snapshot, SocketLiveness, SpawnSpec, StyleRun, PROTOCOL_VERSION,
 };
 #[cfg(unix)]
 use rustix::{
@@ -1266,16 +1265,10 @@ fn try_host_route_after_resolve(cli: &Cli, snapshot: &Snapshot, pane_id: u64) ->
     if !route_seat_to_host(&cli.socket, &session_id.to_string(), name)? {
         return Ok(false);
     }
-    let ack = host_ack_path_from_socket(&cli.socket);
-    let cache = attach_tabs::layout_path_from_socket(&cli.socket);
-    let since = std::fs::metadata(&cache)
-        .and_then(|meta| meta.modified())
-        .unwrap_or_else(|_| SystemTime::now());
-    if wait_host_ack(&ack, since, Duration::from_secs(2)) {
-        eprintln!("opened {name} in the app");
-    } else {
-        eprintln!("sent {name} to the app, but the app did not confirm it within 2 seconds");
-    }
+    // Without the app's acknowledgement nothing proves the session opened:
+    // fail, so a script or shell sees a nonzero exit instead of success.
+    prismattyc_mux::confirm_seat_route(&cli.socket, name, Duration::from_secs(2))?;
+    eprintln!("opened {name} in the app");
     Ok(true)
 }
 
@@ -5883,6 +5876,11 @@ mod tests {
                 !try_host_route_after_resolve(&interactive, &snapshot, 1).unwrap(),
                 "unknown pane"
             );
+            // A live host that never acknowledges: the route is an error,
+            // not a success, so the command exits nonzero.
+            let error = try_host_route_after_resolve(&interactive, &snapshot, 42)
+                .expect_err("a missing acknowledgement must fail");
+            assert!(error.to_string().contains("did not confirm"), "{error:#}");
             prismattyc_mux::unregister_host_pid(
                 &prismattyc_mux::host_pid_path_from_socket(&socket),
                 live,

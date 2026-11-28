@@ -45,8 +45,10 @@ pub struct HolderSpec {
     pub grace_ms: u32,
 }
 
-/// Where a running holder is reached, as a server hands it to the next.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Where a running holder is reached, as a server hands it to the next. A
+/// pane whose program has exited has no holder; its record carries the
+/// default, which nothing reads.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HolderEndpoint {
     pub pipe: String,
     /// Hex of the holder's token.
@@ -126,11 +128,17 @@ pub(crate) enum Reading {
     Released,
 }
 
-/// The pause handshake as the server's reader of one holder sees it.
+/// The pause handshake as the server's reader of one holder sees it. The
+/// holder answers each Pause with one Paused, in order with its output, so
+/// only the answer to the latest Pause, with no Resume since, stops the reader.
 #[cfg(any(windows, test))]
 #[derive(Debug)]
 pub(crate) struct PauseState {
     reading: Reading,
+    /// Pause frames sent on this connection.
+    requested: u64,
+    /// Paused frames read on this connection.
+    answered: u64,
 }
 
 #[cfg(any(windows, test))]
@@ -138,6 +146,8 @@ impl PauseState {
     pub(crate) fn new() -> Self {
         Self {
             reading: Reading::Running,
+            requested: 0,
+            answered: 0,
         }
     }
 
@@ -147,12 +157,17 @@ impl PauseState {
 
     /// A Pause frame is about to go to the holder.
     pub(crate) fn pause(&mut self) {
-        self.reading = Reading::Pausing;
+        self.requested += 1;
+        if self.reading != Reading::Released {
+            self.reading = Reading::Pausing;
+        }
     }
 
     /// A Resume frame went to the holder.
     pub(crate) fn resume(&mut self) {
-        self.reading = Reading::Running;
+        if self.reading != Reading::Released {
+            self.reading = Reading::Running;
+        }
     }
 
     /// The pane went to the next server.
@@ -162,13 +177,17 @@ impl PauseState {
 
     /// A Paused frame arrived. True when the reader must now stop.
     pub(crate) fn acknowledge(&mut self) -> bool {
-        self.reading = Reading::Paused;
-        true
+        self.answered += 1;
+        if self.reading == Reading::Pausing && self.answered >= self.requested {
+            self.reading = Reading::Paused;
+            return true;
+        }
+        false
     }
 }
 
 #[cfg(windows)]
-pub use self::windows::{adopt_holder, run_holder, spawn_holder, HolderHandle};
+pub use self::windows::{adopt_holder, ended_session, run_holder, spawn_holder, HolderHandle};
 
 #[cfg(windows)]
 mod windows {
@@ -942,6 +961,61 @@ mod windows {
         }
         fn process_id(&self) -> Option<u32> {
             (self.pid != 0).then_some(self.pid)
+        }
+        fn as_raw_handle(&self) -> Option<RawHandle> {
+            None
+        }
+    }
+
+    /// A session for a pane whose program ended before a live update. Its
+    /// holder ended with the program, so there is no output and input goes
+    /// nowhere; the pane keeps the screen the record carried.
+    pub fn ended_session(pid: Option<u32>, size: PtySize) -> Result<PtySession> {
+        PtySession::from_parts(
+            Box::new(EndedMaster(Mutex::new(size))),
+            Box::new(EndedChild(pid)),
+        )
+    }
+
+    struct EndedMaster(Mutex<PtySize>);
+
+    impl MasterPty for EndedMaster {
+        fn resize(&self, size: PtySize) -> Result<(), anyhow::Error> {
+            *self.0.lock().unwrap_or_else(|e| e.into_inner()) = size;
+            Ok(())
+        }
+        fn get_size(&self) -> Result<PtySize, anyhow::Error> {
+            Ok(*self.0.lock().unwrap_or_else(|e| e.into_inner()))
+        }
+        fn try_clone_reader(&self) -> Result<Box<dyn Read + Send>, anyhow::Error> {
+            Ok(Box::new(io::empty()))
+        }
+        fn take_writer(&self) -> Result<Box<dyn Write + Send>, anyhow::Error> {
+            Ok(Box::new(io::sink()))
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct EndedChild(Option<u32>);
+
+    impl ChildKiller for EndedChild {
+        fn kill(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            Box::new(self.clone())
+        }
+    }
+
+    impl Child for EndedChild {
+        fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+            Ok(Some(ExitStatus::with_exit_code(0)))
+        }
+        fn wait(&mut self) -> io::Result<ExitStatus> {
+            Ok(ExitStatus::with_exit_code(0))
+        }
+        fn process_id(&self) -> Option<u32> {
+            self.0
         }
         fn as_raw_handle(&self) -> Option<RawHandle> {
             None

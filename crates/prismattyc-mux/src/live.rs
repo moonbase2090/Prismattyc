@@ -827,14 +827,21 @@ impl LivePane {
     ) -> Result<Self> {
         let (emulator, cols, rows, cell_w, cell_h) = restored_screen(&record);
         let size = pty_size_with_cell_pixels(cols, rows, cell_w, cell_h);
-        let (mut session, holder) = crate::pty_holder::adopt_holder(&record.holder, size)?;
+        let (mut session, holder) = if record.exited {
+            // The holder ended with the program: keep the final screen and
+            // do not run the pane's command again.
+            (crate::pty_holder::ended_session(record.pid, size)?, None)
+        } else {
+            let (session, holder) = crate::pty_holder::adopt_holder(&record.holder, size)?;
+            (session, Some(holder))
+        };
         let child_pid = session.process_id().or(record.pid);
         let (from_pty_rx, to_child_tx, reader_thread, reader_publish_delay_ms) =
             start_windows_io(&mut session, record.pane_id)?;
         #[cfg(not(test))]
         let () = reader_publish_delay_ms;
         Ok(Self {
-            holder: Some(holder),
+            holder,
             emulator,
             session,
             from_pty_rx,
@@ -1390,6 +1397,10 @@ impl LiveRuntime {
     pub(crate) fn quiesce_for_handoff(&mut self, timeout: Duration) -> Result<Vec<CellExitNotice>> {
         let deadline = Instant::now() + timeout;
         for (&id, pane) in &self.panes {
+            // A holder ends with its program: nothing is left to pause.
+            if !pane.child_alive() {
+                continue;
+            }
             let holder = pane
                 .holder
                 .as_ref()
@@ -1490,15 +1501,16 @@ impl LiveRuntime {
         let mut out = Vec::with_capacity(ids.len());
         for id in &ids {
             let pane = &self.panes[id];
-            let holder = pane
-                .holder
-                .as_ref()
-                .with_context(|| format!("pane {id} runs without a pane holder"))?;
-            out.push(pane.to_handoff(*id, holder.endpoint()));
+            let endpoint = match &pane.holder {
+                _ if !pane.child_alive() => crate::pty_holder::HolderEndpoint::default(),
+                Some(holder) => holder.endpoint(),
+                None => anyhow::bail!("pane {id} runs without a pane holder"),
+            };
+            out.push(pane.to_handoff(*id, endpoint));
         }
         for id in ids {
             if let Some(mut pane) = self.panes.remove(&id) {
-                if let Some(holder) = &pane.holder {
+                if let Some(holder) = pane.holder.as_ref().filter(|_| pane.child_alive()) {
                     if let Err(error) = holder.release(crate::handoff::HANDOFF_GRACE_MS) {
                         eprintln!(
                             "pmuxd: pane {id} holder did not take the handoff notice: {error}"
@@ -2409,17 +2421,23 @@ mod tests {
                     .any(|line| line.contains("EXIT_MARKER"))
             })
         };
-        for _ in 0..1000 {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
             runtime.drain();
-            if runtime
+            let ended = runtime
                 .panes
                 .get(&1)
-                .is_some_and(|pane| !pane.child_alive())
-                && shows_marker(&runtime)
-            {
+                .is_some_and(|pane| !pane.child_alive());
+            if (ended && shows_marker(&runtime)) || Instant::now() >= deadline {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            // Wait for the next output; drain observes the exit by itself.
+            let pane = runtime.panes.get_mut(&1).expect("pane");
+            if let Ok(Ok(chunk)) = pane.from_pty_rx.recv_timeout(Duration::from_millis(50)) {
+                if !chunk.bytes.is_empty() {
+                    let _ = pane.apply_pty_chunk(chunk);
+                }
+            }
         }
         assert!(shows_marker(&runtime), "the command did not finish");
         let pane = runtime.panes.get(&1).expect("pane");

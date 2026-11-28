@@ -5,10 +5,11 @@ use std::fmt;
 fn settings_details(host: &HostState) -> Option<serde_json::Value> {
     let panel = host.settings.as_ref()?;
     let (title, rows) = panel.rows();
-    let status = rows
+    let status_row = rows
         .iter()
-        .find(|row| matches!(row.kind, crate::palette::RowKind::Status(_)))
-        .map(|row| &row.name);
+        .find(|row| matches!(row.kind, crate::palette::RowKind::Status(_)));
+    let status = status_row.map(|row| &row.name);
+    let status_detail = status_row.map(|row| &row.describe);
     let actions: Vec<_> = rows
         .iter()
         .filter(|row| row.kind.focusable())
@@ -29,6 +30,7 @@ fn settings_details(host: &HostState) -> Option<serde_json::Value> {
         "selected": panel.selected(),
         "rows": actions,
         "status": status,
+        "status_detail": status_detail,
     }))
 }
 

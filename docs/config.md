@@ -90,7 +90,7 @@ macos_present = "tiles"
 render_timer_log_every_frame = false
 # Maximum PTY parsing time per event-loop pump; hot-reloaded. 1-1000 ms.
 pty_drain_budget_ms = 8
-# Show the launch splash on bare launches. true|false.
+# Show the launch splash on the first window. true|false.
 splash = true
 # Start at login and restore workspace; existing saved workspaces default on, new installs off. true|false.
 # start_at_login = false
@@ -1159,8 +1159,9 @@ the file applies changes on the next poll tick:
   high-contrast theme make it dim without blurring. They are read each time a
   dialog opens.
 - `splash` — startup only; a reload does not show or hide an already-open
-  splash. Default true. `--no-splash` and `PRISMATTYC_NO_SPLASH` still hide
-  it when this key is true.
+  splash. Default true. The first window shows it even when sessions are
+  already running. `--no-splash` and `PRISMATTYC_NO_SPLASH` still hide
+  it when this key is true. Later windows skip it.
 - `splash_animation` — applies immediately while the splash is showing;
   `false` freezes the art static, deleting the key restores the animation.
 - `hover_blend` — applies immediately to strip, rail, and scrollbar hover;

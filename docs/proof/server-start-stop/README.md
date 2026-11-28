@@ -6,7 +6,7 @@ come after the server card checks in `docs/proof/server-card/`.
 
 | Platform | Where | Result |
 | --- | --- | --- |
-| macOS 26.6.2 arm64 | fresh macOS VM from the base image, built in the VM at 29a2b094 with this test from efe4356c, deleted after | PASS, twice |
+| macOS 26.6.2 arm64 | fresh macOS VM from the base image, built in the VM at 5a1fa7e7, deleted after | PASS, twice |
 | Linux | Debian bookworm container with Xvfb and openbox, built in the container (same tree) | PASS |
 | Windows | batched before release | — |
 
@@ -22,6 +22,9 @@ Checks, in order:
    card (`3-stopped`).
 4. Start restores the saved sessions: the session saved by step 2 is listed
    again (`8-restored`).
+5. After another Save and stop, the saved sessions file is made unreadable.
+   Start then starts nothing, and the card shows why and how to start without
+   them (`9-unreadable-workspace`).
 
 `pmux stop --save` (the CLI step behind Stop) is covered by
 `crates/prismattyc-mux/tests/stop_save_restore.rs`.

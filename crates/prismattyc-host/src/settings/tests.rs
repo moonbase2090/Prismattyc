@@ -75,6 +75,7 @@ impl Fixture {
                 .iter()
                 .position(|&index| self.panel.controls[index].key() == key)
             {
+                let row = row + self.panel.control_offset();
                 self.press(NamedKey::ArrowDown);
                 while let Focus::Rows(current) = self.panel.focus {
                     if current == 0 {
@@ -96,7 +97,7 @@ impl Fixture {
                 for _ in current..row {
                     self.press(NamedKey::ArrowDown);
                 }
-                let control = &self.panel.controls[self.panel.indices()[row]];
+                let control = &self.panel.controls[indices[row - self.panel.control_offset()]];
                 if control.kind.cycles_on_enter() {
                     self.press_with_modifiers(NamedKey::Enter, ModifiersState::SHIFT);
                 } else {
@@ -150,8 +151,9 @@ fn schema_matches_controls_reached_through_real_rows_and_editors() {
     let mut ansi = BTreeSet::new();
     for _ in 0..Section::ALL.len() {
         fixture.press(NamedKey::ArrowDown);
-        let count = fixture.panel.indices().len();
-        for row in 0..count {
+        let indices = fixture.panel.indices();
+        let offset = fixture.panel.control_offset();
+        for row in offset..indices.len() + offset {
             let current = match fixture.panel.focus {
                 Focus::Rows(row) => row,
                 _ => panic!("row focus"),
@@ -162,10 +164,18 @@ fn schema_matches_controls_reached_through_real_rows_and_editors() {
             for _ in current..row {
                 fixture.press(NamedKey::ArrowDown);
             }
-            let root_rows = fixture.panel.rows().1;
+            let (_, root_rows) = fixture.panel.rows();
             assert_eq!(fixture.panel.selected(), row + 1);
-            assert!(!root_rows[row + 1].name.is_empty());
-            let control = &fixture.panel.controls[fixture.panel.indices()[row]];
+            let control = &fixture.panel.controls[indices[row - offset]];
+            assert_eq!(
+                root_rows
+                    .iter()
+                    .filter(|row| row.kind.focusable())
+                    .nth(row + 1)
+                    .unwrap()
+                    .name,
+                control.label
+            );
             if control.kind.cycles_on_enter() {
                 fixture.press_with_modifiers(NamedKey::Enter, ModifiersState::SHIFT);
             } else {
@@ -533,6 +543,65 @@ fn enter_on_an_absent_default_on_mux_key_turns_it_off() {
     let saved: toml::Value =
         toml::from_str(&std::fs::read_to_string(&fixture.panel.path).unwrap()).unwrap();
     assert_eq!(saved["mux"]["experimental_activity"].as_bool(), Some(false));
+}
+
+fn open_multiplexer(fixture: &mut Fixture) {
+    for _ in 0..4 {
+        fixture.press(NamedKey::ArrowLeft);
+    }
+    assert_eq!(fixture.panel.rows().0, "SETTINGS — Multiplexer");
+}
+
+#[test]
+fn multiplexer_keyboard_keeps_stop_confirmation_on_the_server_row() {
+    let mut fixture = Fixture::new("");
+    open_multiplexer(&mut fixture);
+    fixture.press(NamedKey::ArrowDown);
+    assert_eq!(fixture.panel.selected(), 1);
+    // Feed the result of a completed count through the panel's receipt path.
+    let (count, receipt) = mpsc::channel();
+    fixture.panel.stop_confirmation = Some(StopConfirmation::Counting(receipt));
+    fixture.press(NamedKey::Enter);
+    assert_eq!(fixture.panel.server_request, None);
+    count.send(Some(2)).unwrap();
+    assert_eq!(fixture.panel.poll(), (true, false));
+    let (_, rows) = fixture.panel.rows();
+    assert_eq!(rows[1].name, "Running");
+    assert!(!rows[1].kind.focusable());
+    assert_eq!(rows[2].name, "Stop the pmux server…");
+    assert!(rows[2].describe.contains("2 sessions"));
+    assert!(!fixture
+        .panel
+        .key(&Key::Named(NamedKey::Enter), ModifiersState::empty(), true));
+    assert_eq!(fixture.panel.server_request, None);
+    fixture.press(NamedKey::Escape);
+    assert_eq!(fixture.panel.selected(), 1);
+    assert!(fixture.panel.stop_confirmation.is_none());
+
+    fixture.panel.stop_confirmation = Some(StopConfirmation::Ready(2));
+    fixture.press(NamedKey::Enter);
+    assert_eq!(fixture.panel.server_request, Some(CardAction::Stop));
+}
+
+#[test]
+fn multiplexer_clicks_open_the_right_editor_after_the_action_shifts() {
+    let mut fixture = Fixture::new("[mux]\ninstance = \"demo\"");
+    open_multiplexer(&mut fixture);
+    fixture.panel.activate(2);
+    assert!(fixture.panel.rows().0.starts_with("Instance"));
+    fixture.press(NamedKey::Escape);
+    assert_eq!(fixture.panel.selected(), 2);
+    fixture.panel.update_server(&ServerState::Starting, false);
+    assert_eq!(fixture.panel.selected(), 1);
+    fixture.panel.activate(1);
+    assert!(fixture.panel.rows().0.starts_with("Instance"));
+    fixture
+        .panel
+        .update_server(&ServerState::Failed("Connection failed".into()), false);
+    fixture.press(NamedKey::Escape);
+    assert_eq!(fixture.panel.selected(), 2);
+    fixture.panel.activate(1);
+    assert_eq!(fixture.panel.server_request, Some(CardAction::Start));
 }
 
 #[test]

@@ -2,10 +2,23 @@
 
 ## [Unreleased]
 
+## [0.3.81] - 2026-11-28
+
+### Added
+
+- **Attach running session…** opens a picker of every live session, grouped as not in a Space, in this Space, in other Spaces and already open, with pane count and owner. Enter opens the session in a new tab here and it joins this Space; a session owned by another Space first asks before moving; an already open session gets focus; Shift+Enter opens it in a new Space. It is in the command palette (`attach_session`, unbound by default), on the Space chip menu, and on a right-click of **+ New tab**.
+- **Update and restart** has a **Stop the pmux server…** row. A second Enter saves the running sessions and stops the server (`pmux stop --save`); while it is stopped the row, the server card and the palette start it again and bring the saved sessions back.
+- On macOS and Linux an interactive `pmux attach` reconnects after a live pmux server update, to the same pane, and resumes keyboard input.
+
 ### Changed
 
+- When the pmux server is down, a window without a local shell shows one card instead of an error in every pane: **Start the pmux server**, the reason and **Try again** after a failed start, or progress while it starts, each with **Open a local shell**. A gap under 2 seconds, such as a restart, shows nothing. A failed start at launch now opens the window with this card instead of quitting.
 - The launch splash shows on the first window even when sessions are already running or a workspace is restored. Dismissing it leaves those sessions as they were, and the restore countdown starts then. Later windows, the config editor, and completing an update still skip it. An explicit program, `--no-splash`, `PRISMATTYC_NO_SPLASH`, and `splash = false` still hide it.
 - **Esc** on the launch choice keeps the fresh window and releases the saved Space's running sessions. Those sessions keep running and can be attached again. The Space stays on the rail. Enter, and a countdown that ends with no key, still restore the Space.
+
+### Fixed
+
+- `pmux attach` from a shell inside a Space no longer fails with "space ownership could not be verified".
 
 ## [0.3.80] - 2026-11-28
 

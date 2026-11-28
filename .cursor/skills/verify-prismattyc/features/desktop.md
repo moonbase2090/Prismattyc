@@ -378,6 +378,24 @@ native input for each of these steps under both classic and Graphite chrome:
    routing. Separately check live changes after watcher reload and controls
    labeled for the next startup or daemon start.
 
+For **Settings > Multiplexer** on Linux, run the dedicated drive with Xvfb,
+Openbox, xdotool, and ImageMagick. Use an isolated display for each chrome.
+
+```sh
+for chrome in graphite classic; do
+  xvfb-run -a -s '-screen 0 1600x980x24' sh -c '
+    openbox >/dev/null 2>&1 &
+    python3 tests/native/multiplexer-settings-e2e.py \
+      --bins "$1" --out "$2" --revision "$3" --chrome "$4"
+  ' sh "$verify_bins" "$verify_evidence/multiplexer-$chrome" "$(git rev-parse HEAD)" "$chrome"
+done
+```
+
+The drive checks the running badge, cancellation and confirmation with two
+sessions, and the stopped badge. It stops and starts the private server with
+keys and clicks, checks both sessions are restored, and opens the first two
+settings editors. The PNGs are X11 window captures.
+
 For a long result in the Space panel (for example, Update source results),
 resize the host narrower and wider while the result is open. Confirm the text
 rewraps to the available panel width, the action row remains visible and

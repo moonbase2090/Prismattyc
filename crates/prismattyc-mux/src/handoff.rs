@@ -309,6 +309,7 @@ pub fn exec(
 /// The new server's arguments: this server's own, with the record descriptor
 /// in place of any earlier one, before a `--` that starts the first pane's
 /// command (after it, the flag would be that command's argument).
+#[cfg(unix)]
 fn handoff_args(
     args: impl IntoIterator<Item = std::ffi::OsString>,
     record_fd: i32,
@@ -403,7 +404,7 @@ pub fn adopt(fd: i32, socket: &std::path::Path) -> anyhow::Result<Adopted> {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
@@ -414,7 +415,6 @@ mod tests {
     /// An older pmuxd takes the probe flag for a program and starts a server
     /// on the socket it is given. The probe's socket cannot be created, so
     /// such a binary fails without starting anything.
-    #[cfg(unix)]
     #[test]
     fn probing_an_older_pmuxd_starts_no_server() {
         use std::os::unix::fs::PermissionsExt;

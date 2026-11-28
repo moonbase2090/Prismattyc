@@ -1,0 +1,8 @@
+{
+  "status": "PASS",
+  "checks": [
+    "failed start at launch: the splash shows, the card waits (server=failed: pmuxd startup failed: pmuxd: soc...)",
+    "the splash took Enter (no start attempt); the card appeared once the splash was gone",
+    "with the splash gone, Enter reached the card: Try again made a new start attempt"
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "status": "PASS",
+  "platform": "darwin",
+  "checks": [
+    "the update handed alpha and beta to the new server live; their shells kept pids [1700, 1702]",
+    "the relaunched app showed the update result"
+  ]
+}

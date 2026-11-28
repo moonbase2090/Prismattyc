@@ -8,6 +8,12 @@ list. Resuming starts a new process. Nothing is handed over from the old one,
 and the program restores its own state from whatever it saved (for example a
 Neovim session file).
 
+On macOS and Linux, **Save and restart** usually keeps the program running
+instead: the new pmux server takes over the pane, and nothing is resumed (see
+[keeping programs running](update-and-restart.md#keeping-programs-running)).
+Resume runs when that hand-over cannot happen, and after a `pmux restart`
+without saved sessions or a login restore.
+
 The pmux server implements the OSC 7577 program resume protocol. It is on by
 default on Linux and macOS.
 

@@ -468,9 +468,26 @@ impl Workspace {
         // Replay into the original interactive shell. Its launch spec stays
         // unchanged across checkpoints, and the shell remains after the job
         // exits. Replacing argv with -c would permanently bake in old jobs.
+        let commands = self.resume_commands(&mut plane, policy, |_| true);
+        Ok((plane, commands))
+    }
+
+    /// The resume command for each pane `wanted` picks, by the pane's OSC 7577
+    /// record or its saved command, as the restore policy allows.
+    pub(crate) fn resume_commands(
+        &self,
+        plane: &mut ControlPlane,
+        policy: crate::SpaceOpenRunsCommands,
+        wanted: impl Fn(u64) -> bool,
+    ) -> Vec<(u64, String)> {
+        let panes = self.sessions.iter().flat_map(|s| {
+            s.windows
+                .iter()
+                .flat_map(move |w| w.panes.iter().map(move |p| (s, p)))
+        });
         let mut commands = Vec::new();
         let resume_policy = crate::program_resume::policy();
-        for (session, pane) in panes {
+        for (session, pane) in panes.filter(|(_, pane)| wanted(pane.id)) {
             let resume = self.resume_commands
                 || policy == crate::SpaceOpenRunsCommands::All
                 || (policy == crate::SpaceOpenRunsCommands::Agents && session.agent_id.is_some());
@@ -509,7 +526,7 @@ impl Workspace {
                 commands.push((pane.id, command.clone()));
             }
         }
-        Ok((plane, commands))
+        commands
     }
 
     pub fn resume_panes(

@@ -524,6 +524,35 @@ impl PaneResume {
         self.record.as_ref()
     }
 
+    #[cfg(unix)]
+    /// Token, record and per-process report times, to hand to the next pmux
+    /// server in a live update. The program keeps running, so its record keeps
+    /// its owner, and the report times keep refusing a replayed report.
+    pub(crate) fn handoff_parts(
+        &self,
+    ) -> (Option<String>, Option<ResumeRecord>, BTreeMap<u32, u64>) {
+        (
+            self.token.clone(),
+            self.record.clone(),
+            self.last_time.clone(),
+        )
+    }
+
+    #[cfg(unix)]
+    /// The inverse of [`PaneResume::handoff_parts`].
+    pub(crate) fn from_handoff(
+        token: Option<String>,
+        record: Option<ResumeRecord>,
+        last_time: BTreeMap<u32, u64>,
+    ) -> Self {
+        Self {
+            token,
+            record,
+            last_time,
+            distrust_noted: false,
+        }
+    }
+
     /// The record as it should be saved or shown: when its owner is still the
     /// same running process, with the executable it runs now. A wrapper that
     /// reported and then ran a quiet program is bound even if no output has

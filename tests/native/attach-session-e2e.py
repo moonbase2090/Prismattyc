@@ -214,7 +214,13 @@ def main():
         assert row(state, 'loose')['action'] == 'Focus', state
         tabs = window()['tab_count']
         choose('loose')
-        wait(lambda: focused_session() == loose and picker() is None, 'existing tab focused')
+        try:
+            wait(lambda: focused_session() == loose and picker() is None, 'existing tab focused')
+        except AssertionError:
+            w = window()
+            raise AssertionError(f"focus: focused={w.get('focused_session')} loose={loose} "
+                                 f"picker={w.get('attach_picker')} tabs={w.get('tab_count')} "
+                                 f"selected_tab={w.get('selected_tab')}") from None
         assert window()['tab_count'] == tabs, 'focus must not open another tab'
         record('focus existing: picking an open session focused its tab')
 

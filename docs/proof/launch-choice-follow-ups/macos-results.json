@@ -1,0 +1,86 @@
+[
+  {
+    "run": 1,
+    "choice": "fresh",
+    "failures": [],
+    "queued_feedback": true,
+    "same_process": true,
+    "detached": true,
+    "host_space": null,
+    "error_toasts": []
+  },
+  {
+    "run": 1,
+    "choice": "fresh-release-fails",
+    "failures": [],
+    "queued_feedback": true,
+    "same_process": true,
+    "detached": false,
+    "host_space": null,
+    "error_toasts": [
+      "Start fresh could not release a session from kept: shelf: session is busy. It still belongs to kept."
+    ]
+  },
+  {
+    "run": 1,
+    "choice": "restore",
+    "failures": [],
+    "queued_feedback": false,
+    "same_process": true,
+    "detached": false,
+    "host_space": "kept",
+    "error_toasts": []
+  },
+  {
+    "run": 1,
+    "choice": "slow",
+    "failures": [],
+    "queued_feedback": false,
+    "same_process": true,
+    "detached": false,
+    "host_space": "kept",
+    "error_toasts": []
+  },
+  {
+    "run": 2,
+    "choice": "fresh",
+    "failures": [],
+    "queued_feedback": true,
+    "same_process": true,
+    "detached": true,
+    "host_space": null,
+    "error_toasts": []
+  },
+  {
+    "run": 2,
+    "choice": "fresh-release-fails",
+    "failures": [],
+    "queued_feedback": true,
+    "same_process": true,
+    "detached": false,
+    "host_space": null,
+    "error_toasts": [
+      "Start fresh could not release a session from kept: shelf: session is busy. It still belongs to kept."
+    ]
+  },
+  {
+    "run": 2,
+    "choice": "restore",
+    "failures": [],
+    "queued_feedback": false,
+    "same_process": true,
+    "detached": false,
+    "host_space": "kept",
+    "error_toasts": []
+  },
+  {
+    "run": 2,
+    "choice": "slow",
+    "failures": [],
+    "queued_feedback": false,
+    "same_process": true,
+    "detached": false,
+    "host_space": "kept",
+    "error_toasts": []
+  }
+]

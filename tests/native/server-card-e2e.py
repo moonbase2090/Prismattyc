@@ -19,8 +19,8 @@ import time
 from pathlib import Path
 
 MAC = sys.platform == 'darwin'
-MAC_CODES = {'t': 17, 'Return': 36}
-MAC_FLAGS = {'shift': 1 << 17, 'ctrl': 1 << 18}
+MAC_CODES = {'t': 17, 'u': 32, 'Return': 36, 'Down': 125}
+MAC_FLAGS = {'shift': 1 << 17, 'ctrl': 1 << 18, 'alt': 1 << 19}
 
 
 def main():
@@ -37,7 +37,8 @@ def main():
         (out / name).mkdir()
     config = out / 'config.toml'
     config.write_text('splash = false\nstart_at_login = false\nautomatic_update_checks = false\n'
-                      'install_agent_skills = false\nspace_startup = "fresh"\nchrome_style = "graphite"\n')
+                      'install_agent_skills = false\nspace_startup = "fresh"\nchrome_style = "graphite"\n'
+                      '[keys]\nupdate_restart = "ctrl+alt+u"\n')
     # `pmux up` fails while the mode file says so; everything else is real.
     mode = out / 'mode'
     mode.write_text('fail')
@@ -101,7 +102,14 @@ exec {bins / 'pmux'} "$@"
         cg.CGEventPostToPid.argtypes = [ctypes.c_int, ctypes.c_void_p]
         cf.CFRelease.argtypes = [ctypes.c_void_p]
 
+    def seq():
+        return status()['last_raster']['capture_seq']
+
     def key(name, mods=()):
+        try:
+            before = seq()
+        except (AssertionError, KeyError, ValueError):
+            before = None
         if MAC:
             flags = 0
             for mod in mods:
@@ -114,7 +122,13 @@ exec {bins / 'pmux'} "$@"
         else:
             subprocess.run(['xdotool', 'key', '--clearmodifiers', '+'.join([*mods, name])],
                            check=True, env=env)
-        time.sleep(.5)
+        # Render status is published with each presented frame.
+        if before is not None:
+            try:
+                wait(lambda: seq() > before, 'frame after ' + name, timeout=5)
+            except AssertionError:
+                pass
+        time.sleep(.3)
 
     def capture(name):
         time.sleep(1.2)
@@ -181,6 +195,49 @@ exec {bins / 'pmux'} "$@"
         assert status()['server'] == 'stopped'
         capture('5-local-shell')
         record('local shell: the new-tab key opened a local shell and the card stepped aside')
+
+        # Stop from Update and restart: it asks first, saves the sessions,
+        # clears a pending restart-when-idle, and Start brings them back.
+        cli('up')
+        wait(lambda: status()['server'] == 'running', 'running again', timeout=60)
+        # The plain stop above ended work-1; this session is the one to save.
+        cli('new', '--no-attach', 'kept', '--', '/bin/sh')
+        work_file = next(path for root in (out, runtime) for path in Path(root).rglob('work.json'))
+        marker = work_file.parent / 'restart-when-idle'
+        marker.write_text('v1\nrelease=0.0.0\n')
+        key('u', ('ctrl', 'alt'))
+        details = wait(lambda: (d := status().get('space_details')) and d.get('rows') and d, 'update menu')
+        target = next(i for i, row in enumerate(details['rows']) if row.startswith('Stop the pmux server'))
+        for _ in range(len(details['rows']) + 2):
+            if status()['space_details']['selected'] == target:
+                break
+            key('Down')
+        assert status()['space_details']['selected'] == target, status()['space_details']
+        key('Return')
+        details = wait(lambda: (d := status().get('space_details')) and any(
+            row.startswith('Enter again saves') for row in d['rows']) and d, 'stop asks first')
+        assert status()['server'] == 'running', 'nothing stops on the first Enter'
+        capture('6-stop-confirm')
+        key('Return')
+        wait(lambda: status()['server'] == 'stopped', 'Save and stop', timeout=60)
+        assert not marker.exists(), 'the restart-when-idle marker is cleared'
+        # This window still has the local shell from above, so no card.
+        assert not status()['server_card']
+        record('stop: the update menu asked first, then saved, stopped and cleared restart-when-idle')
+        key('u', ('ctrl', 'alt'))
+        details = wait(lambda: (d := status().get('space_details')) and any(
+            row.startswith('Start the pmux server') for row in d['rows']) and d, 'Start in the menu')
+        target = next(i for i, row in enumerate(details['rows']) if row.startswith('Start the pmux server'))
+        for _ in range(len(details['rows']) + 2):
+            if status()['space_details']['selected'] == target:
+                break
+            key('Down')
+        capture('7-start-row')
+        key('Return')
+        wait(lambda: status()['server'] == 'running' and not status()['server_card'], 'Start', timeout=60)
+        assert 'kept' in cli('ls'), 'the saved session came back'
+        capture('8-restored')
+        record('start: the saved session came back')
         result['status'] = 'PASS'
     finally:
         (out / 'result.json').write_text(json.dumps(result, indent=2))

@@ -43,7 +43,7 @@ impl Group {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Entry {
-    /// Unique search key: the name plus what kind of session it is.
+    /// Unique search key: the name and the session id.
     pub label: String,
     pub name: String,
     pub session: u64,
@@ -89,11 +89,6 @@ pub(super) fn entries(
                     _ => Group::Loose,
                 }
             };
-            let kind = if session.agent_id.is_some() {
-                "agent seat"
-            } else {
-                "shell"
-            };
             let panes: Vec<_> = session.windows.iter().flat_map(|w| &w.panes).collect();
             let status = if panes.iter().any(|pane| pane.attention.is_some()) {
                 "needs you".to_string()
@@ -110,12 +105,12 @@ pub(super) fn entries(
                 }
             };
             Entry {
-                label: format!("{} · {kind}", session.name),
+                label: format!("{} · session {}", session.name, session.id),
                 name: session.name.clone(),
                 session: session.id,
                 group,
                 owner: owner_name,
-                describe: format!("{kind} · {status} · {place}"),
+                describe: format!("{status} · {place}"),
             }
         })
         .collect();
@@ -480,9 +475,9 @@ mod tests {
         );
         let build = &entries[3];
         assert_eq!(build.owner.as_deref(), Some("release"));
-        assert_eq!(build.describe, "agent seat · 0 panes · in release");
-        assert_eq!(entries[0].describe, "agent seat · 0 panes · not in a Space");
-        assert_eq!(entries[4].describe, "shell · 0 panes · open in this window");
+        assert_eq!(build.describe, "0 panes · in release");
+        assert_eq!(entries[0].describe, "0 panes · not in a Space");
+        assert_eq!(entries[4].describe, "0 panes · open in this window");
     }
 
     #[test]

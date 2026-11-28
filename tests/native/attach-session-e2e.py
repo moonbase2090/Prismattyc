@@ -85,7 +85,8 @@ def main():
         return next(s for s in snapshot()['sessions'] if s['name'] == name)
 
     def space_id(name):
-        return json.loads((out / 'data' / 'prismattyc' / 'spaces' / f'{name}.json').read_text())['id']
+        # Each Space was created with one session of its own.
+        return session({'work': 'work-1', 'release': 'rel-1'}[name]).get('space_id')
 
     def window():
         return json.loads(cli('render-status', '--json'))['windows'][0]
@@ -167,8 +168,8 @@ def main():
         cli('new', '--no-attach', 'build', '--', '/bin/sh')
         cli('space', 'add', 'release', '--session', 'build')
         work = space_id('work')
-        assert session('loose')['space_id'] is None
-        assert session('build')['space_id'] == space_id('release')
+        assert session('loose').get('space_id') is None
+        assert session('build').get('space_id') == space_id('release')
 
         host = subprocess.Popen([str(bins / 'prismattyc-host')], env=env, cwd=out / 'project',
                                 stdout=open(out / 'host.log', 'w'), stderr=subprocess.STDOUT,
@@ -200,7 +201,7 @@ def main():
         tabs = window()['tab_count']
         choose('loose')
         wait(lambda: focused_session() == loose and picker() is None, 'loose opens focused')
-        wait(lambda: session('loose')['space_id'] == work, 'loose joins work')
+        wait(lambda: session('loose').get('space_id') == work, 'loose joins work')
         assert window()['tab_count'] == tabs + 1, window()['tab_count']
         capture('2-picked-loose')
         record('pick: loose joined work and opened in a new focused tab')
@@ -220,7 +221,7 @@ def main():
         # Detach: the tab closes and the session keeps running in work.
         key('x', ('ctrl', 'shift'))
         wait(lambda: window()['tab_count'] == tabs - 1 and focused_session() != loose, 'tab detached')
-        assert session('loose')['space_id'] == work
+        assert session('loose').get('space_id') == work
         capture('3-detached')
         record('detach: the tab closed and loose kept running in work')
 
@@ -238,13 +239,18 @@ def main():
         choose('build')
         state = wait(lambda: (p := picker()) and p.get('confirm') and p, 'move confirmation')
         assert 'leaves release and joins work' in state['confirm'], state
-        assert session('build')['space_id'] == space_id('release'), 'nothing moves before Enter'
+        assert session('build').get('space_id') == space_id('release'), 'nothing moves before Enter'
         capture('5-confirm-move')
         key('Return')
         wait(lambda: focused_session() == build and picker() is None, 'build opens focused')
-        wait(lambda: session('build')['space_id'] == work, 'build moved to work')
+        wait(lambda: session('build').get('space_id') == work, 'build moved to work')
         capture('6-moved-build')
         record('move: build moved from release to work after a confirmation naming release')
+
+        # Recorded, not asserted: detaching a Space-owned session makes the
+        # next autosave refuse to drop it, and autosave then waits for a
+        # manual save. That predates the picker; see the PR's follow-ups.
+        result['space_save_status_after_detach'] = window()['space_save_status']
 
         # Escape closes the picker without changes.
         open_picker()

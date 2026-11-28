@@ -7,33 +7,47 @@
 //! number and program, its screen and recent output, and its program resume
 //! state. It is versioned so a new server can refuse a record it does not
 //! understand, and the old server falls back to a normal restart.
+//!
+//! On Windows a pseudoconsole cannot cross an exec, so each pane's console
+//! and program live in a pane holder (`crate::pty_holder`). The old server
+//! starts the new one as a separate process with the record in a user-only
+//! file, and the record names each pane's holder instead of a descriptor.
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::collections::BTreeMap;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::path::PathBuf;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use prismattyc_emulator::EmulatorStateV1;
 use serde::{Deserialize, Serialize};
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use crate::pane_log::PaneLogFrame;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use crate::program_resume::ResumeRecord;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use crate::remote_size::SizeOwner;
 
-/// The record format this build writes and reads.
+/// The record format this build writes and reads. Windows records name pane
+/// holders instead of descriptors, so they have their own number and a
+/// probe never mistakes one platform's server for the other's.
+#[cfg(not(windows))]
 pub const HANDOFF_FORMAT: u32 = 1;
+#[cfg(windows)]
+pub const HANDOFF_FORMAT: u32 = 2;
 
 /// One pane, as the old server leaves it.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct PaneHandoff {
     pub pane_id: u64,
     /// The PTY master's descriptor number, kept open across the exec.
+    #[cfg(unix)]
     pub fd: i32,
+    /// The pane holder that owns the pane's console and program.
+    #[cfg(windows)]
+    pub holder: crate::pty_holder::HolderEndpoint,
     /// The pane's program. A child of the server process.
     pub pid: Option<u32>,
     /// The program already ended and was reaped: the pane shows its last
@@ -140,7 +154,7 @@ pub fn probe(binary: &std::path::Path) -> std::io::Result<ProbeReply> {
 }
 
 /// Everything one pmux server hands to the next.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct HandoffRecord {
     pub format: u32,
@@ -148,8 +162,10 @@ pub(crate) struct HandoffRecord {
     pub from_version: String,
     /// The listening control socket, kept open so clients queue in its
     /// backlog instead of finding no server.
+    #[cfg(unix)]
     pub listener_fd: i32,
     /// The instance lock. Its flock stays held across the exec.
+    #[cfg(unix)]
     pub lock_fd: i32,
     /// Sessions, windows, panes, ids and launch specs.
     pub workspace: crate::workspace::Workspace,
@@ -245,7 +261,7 @@ pub(crate) unsafe fn inherit(fd: std::os::fd::RawFd) -> std::io::Result<std::os:
 }
 
 /// How long the old server waits for every pane's reader and writer to stop.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub(crate) const QUIESCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Panes an accepted live update gave up, waiting for the exec.

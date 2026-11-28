@@ -421,6 +421,105 @@ pub(crate) struct GuestStamp<'a> {
     pub agent_id: Option<&'a str>,
 }
 
+/// Test hook that delays publishing each read chunk (Windows tests only).
+#[cfg(all(test, windows))]
+type ReaderDelay = Arc<AtomicU64>;
+#[cfg(all(windows, not(test)))]
+type ReaderDelay = ();
+
+/// A Windows pane's reader and writer threads over its session.
+#[cfg(windows)]
+#[allow(clippy::type_complexity)]
+fn start_windows_io(
+    session: &mut PtySession,
+    pane_id: u64,
+) -> Result<(
+    mpsc::Receiver<std::io::Result<PtyChunk>>,
+    mpsc::SyncSender<Vec<u8>>,
+    thread::JoinHandle<()>,
+    ReaderDelay,
+)> {
+    let mut child_writer = session.take_input_writer()?;
+    let mut pty_reader = session.take_reader()?;
+
+    let (to_child_tx, to_child_rx) = mpsc::sync_channel::<Vec<u8>>(TO_CHILD_CAP);
+    thread::Builder::new()
+        .name(format!("prism-server-pane-{pane_id}-write"))
+        .spawn(move || {
+            while let Ok(bytes) = to_child_rx.recv() {
+                if child_writer.write_all(&bytes).is_err() {
+                    break;
+                }
+                if child_writer.flush().is_err() {
+                    break;
+                }
+            }
+        })?;
+
+    let (from_pty_tx, from_pty_rx) = mpsc::sync_channel::<std::io::Result<PtyChunk>>(FROM_PTY_CAP);
+    let output_budget = ByteBudget::new(PTY_OUTPUT_BUDGET_BYTES);
+    let reader_budget = output_budget.clone();
+    #[cfg(all(test, windows))]
+    let reader_publish_delay_ms = Arc::new(AtomicU64::new(0));
+    #[cfg(all(test, windows))]
+    let reader_publish_delay_thread = Arc::clone(&reader_publish_delay_ms);
+    let reader_thread = thread::Builder::new()
+        .name(format!("prism-server-pane-{pane_id}-read"))
+        .spawn(move || {
+            let mut buffer = vec![0u8; 8192];
+            loop {
+                match pty_reader.read(&mut buffer) {
+                    Ok(0) => {
+                        let _ = from_pty_tx.send(Ok(PtyChunk::eof()));
+                        break;
+                    }
+                    Ok(count) => {
+                        #[cfg(all(test, windows))]
+                        {
+                            use std::sync::atomic::Ordering;
+                            let delay_ms = reader_publish_delay_thread.load(Ordering::Acquire);
+                            if delay_ms > 0 {
+                                thread::sleep(Duration::from_millis(delay_ms));
+                            }
+                        }
+                        let Some((bytes, reservation)) = reader_budget
+                            .admit(PANE_FRAME_OVERHEAD.saturating_add(count), || {
+                                buffer[..count].to_vec()
+                            })
+                        else {
+                            let _ = from_pty_tx.send(Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "PTY output chunk exceeds byte budget",
+                            )));
+                            break;
+                        };
+                        if from_pty_tx
+                            .send(Ok(PtyChunk {
+                                bytes,
+                                _reservation: Some(reservation),
+                            }))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = from_pty_tx.send(Err(error));
+                        break;
+                    }
+                }
+            }
+        })?;
+    #[cfg(not(all(test, windows)))]
+    let reader_publish_delay_ms = ();
+    Ok((
+        from_pty_rx,
+        to_child_tx,
+        reader_thread,
+        reader_publish_delay_ms,
+    ))
+}
+
 /// A pane's holder process on Windows, when it has one.
 #[cfg(windows)]
 type PaneHolder = Option<crate::pty_holder::HolderHandle>;
@@ -518,89 +617,8 @@ impl LivePane {
         #[cfg(unix)]
         let (from_pty_rx, to_child_tx, io) = PaneIo::start(&session, pane_id)?;
         #[cfg(windows)]
-        let (from_pty_rx, to_child_tx, reader_thread, reader_publish_delay_ms) = {
-            let mut child_writer = session.take_input_writer()?;
-            let mut pty_reader = session.take_reader()?;
-
-            let (to_child_tx, to_child_rx) = mpsc::sync_channel::<Vec<u8>>(TO_CHILD_CAP);
-            thread::Builder::new()
-                .name(format!("prism-server-pane-{pane_id}-write"))
-                .spawn(move || {
-                    while let Ok(bytes) = to_child_rx.recv() {
-                        if child_writer.write_all(&bytes).is_err() {
-                            break;
-                        }
-                        if child_writer.flush().is_err() {
-                            break;
-                        }
-                    }
-                })?;
-
-            let (from_pty_tx, from_pty_rx) =
-                mpsc::sync_channel::<std::io::Result<PtyChunk>>(FROM_PTY_CAP);
-            let output_budget = ByteBudget::new(PTY_OUTPUT_BUDGET_BYTES);
-            let reader_budget = output_budget.clone();
-            #[cfg(all(test, windows))]
-            let reader_publish_delay_ms = Arc::new(AtomicU64::new(0));
-            #[cfg(all(test, windows))]
-            let reader_publish_delay_thread = Arc::clone(&reader_publish_delay_ms);
-            let reader_thread = thread::Builder::new()
-                .name(format!("prism-server-pane-{pane_id}-read"))
-                .spawn(move || {
-                    let mut buffer = vec![0u8; 8192];
-                    loop {
-                        match pty_reader.read(&mut buffer) {
-                            Ok(0) => {
-                                let _ = from_pty_tx.send(Ok(PtyChunk::eof()));
-                                break;
-                            }
-                            Ok(count) => {
-                                #[cfg(all(test, windows))]
-                                {
-                                    use std::sync::atomic::Ordering;
-                                    let delay_ms =
-                                        reader_publish_delay_thread.load(Ordering::Acquire);
-                                    if delay_ms > 0 {
-                                        thread::sleep(Duration::from_millis(delay_ms));
-                                    }
-                                }
-                                let Some((bytes, reservation)) = reader_budget
-                                    .admit(PANE_FRAME_OVERHEAD.saturating_add(count), || {
-                                        buffer[..count].to_vec()
-                                    })
-                                else {
-                                    let _ = from_pty_tx.send(Err(std::io::Error::new(
-                                        std::io::ErrorKind::InvalidData,
-                                        "PTY output chunk exceeds byte budget",
-                                    )));
-                                    break;
-                                };
-                                if from_pty_tx
-                                    .send(Ok(PtyChunk {
-                                        bytes,
-                                        _reservation: Some(reservation),
-                                    }))
-                                    .is_err()
-                                {
-                                    break;
-                                }
-                            }
-                            Err(error) => {
-                                let _ = from_pty_tx.send(Err(error));
-                                break;
-                            }
-                        }
-                    }
-                })?;
-            #[cfg(not(all(test, windows)))]
-            let reader_publish_delay_ms = ();
-            (
-                from_pty_rx,
-                to_child_tx,
-                reader_thread,
-                reader_publish_delay_ms,
-            )
-        };
+        let (from_pty_rx, to_child_tx, reader_thread, reader_publish_delay_ms) =
+            start_windows_io(&mut session, pane_id)?;
         #[cfg(all(windows, not(test)))]
         let () = reader_publish_delay_ms;
 

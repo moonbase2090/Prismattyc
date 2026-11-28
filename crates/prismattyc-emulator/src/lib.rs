@@ -2415,6 +2415,13 @@ impl PtySession {
         pid
     }
 
+    /// Like [`PtySession::abandon`] for a session that cannot be moved out of
+    /// its owner: dropping it later leaves the program running.
+    pub fn release_program(&mut self) -> Option<u32> {
+        self.reaped = true;
+        self.child.process_id()
+    }
+
     /// A close-on-exec duplicate of the master for reading output, in place of
     /// [`take_reader`]. Unlike the boxed reader it can be polled, so a reader
     /// thread can wait on it and on a stop signal together. Reads that fail with
@@ -2848,6 +2855,16 @@ mod from_parts_tests {
             kept.lock().unwrap().kills,
             0,
             "a handed-off program keeps running"
+        );
+
+        let released = Arc::new(Mutex::new(Shared::default()));
+        let mut pty = session(&released);
+        assert_eq!(pty.release_program(), Some(4242));
+        drop(pty);
+        assert_eq!(
+            released.lock().unwrap().kills,
+            0,
+            "a released program keeps running"
         );
     }
 }

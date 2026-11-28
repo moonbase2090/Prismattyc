@@ -113,6 +113,60 @@ impl ExitReport {
     }
 }
 
+/// Where the server's reading of a holder stands during a handoff.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Reading {
+    Running,
+    /// Pause sent; output still arrives until Paused.
+    Pausing,
+    /// Paused read: every output byte so far has been returned.
+    Paused,
+    /// Handed to the next server: the reader stops for good.
+    Released,
+}
+
+/// The pause handshake as the server's reader of one holder sees it.
+#[cfg(any(windows, test))]
+#[derive(Debug)]
+pub(crate) struct PauseState {
+    reading: Reading,
+}
+
+#[cfg(any(windows, test))]
+impl PauseState {
+    pub(crate) fn new() -> Self {
+        Self {
+            reading: Reading::Running,
+        }
+    }
+
+    pub(crate) fn reading(&self) -> Reading {
+        self.reading
+    }
+
+    /// A Pause frame is about to go to the holder.
+    pub(crate) fn pause(&mut self) {
+        self.reading = Reading::Pausing;
+    }
+
+    /// A Resume frame went to the holder.
+    pub(crate) fn resume(&mut self) {
+        self.reading = Reading::Running;
+    }
+
+    /// The pane went to the next server.
+    pub(crate) fn release(&mut self) {
+        self.reading = Reading::Released;
+    }
+
+    /// A Paused frame arrived. True when the reader must now stop.
+    pub(crate) fn acknowledge(&mut self) -> bool {
+        self.reading = Reading::Paused;
+        true
+    }
+}
+
 #[cfg(windows)]
 pub use self::windows::{adopt_holder, run_holder, spawn_holder, HolderHandle};
 
@@ -149,7 +203,7 @@ mod windows {
 
     use super::{
         hex, pipe_base, pipe_paths, token_from_hex, tokens_match, ExitReport, HolderEndpoint,
-        HolderSpec, DISCONNECT_GRACE_MS,
+        HolderSpec, PauseState, Reading, DISCONNECT_GRACE_MS,
     };
     use crate::platform::UserOnlyDescriptor;
     use crate::pty_holder_frame::{read_frame, write_frame, Frame, HOLDER_PROTOCOL, TOKEN_LEN};
@@ -696,22 +750,10 @@ mod windows {
     }
 
     /// The server's connection to one holder.
-    /// Where the server's reading of a holder stands during a handoff.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum Reading {
-        Running,
-        /// Pause sent; output still arrives until Paused.
-        Pausing,
-        /// Paused read: every output byte so far has been returned.
-        Paused,
-        /// Handed to the next server: the reader stops for good.
-        Released,
-    }
-
     struct Connection {
         to_holder: Mutex<File>,
         exit: ExitState,
-        reading: Mutex<Reading>,
+        pause: Mutex<PauseState>,
         reading_changed: Condvar,
         /// Base pipe name and token, for the handoff record.
         pipe: String,
@@ -751,21 +793,23 @@ mod windows {
                     // Everything before this frame has been returned. Wait to
                     // be resumed, or stop for good once handed over.
                     Ok(Some(Frame::Paused)) => {
-                        let mut reading = self
+                        let mut pause = self
                             .connection
-                            .reading
+                            .pause
                             .lock()
                             .unwrap_or_else(|e| e.into_inner());
-                        *reading = Reading::Paused;
+                        if !pause.acknowledge() {
+                            continue;
+                        }
                         self.connection.reading_changed.notify_all();
-                        while *reading == Reading::Paused {
-                            reading = self
+                        while pause.reading() == Reading::Paused {
+                            pause = self
                                 .connection
                                 .reading_changed
-                                .wait(reading)
+                                .wait(pause)
                                 .unwrap_or_else(|e| e.into_inner());
                         }
-                        if *reading == Reading::Released {
+                        if pause.reading() == Reading::Released {
                             return Ok(0);
                         }
                     }
@@ -917,26 +961,31 @@ mod windows {
             }
         }
 
-        fn set(&self, reading: Reading) {
-            *self.0.reading.lock().unwrap_or_else(|e| e.into_inner()) = reading;
+        fn update(&self, change: impl FnOnce(&mut PauseState)) {
+            change(&mut self.0.pause.lock().unwrap_or_else(|e| e.into_inner()));
             self.0.reading_changed.notify_all();
         }
 
         /// Ask the holder to stop output; see [`HolderHandle::paused`].
         pub fn pause(&self) -> io::Result<()> {
-            self.set(Reading::Pausing);
+            self.update(PauseState::pause);
             self.0.send(&Frame::Pause)
         }
 
         /// The holder said Paused and the reader returned everything before it.
         pub fn paused(&self) -> bool {
-            *self.0.reading.lock().unwrap_or_else(|e| e.into_inner()) == Reading::Paused
+            self.0
+                .pause
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .reading()
+                == Reading::Paused
         }
 
         /// Carry on after an abandoned handoff.
         pub fn resume(&self) -> io::Result<()> {
             let sent = self.0.send(&Frame::Resume);
-            self.set(Reading::Running);
+            self.update(PauseState::resume);
             sent
         }
 
@@ -944,7 +993,7 @@ mod windows {
         /// server's pipe closes, and end this server's reader.
         pub fn release(&self, grace_ms: u32) -> io::Result<()> {
             let sent = self.0.send(&Frame::Handoff { grace_ms });
-            self.set(Reading::Released);
+            self.update(PauseState::release);
             sent
         }
     }
@@ -976,7 +1025,7 @@ mod windows {
         let connection = Arc::new(Connection {
             to_holder: Mutex::new(to_holder),
             exit: ExitState::default(),
-            reading: Mutex::new(Reading::Running),
+            pause: Mutex::new(PauseState::new()),
             reading_changed: Condvar::new(),
             pipe,
             token,
@@ -1083,6 +1132,48 @@ mod windows {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_paused_that_arrives_after_resume_leaves_the_reader_running() {
+        // An abandoned handoff resumed the holder before the reader got to
+        // the holder's answer to the pause.
+        let mut state = PauseState::new();
+        state.pause();
+        state.resume();
+        assert!(
+            !state.acknowledge(),
+            "the late answer must not stop the reader"
+        );
+        assert_eq!(state.reading(), Reading::Running);
+    }
+
+    #[test]
+    fn a_paused_answering_an_earlier_pause_does_not_answer_a_later_one() {
+        // Output the holder sent between the first answer and the second
+        // pause is still to come, so only the second answer stops the reader.
+        let mut state = PauseState::new();
+        state.pause();
+        state.resume();
+        state.pause();
+        assert!(!state.acknowledge());
+        assert_eq!(state.reading(), Reading::Pausing);
+        assert!(state.acknowledge());
+        assert_eq!(state.reading(), Reading::Paused);
+        state.resume();
+        assert_eq!(state.reading(), Reading::Running);
+    }
+
+    #[test]
+    fn a_released_reader_stays_released() {
+        let mut state = PauseState::new();
+        state.pause();
+        assert!(state.acknowledge());
+        state.release();
+        assert!(!state.acknowledge());
+        state.resume();
+        state.pause();
+        assert_eq!(state.reading(), Reading::Released);
+    }
 
     #[test]
     fn an_exit_seen_while_output_is_still_coming_is_reported_later() {

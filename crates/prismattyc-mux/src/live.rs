@@ -2383,6 +2383,66 @@ mod tests {
         assert!(pane.observe_death(9).is_none());
     }
 
+    /// A pane whose program finished before a live update has no holder
+    /// left: the next server keeps its final screen and does not run its
+    /// command again.
+    #[cfg(windows)]
+    #[test]
+    fn a_live_update_keeps_a_pane_whose_program_already_exited() {
+        let mut runtime = LiveRuntime::spawn(
+            &[PaneGeometry {
+                pane_id: 1,
+                col: 0,
+                row: 0,
+                cols: 80,
+                rows: 24,
+            }],
+            &std::collections::HashMap::from([(1u64, exiting_spawn(BTreeMap::new()))]),
+            None,
+        )
+        .expect("spawn");
+        let shows_marker = |runtime: &LiveRuntime| {
+            runtime.content(1).is_some_and(|content| {
+                content
+                    .lines
+                    .iter()
+                    .any(|line| line.contains("EXIT_MARKER"))
+            })
+        };
+        for _ in 0..1000 {
+            runtime.drain();
+            if runtime
+                .panes
+                .get(&1)
+                .is_some_and(|pane| !pane.child_alive())
+                && shows_marker(&runtime)
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(shows_marker(&runtime), "the command did not finish");
+        let pane = runtime.panes.get(&1).expect("pane");
+        assert!(!pane.child_alive());
+        // Its holder ended with the program: nothing answers at this pipe.
+        let gone = crate::pty_holder::HolderEndpoint {
+            pipe: format!(r"\\.\pipe\pmux-holder-gone-{}", std::process::id()),
+            token: "00".repeat(crate::pty_holder_frame::TOKEN_LEN),
+            holder_pid: 0,
+        };
+        let record = pane.to_handoff(1, gone);
+        assert!(record.exited);
+
+        let (adopted, failed) = LiveRuntime::adopt_handoff(vec![record], None, PaneLogWatch::new());
+        assert!(failed.is_empty(), "the exited pane was dropped: {failed:?}");
+        let pane = adopted.panes.get(&1).expect("the exited pane is kept");
+        assert!(
+            !pane.child_alive(),
+            "the finished command must not run again"
+        );
+        assert!(shows_marker(&adopted), "the final screen is kept");
+    }
+
     #[test]
     fn exiting_child_preserves_output_and_records_one_exit_when_seated() {
         let mut env = BTreeMap::new();

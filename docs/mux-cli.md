@@ -80,6 +80,7 @@ pmux clients [work] [--json]  # attach clients: pid, viewer/nested, session, pan
 pmux detach --other [work]    # SIGTERM every attach but your own; sessions stay
 pmux status              # socket liveness + server pid + log path
 pmux stop                # ShutdownServer over the socket; TERM/KILL fallback
+pmux stop --save         # save every session, stop the server; `pmux up --restore-workspace` brings them back
 pmux --session work stop # destroy one named session; server stays up
 pmux stop work           # same as --session work stop
 pmux session clear [--all] [--keep NAME]

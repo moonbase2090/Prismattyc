@@ -233,6 +233,22 @@ Space chips show the names of their live sessions in tab order. Full names remai
 the chip menu when the chip must clip text. Set `space_rail_pane_names =
 false` to hide the session names. See [Spaces rail configuration](config.md).
 
+To bring a running session into a Space, run **Attach running session…**
+from the command palette (`attach_session`, unbound by default), from a Space
+chip's menu, or from the menu on a right-click of **+ New tab**. The picker
+lists every live session under Not in a Space, In this Space, In other
+Spaces, and Already open, with its kind, pane count, and owner. Enter opens
+it in a new tab here and the session joins this Space. A session owned by
+another Space asks first, naming the Space it leaves, then moves here. A
+session already open in this window gets focus. Shift+Enter opens the session
+in a new Space instead.
+
+`pmux attach SESSION` from a shell inside the app does the same for the
+app's current Space: a session with no Space joins it, and one owned by
+another Space is not moved; the command names that Space and the
+`pmux space move` command to run. It reports the outcome only after the app
+confirms it.
+
 Right-click a pane for separate Move pane and Move session actions. Use
 Shift+right-click to send the event to the application. Use Menu or
 Shift+F10 on a focused rail chip to open its menu. Press Escape to close it.

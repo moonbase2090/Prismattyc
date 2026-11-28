@@ -11,6 +11,7 @@ mod activity_monitor_space;
 mod agent_skills;
 mod attach_adopt;
 mod attach_log;
+mod attach_picker;
 mod attach_tabs;
 mod border_underlay;
 mod bundled_fonts;
@@ -1221,6 +1222,8 @@ struct HostState {
     sidebar_grip_at: Option<Instant>,
     sidebar_grip_hot: bool,
     terminal_targets: Option<Vec<terminal_switcher::Entry>>,
+    /// Attach running session picker: live sessions and the target Space.
+    attach_picker: Option<attach_picker::Picker>,
     terminal_messages: bool,
     move_target: Option<move_target::Target>,
     modifiers: ModifiersState,
@@ -1809,6 +1812,8 @@ enum ContextMenuTarget {
     RailSessionSolo(PaneId),
     RailPane(PaneId),
     RailTab(prismattyc_mux::WindowId),
+    /// The sidebar's + New tab button: new tab, new session, or attach.
+    NewTab,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1819,6 +1824,8 @@ enum SpaceContextAction {
     Open(SpaceOpenMode),
     Save,
     AddSession,
+    /// Bring a live session into this Space (Attach running session…).
+    AttachSession,
     Rename,
     Move,
     Delete,
@@ -1867,14 +1874,15 @@ fn context_menu_choice(kind: ContextMenuKind, index: usize) -> ContextMenuChoice
             let action = match index {
                 0 => SpaceContextAction::Open(SpaceOpenMode::Switch),
                 1 => SpaceContextAction::AddSession,
-                2 => SpaceContextAction::Open(SpaceOpenMode::NewWindow),
-                3 => SpaceContextAction::Save,
-                4 => SpaceContextAction::Rename,
-                5 => SpaceContextAction::Move,
-                6 => SpaceContextAction::Delete,
-                7 => SpaceContextAction::Details,
-                8 => SpaceContextAction::Settings,
-                9 => SpaceContextAction::Undo,
+                2 => SpaceContextAction::AttachSession,
+                3 => SpaceContextAction::Open(SpaceOpenMode::NewWindow),
+                4 => SpaceContextAction::Save,
+                5 => SpaceContextAction::Rename,
+                6 => SpaceContextAction::Move,
+                7 => SpaceContextAction::Delete,
+                8 => SpaceContextAction::Details,
+                9 => SpaceContextAction::Settings,
+                10 => SpaceContextAction::Undo,
                 _ => return ContextMenuChoice::Noop,
             };
             ContextMenuChoice::Space(action)
@@ -1902,7 +1910,8 @@ fn context_menu_choice(kind: ContextMenuKind, index: usize) -> ContextMenuChoice
         | ContextMenuKind::RailSession
         | ContextMenuKind::RailSessionSolo
         | ContextMenuKind::RailPane
-        | ContextMenuKind::RailTab => ContextMenuChoice::Noop,
+        | ContextMenuKind::RailTab
+        | ContextMenuKind::NewTab => ContextMenuChoice::Noop,
     }
 }
 
@@ -1922,7 +1931,8 @@ fn context_menu_action(target: ContextMenuTarget, index: usize) -> ContextMenuAc
         | ContextMenuTarget::RailSession(_)
         | ContextMenuTarget::RailSessionSolo(_)
         | ContextMenuTarget::RailPane(_)
-        | ContextMenuTarget::RailTab(_) => ContextMenuAction::Noop,
+        | ContextMenuTarget::RailTab(_)
+        | ContextMenuTarget::NewTab => ContextMenuAction::Noop,
     }
 }
 
@@ -1941,7 +1951,7 @@ fn context_menu_needs_confirmation(
     !confirmed
         && matches!(
             (kind, visible_index),
-            (ContextMenuKind::SpaceChip, 3 | 6) | (ContextMenuKind::Pane, 11)
+            (ContextMenuKind::SpaceChip, 4 | 7) | (ContextMenuKind::Pane, 11)
         )
 }
 
@@ -1978,6 +1988,7 @@ fn context_menu_kind(target: ContextMenuTarget) -> ContextMenuKind {
         ContextMenuTarget::RailSessionSolo(_) => ContextMenuKind::RailSessionSolo,
         ContextMenuTarget::RailPane(_) => ContextMenuKind::RailPane,
         ContextMenuTarget::RailTab(_) => ContextMenuKind::RailTab,
+        ContextMenuTarget::NewTab => ContextMenuKind::NewTab,
     }
 }
 
@@ -4794,6 +4805,7 @@ impl App {
                 sidebar_grip_at: None,
                 sidebar_grip_hot: false,
                 terminal_targets: None,
+                attach_picker: None,
                 terminal_messages: false,
                 move_target: None,
                 space_team_focus: None,
@@ -8245,7 +8257,19 @@ fn rasterize_frame(
                 } else {
                     "sessions"
                 };
-                let describe = if picker.kind == SpacePickerKind::Remote {
+                let attach = (picker.kind == SpacePickerKind::Attach)
+                    .then(|| attach_picker::entry(host, &space.name))
+                    .flatten();
+                let describe = if let Some(entry) = attach {
+                    if picker.confirm.as_deref() == Some(space.name.as_str()) {
+                        attach_picker::confirm_text(
+                            entry,
+                            host.attach_picker.as_ref().and_then(|p| p.space.as_deref()),
+                        )
+                    } else {
+                        entry.describe.clone()
+                    }
+                } else if picker.kind == SpacePickerKind::Remote {
                     host.remote_open
                         .as_ref()
                         .and_then(|id| host.remote.borrow().row(id, &space.name))
@@ -8262,6 +8286,13 @@ fn rasterize_frame(
                 } else {
                     format!("{} {sessions}", space.sessions)
                 };
+                if let Some(entry) = attach {
+                    return PaletteRow::plain(
+                        entry.name.clone(),
+                        describe,
+                        entry.group.chord().to_string(),
+                    );
+                }
                 let label = host
                     .terminal_targets
                     .as_ref()
@@ -8297,6 +8328,10 @@ fn rasterize_frame(
                 "REMOTE SPACES",
                 "Enter select · Esc close · ↑↓ move · click the chip again to refresh",
             ),
+            SpacePickerKind::Attach => (
+                "ATTACH RUNNING SESSION",
+                "Enter open · Shift+Enter new Space · Esc close · ↑↓ move",
+            ),
         };
         let move_label = host
             .move_target
@@ -8308,25 +8343,71 @@ fn rasterize_frame(
             (SpacePickerKind::Remote, Some(id)) => host.remote.borrow().status_line(id),
             _ => move_label,
         };
-        let sections = [PaletteSection {
-            header,
-            subtitle: &subtitle,
-            rows: &rows,
-        }];
-        let detail = host
-            .terminal_targets
-            .as_ref()
-            .and_then(|entries| {
-                ranked
-                    .get(picker.selected)
-                    .and_then(|row| entries.iter().find(|entry| entry.label == row.name))
-            })
+        // Attach groups its rows by where each session is; a search shows one list.
+        let attach_groups: Vec<(&str, std::ops::Range<usize>)> =
+            if picker.kind == SpacePickerKind::Attach && picker.query.is_empty() {
+                let mut groups: Vec<(&str, std::ops::Range<usize>)> = Vec::new();
+                for (index, row) in ranked.iter().enumerate() {
+                    let header = attach_picker::entry(host, &row.name)
+                        .map_or("SESSIONS", |entry| entry.group.header());
+                    match groups.last_mut() {
+                        Some((last, range)) if *last == header => range.end = index + 1,
+                        _ => groups.push((header, index..index + 1)),
+                    }
+                }
+                groups
+            } else {
+                Vec::new()
+            };
+        let sections: Vec<PaletteSection> = if attach_groups.is_empty() {
+            vec![PaletteSection {
+                header: if picker.kind == SpacePickerKind::Attach && !picker.query.is_empty() {
+                    "MATCHES"
+                } else {
+                    header
+                },
+                subtitle: &subtitle,
+                rows: &rows,
+            }]
+        } else {
+            attach_groups
+                .iter()
+                .map(|(header, range)| PaletteSection {
+                    header,
+                    subtitle: "",
+                    rows: &rows[range.clone()],
+                })
+                .collect()
+        };
+        let attach_detail = (picker.kind == SpacePickerKind::Attach)
+            .then(|| ranked.get(picker.selected))
+            .flatten()
+            .and_then(|row| attach_picker::entry(host, &row.name))
             .map(|entry| palette::PaletteDetail {
-                name: entry.display_label.clone(),
-                text: entry.detail.clone(),
-                chords: String::new(),
-                config_key: String::new(),
+                name: entry.name.clone(),
+                text: entry.describe.clone(),
+                chords: match entry.group {
+                    attach_picker::Group::Open => "Enter focus".into(),
+                    attach_picker::Group::Other => "Enter move here · Shift+Enter new Space".into(),
+                    _ => "Enter open here · Shift+Enter new Space".into(),
+                },
+                config_key: format!("session {}", entry.session),
             });
+        let detail = attach_detail.or_else(|| {
+            host.terminal_targets
+                .as_ref()
+                .and_then(|entries| {
+                    ranked
+                        .get(picker.selected)
+                        .and_then(|row| entries.iter().find(|entry| entry.label == row.name))
+                })
+                .map(|entry| palette::PaletteDetail {
+                    name: entry.display_label.clone(),
+                    text: entry.detail.clone(),
+                    chords: String::new(),
+                    config_key: String::new(),
+                })
+        });
         let frame = PaletteFrame {
             layout_mode: PaletteLayoutMode::FixedHeight,
             query: Some(&query),
@@ -11322,6 +11403,10 @@ fn context_menu_rows(host: &HostState) -> Option<(String, Vec<PaletteRow>)> {
             let labels = [
                 ("Open (switch)", "switch to this space"),
                 ("New session in this space", "create a fresh shell session"),
+                (
+                    "Attach running session…",
+                    "bring a live session into this space",
+                ),
                 ("Open in new window", "start another host window"),
                 ("Save current space", "update this space from its window"),
                 ("Rename", "change the space name"),
@@ -11438,6 +11523,15 @@ fn context_menu_rows(host: &HostState) -> Option<(String, Vec<PaletteRow>)> {
                 })
                 .collect();
             (header, rows)
+        }
+        ContextMenuTarget::NewTab => {
+            let rows = NEW_TAB_MENU
+                .iter()
+                .map(|(label, describe)| {
+                    PaletteRow::plain((*label).into(), (*describe).into(), String::new())
+                })
+                .collect();
+            ("NEW TAB".into(), rows)
         }
         ContextMenuTarget::RailTab(window) => {
             let tab = host
@@ -11774,6 +11868,7 @@ fn apply_space_context_action(host: &mut HostState, chip: usize, action: SpaceCo
         SpaceContextAction::Open(mode) => open_space_from_host(host, &name, mode),
         SpaceContextAction::Save => save_space_from_host(host, &name),
         SpaceContextAction::AddSession => session_prompt::add_to_space(host, name),
+        SpaceContextAction::AttachSession => attach_picker::open(host, Some(name)),
         SpaceContextAction::Rename => begin_space_rename(host, chip),
         SpaceContextAction::Move => {
             if move_target::begin(host) {
@@ -11920,6 +12015,17 @@ fn activate_context_menu(
         ContextMenuTarget::RailPane(pane) => {
             if let Some(action) = rail_context_menu::pane_action(index) {
                 return apply_rail_pane_action(host, pane, action, program, child_args);
+            }
+            Dispatch::Handled
+        }
+        ContextMenuTarget::NewTab => {
+            close_context_menu(host);
+            match new_tab_menu_action(index) {
+                Some(NewTabChoice::Run(action)) => {
+                    return dispatch_action(host, action, program, child_args)
+                }
+                Some(NewTabChoice::Attach) => attach_picker::open(host, None),
+                None => {}
             }
             Dispatch::Handled
         }
@@ -13515,6 +13621,32 @@ fn handle_rail_click(host: &mut HostState, button: MouseButton) -> bool {
     true
 }
 
+/// Rows of the + New tab menu, in order.
+const NEW_TAB_MENU: [(&str, &str); 3] = [
+    ("New tab", "a local shell in this window"),
+    ("New session", "a named session in this Space"),
+    (
+        "Attach running session…",
+        "bring a live session into this Space",
+    ),
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NewTabChoice {
+    Run(keybind::Action),
+    Attach,
+}
+
+/// What a + New tab menu row does.
+fn new_tab_menu_action(index: usize) -> Option<NewTabChoice> {
+    match index {
+        0 => Some(NewTabChoice::Run(keybind::Action::NewTab)),
+        1 => Some(NewTabChoice::Run(keybind::Action::NewSessionTab)),
+        2 => Some(NewTabChoice::Attach),
+        _ => None,
+    }
+}
+
 /// What a sidebar press does. Pure decision; the handler below applies it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SidebarClick {
@@ -13829,6 +13961,10 @@ fn handle_sidebar_click(host: &mut HostState, button: MouseButton) -> StripClick
         let Some(hit) = sidebar_hit_at(host, x as usize, y as usize) else {
             return StripClickResult::NotHandled;
         };
+        if hit == graphite::SidebarHit::Action(0) {
+            open_context_menu(host, ContextMenuTarget::NewTab);
+            return StripClickResult::Handled;
+        }
         if let graphite::SidebarHit::Row(index) = hit {
             let menu_row = host.sidebar_rows.get(index).and_then(|(_, row)| {
                 host.sidebar_tree
@@ -16485,6 +16621,7 @@ fn apply_space_picker_verdict(
             host.walkthrough_save_after_open = false;
             host.move_target = None;
             host.terminal_targets = None;
+            host.attach_picker = None;
             host.space_picker = None;
             host.remote_open = None;
             sync_remote_rail(host, false);
@@ -16493,6 +16630,38 @@ fn apply_space_picker_verdict(
                 .set_title(&window_title(&host.mux, show_tab_strip(host)));
             host.dirty = true;
             sync_chrome_hover(host);
+            true
+        }
+        SpacePickerVerdict::Open(_)
+        | SpacePickerVerdict::Confirmed(_)
+        | SpacePickerVerdict::OpenNewSpace(_)
+            if kind == SpacePickerKind::Attach =>
+        {
+            let (name, how) = match verdict {
+                SpacePickerVerdict::Confirmed(name) => (name, attach_picker::How::Confirmed),
+                SpacePickerVerdict::OpenNewSpace(name) => (name, attach_picker::How::NewSpace),
+                SpacePickerVerdict::Open(name) => (name, attach_picker::How::Enter),
+                _ => unreachable!("matched above"),
+            };
+            match attach_picker::activate(host, &name, how) {
+                Ok(attach_picker::Outcome::Confirm(_)) => {
+                    if let Some(picker) = host.space_picker.as_mut() {
+                        picker.confirm = Some(name);
+                    }
+                    host.dirty = true;
+                    true
+                }
+                Ok(attach_picker::Outcome::Done) => {
+                    apply_space_picker_verdict(host, kind, SpacePickerVerdict::Close)
+                }
+                Err(error) => {
+                    rail_error_toast(host, &format!(" could not open {name}: {error:#} "));
+                    apply_space_picker_verdict(host, kind, SpacePickerVerdict::Close)
+                }
+            }
+        }
+        SpacePickerVerdict::Confirmed(_) | SpacePickerVerdict::OpenNewSpace(_) => {
+            host.dirty = true;
             true
         }
         SpacePickerVerdict::Open(name) if kind == SpacePickerKind::Remote => {
@@ -17932,6 +18101,7 @@ fn mux_command_for(action: keybind::Action) -> Option<MuxCommand> {
         | Action::SessionSplitRight
         | Action::SessionSplitDown
         | Action::TerminalSwitcher
+        | Action::AttachSession
         | Action::AgentMessages
         | Action::ActivityMonitor
         | Action::JumpNeedsYou
@@ -20689,6 +20859,10 @@ fn dispatch_action(
         terminal_switcher::open(host);
         return Dispatch::Handled;
     }
+    if action == A::AttachSession {
+        attach_picker::open(host, None);
+        return Dispatch::Handled;
+    }
     if action == A::BarColorNext || action == A::BarColorPrev {
         cycle_bar_color(host, action == A::BarColorNext);
         return Dispatch::Handled;
@@ -22995,12 +23169,15 @@ mod tests {
         let spaces = [
             (0, SpaceContextAction::Open(SpaceOpenMode::Switch)),
             (1, SpaceContextAction::AddSession),
-            (2, SpaceContextAction::Open(SpaceOpenMode::NewWindow)),
-            (3, SpaceContextAction::Save),
-            (4, SpaceContextAction::Rename),
-            (5, SpaceContextAction::Move),
-            (6, SpaceContextAction::Delete),
-            (7, SpaceContextAction::Details),
+            (2, SpaceContextAction::AttachSession),
+            (3, SpaceContextAction::Open(SpaceOpenMode::NewWindow)),
+            (4, SpaceContextAction::Save),
+            (5, SpaceContextAction::Rename),
+            (6, SpaceContextAction::Move),
+            (7, SpaceContextAction::Delete),
+            (8, SpaceContextAction::Details),
+            (9, SpaceContextAction::Settings),
+            (10, SpaceContextAction::Undo),
         ];
         for (index, expected) in spaces {
             assert_eq!(
@@ -23010,7 +23187,7 @@ mod tests {
             );
         }
         assert_eq!(
-            context_menu_choice(ContextMenuKind::SpaceChip, 10),
+            context_menu_choice(ContextMenuKind::SpaceChip, 11),
             ContextMenuChoice::Noop
         );
 
@@ -23041,7 +23218,7 @@ mod tests {
             ContextMenuChoice::Noop
         );
         assert_eq!(
-            context_menu_action(ContextMenuTarget::SpaceChip(4), 2),
+            context_menu_action(ContextMenuTarget::SpaceChip(4), 3),
             ContextMenuAction::Space {
                 chip: 4,
                 action: SpaceContextAction::Open(SpaceOpenMode::NewWindow),
@@ -23054,12 +23231,33 @@ mod tests {
     }
 
     #[test]
+    fn new_tab_menu_rows_run_new_tab_new_session_and_attach() {
+        assert_eq!(NEW_TAB_MENU.len(), 3);
+        assert_eq!(
+            new_tab_menu_action(0),
+            Some(NewTabChoice::Run(keybind::Action::NewTab))
+        );
+        assert_eq!(
+            new_tab_menu_action(1),
+            Some(NewTabChoice::Run(keybind::Action::NewSessionTab))
+        );
+        assert_eq!(NEW_TAB_MENU[2].0, "Attach running session…");
+        assert_eq!(new_tab_menu_action(2), Some(NewTabChoice::Attach));
+        assert_eq!(new_tab_menu_action(3), None);
+        assert_eq!(
+            context_menu_action(ContextMenuTarget::NewTab, 0),
+            ContextMenuAction::Noop
+        );
+    }
+
+    #[test]
     fn context_menu_confirmation_table_covers_destructive_actions() {
         let cases = [
-            (ContextMenuKind::SpaceChip, 3, false, true),
-            (ContextMenuKind::SpaceChip, 3, true, false),
-            (ContextMenuKind::SpaceChip, 6, false, true),
+            (ContextMenuKind::SpaceChip, 4, false, true),
+            (ContextMenuKind::SpaceChip, 4, true, false),
+            (ContextMenuKind::SpaceChip, 7, false, true),
             (ContextMenuKind::SpaceChip, 2, false, false),
+            (ContextMenuKind::SpaceChip, 3, false, false),
             (ContextMenuKind::Pane, 3, false, false),
             (ContextMenuKind::Pane, 6, false, false),
             (ContextMenuKind::Pane, 10, false, false),
@@ -23071,7 +23269,7 @@ mod tests {
                 || (!confirmed
                     && matches!(
                         (kind, index),
-                        (ContextMenuKind::SpaceChip, 3 | 6) | (ContextMenuKind::Pane, 11)
+                        (ContextMenuKind::SpaceChip, 4 | 7) | (ContextMenuKind::Pane, 11)
                     ));
             assert_eq!(
                 got, expected,

@@ -55,6 +55,7 @@ pub enum Action {
     SessionSplitRight,
     SessionSplitDown,
     TerminalSwitcher,
+    AttachSession,
     AgentMessages,
     /// Open or focus the Activity Monitor Space.
     ActivityMonitor,
@@ -200,6 +201,7 @@ impl Action {
             Action::SessionSplitRight,
             Action::SessionSplitDown,
             Action::TerminalSwitcher,
+            Action::AttachSession,
             Action::AgentMessages,
             Action::ActivityMonitor,
             Action::JumpNeedsYou,
@@ -300,6 +302,7 @@ impl Action {
             Action::SessionSplitRight => "session_split_right".into(),
             Action::SessionSplitDown => "session_split_down".into(),
             Action::TerminalSwitcher => "terminal_switcher".into(),
+            Action::AttachSession => "attach_session".into(),
             Action::AgentMessages => "agent_messages".into(),
             Action::ActivityMonitor => "activity_monitor".into(),
             Action::JumpNeedsYou => "jump_needs_you".into(),
@@ -400,6 +403,9 @@ impl Action {
             Action::SessionSplitRight => "split right with an automatically named session".into(),
             Action::SessionSplitDown => "split down with an automatically named session".into(),
             Action::TerminalSwitcher => "find a terminal across Spaces".into(),
+            Action::AttachSession => {
+                "Attach running session: bring a live session into this Space".into()
+            }
             Action::AgentMessages => "view pending mail and pane input queue receipts".into(),
             Action::ActivityMonitor => "open the Activity Monitor Space".into(),
             Action::JumpNeedsYou => "focus the next pane that needs your attention".into(),
@@ -578,6 +584,7 @@ impl Action {
             | Action::ActivityMonitor
             | Action::JumpNeedsYou
             | Action::TerminalSwitcher
+            | Action::AttachSession
             | Action::OpenSpace
             | Action::DeleteSpace
             | Action::MovePaneToSpace
@@ -1213,6 +1220,7 @@ pub(crate) fn default_chords(action: Action) -> Vec<&'static str> {
         Action::SessionSplitDown => vec!["ctrl+alt+shift+b"],
         Action::TerminalSwitcher => vec!["ctrl+shift+o"],
         Action::AgentMessages
+        | Action::AttachSession
         | Action::ActivityMonitor
         | Action::UpdateRestart
         | Action::PluginsCheck
@@ -1631,6 +1639,7 @@ mod tests {
         matches!(
             action,
             Action::AgentMessages
+                | Action::AttachSession
                 | Action::ActivityMonitor
                 | Action::UpdateRestart
                 | Action::PluginsCheck

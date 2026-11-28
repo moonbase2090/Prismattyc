@@ -147,6 +147,9 @@ fn open_mode(host: &mut HostState, messages: bool) {
     host.window.request_redraw();
 }
 pub(super) fn rows(host: &HostState, kind: SpacePickerKind) -> Vec<SpacePickerRow> {
+    if kind == SpacePickerKind::Attach {
+        return attach_picker::rows(host);
+    }
     if kind == SpacePickerKind::Remote {
         let Some(id) = host.remote_open.as_ref() else {
             return Vec::new();

@@ -727,6 +727,8 @@ pub enum SpacePickerKind {
     MoveSession,
     /// Running Spaces on an SSH destination (issue #24).
     Remote,
+    /// Live pmux sessions to bring into a Space as a tab.
+    Attach,
 }
 
 /// One saved space shown in the picker.
@@ -776,6 +778,10 @@ pub enum SpacePickerVerdict {
     Open(String),
     Deleted(String),
     Move(String),
+    /// Shift+Enter on an attach row: open it in a new Space.
+    OpenNewSpace(String),
+    /// Enter again on a row that asked for confirmation (not Delete).
+    Confirmed(String),
 }
 
 /// Shared keyboard state for the chip and pane context menus (PT-214/PT-215).
@@ -793,6 +799,8 @@ pub enum ContextMenuKind {
     RailPane,
     /// Named host tab row in the sidebar.
     RailTab,
+    /// Right-click on the sidebar's + New tab button.
+    NewTab,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1021,10 +1029,14 @@ impl SpacePicker {
                     self.confirm = None;
                     SpacePickerVerdict::Consumed
                 }
-                Key::Named(NamedKey::Enter) => {
+                Key::Named(NamedKey::Enter) if self.kind == SpacePickerKind::Delete => {
                     self.confirm = None;
                     self.status = Some(format!("deleted {name}"));
                     SpacePickerVerdict::Deleted(name)
+                }
+                Key::Named(NamedKey::Enter) => {
+                    self.confirm = None;
+                    SpacePickerVerdict::Confirmed(name)
                 }
                 _ => SpacePickerVerdict::Consumed,
             };
@@ -1052,9 +1064,12 @@ impl SpacePicker {
                         return SpacePickerVerdict::Consumed;
                     };
                     match self.kind {
-                        SpacePickerKind::Open | SpacePickerKind::Remote => {
-                            SpacePickerVerdict::Open(row.name.clone())
+                        SpacePickerKind::Attach if mods.shift_key() => {
+                            SpacePickerVerdict::OpenNewSpace(row.name.clone())
                         }
+                        SpacePickerKind::Open
+                        | SpacePickerKind::Remote
+                        | SpacePickerKind::Attach => SpacePickerVerdict::Open(row.name.clone()),
                         SpacePickerKind::MovePane | SpacePickerKind::MoveSession => {
                             SpacePickerVerdict::Move(row.name.clone())
                         }
@@ -1509,6 +1524,7 @@ mod tests {
                 "move_pane_to_space",
                 "undo_space_change",
                 "save_space",
+                "attach_session",
                 "activity_monitor",
                 "jump_needs_you",
                 "terminal_switcher"
@@ -1918,6 +1934,41 @@ mod tests {
         assert_eq!(
             picker.key(&Key::Named(NamedKey::Escape), empty_mods(), &spaces),
             SpacePickerVerdict::Close
+        );
+    }
+
+    #[test]
+    fn attach_picker_shift_enter_asks_for_a_new_space_and_confirm_returns_confirmed() {
+        let spaces = sample_spaces();
+        let mut picker = SpacePicker::new(SpacePickerKind::Attach);
+        assert_eq!(
+            picker.key(&Key::Named(NamedKey::Enter), empty_mods(), &spaces),
+            SpacePickerVerdict::Open("alpha".into())
+        );
+        assert_eq!(
+            picker.key(&Key::Named(NamedKey::Enter), ModifiersState::SHIFT, &spaces),
+            SpacePickerVerdict::OpenNewSpace("alpha".into())
+        );
+        // The host sets `confirm` before a move. Enter then confirms it and
+        // never deletes; Escape drops the question and keeps the picker.
+        picker.confirm = Some("alpha".into());
+        assert_eq!(
+            picker.key(&Key::Named(NamedKey::Escape), empty_mods(), &spaces),
+            SpacePickerVerdict::Consumed
+        );
+        assert_eq!(picker.confirm, None);
+        picker.confirm = Some("alpha".into());
+        assert_eq!(
+            picker.key(&Key::Named(NamedKey::Enter), empty_mods(), &spaces),
+            SpacePickerVerdict::Confirmed("alpha".into())
+        );
+        assert_eq!(picker.confirm, None);
+        assert_eq!(picker.status, None);
+        // Shift+Enter means nothing new to other pickers.
+        let mut open = SpacePicker::new(SpacePickerKind::Open);
+        assert_eq!(
+            open.key(&Key::Named(NamedKey::Enter), ModifiersState::SHIFT, &spaces),
+            SpacePickerVerdict::Open("alpha".into())
         );
     }
 

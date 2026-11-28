@@ -460,6 +460,7 @@ fn paint_in_real_window(restore_only: bool) {
         fn resumed(&mut self, event_loop: &ActiveEventLoop) {
             if self.restore_only {
                 verify_startup_restore(&mut self.app, event_loop);
+                verify_restore_keeps_float(&mut self.app, event_loop);
                 self.painted = true;
                 event_loop.exit();
                 return;
@@ -611,6 +612,99 @@ fn verify_countdown_waits_for_splash(
     }
     app.windows.clear();
     std::fs::write(path, original).unwrap();
+}
+
+/// Open a cold window and accept Restore workspace with Enter.
+fn restore_from_prompt(app: &mut App, event_loop: &ActiveEventLoop) -> WindowId {
+    app.windows.clear();
+    let id = app.open_window(event_loop, false).unwrap();
+    let host = app.windows.get_mut(&id).unwrap();
+    assert!(host.restore_prompt.is_some());
+    restore_prompt::dispatch_key(host, &Key::Named(NamedKey::Enter), false);
+    assert!(host.restore_prompt.is_none());
+    assert_eq!(host.space_rail.current.as_deref(), Some("floatspace"));
+    assert_eq!(host.mux.pane_count(), 2);
+    id
+}
+
+/// Restore workspace brings back a Space's floating pane, not just its tiles.
+fn verify_restore_keeps_float(app: &mut App, event_loop: &ActiveEventLoop) {
+    let path = attach_tabs::layout_path_from_socket(&host_mux_socket().unwrap());
+    let owner = prismattyc_mux::new_space_id().unwrap();
+    let session = |name: &str| {
+        serde_json::json!({"name": name, "windows": [{
+            "title": name, "cols": 40, "rows": 20,
+            "root": {"kind": "leaf", "cwd": "/", "program": "/bin/sh"}
+        }]})
+    };
+    let space = serde_json::from_value(serde_json::json!({
+        "version": 2, "saved_at_unix": 0, "id": owner,
+        "sessions": [session("float-left"), session("float-right")]
+    }))
+    .unwrap();
+    prismattyc_mux::save_space(&spaces_dir(), "floatspace", &space).unwrap();
+    let saved: attach_tabs::AttachTabsFile = serde_json::from_value(serde_json::json!({
+        "tabs": [{
+            "title": "pair",
+            "sessions": ["float-left", "float-right"],
+            "layout": {
+                "kind": "split", "axis": "horizontal", "ratio": 0.5,
+                "first": {"kind": "leaf", "session": "float-left"},
+                "second": {"kind": "leaf", "session": "float-right"}
+            }
+        }],
+        "focused_session": "float-right",
+        "space": "floatspace",
+        "space_id": owner,
+        "session_names": {"float-left": "float-left", "float-right": "float-right"}
+    }))
+    .unwrap();
+    attach_tabs::persist_if_changed(&path, &mut None, saved.clone()).unwrap();
+
+    let id = restore_from_prompt(app, event_loop);
+    let host = app.windows.get_mut(&id).unwrap();
+    assert_eq!(host.mux.floated_pane(), None);
+    let right = host.mux.focused_id();
+    toggle_float_pane(host, right);
+    assert_eq!(host.mux.floated_pane(), Some(right));
+    let records = prismattyc_mux::load_floats(&spaces_dir()).unwrap();
+    assert_eq!(
+        records
+            .floats
+            .iter()
+            .filter(|saved| saved.space == "floatspace")
+            .count(),
+        1,
+        "floating the pane must save its record"
+    );
+
+    // Quit only the window, then reopen and choose Restore workspace.
+    attach_tabs::persist_if_changed(&path, &mut None, saved).unwrap();
+    let id = restore_from_prompt(app, event_loop);
+    let host = app.windows.get_mut(&id).unwrap();
+    let floated = host
+        .mux
+        .floated_pane()
+        .expect("Restore workspace dropped the floating pane");
+    assert_eq!(
+        host.attach_pane_sessions.get(&floated).map(String::as_str),
+        Some("float-right")
+    );
+    app.poll_attach_tabs();
+    let host = app.windows.get_mut(&id).unwrap();
+    assert_eq!(
+        host.mux.floated_pane(),
+        Some(floated),
+        "a later layout refresh must keep the restored overlay"
+    );
+    toggle_float_pane(host, floated);
+    assert_eq!(host.mux.floated_pane(), None);
+    let records = prismattyc_mux::load_floats(&spaces_dir()).unwrap();
+    assert!(!records
+        .floats
+        .iter()
+        .any(|saved| saved.space == "floatspace"));
+    app.windows.clear();
 }
 
 /// Exercise the first-window cache boundary, not just the prompt's key map.

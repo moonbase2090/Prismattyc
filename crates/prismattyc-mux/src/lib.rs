@@ -42,6 +42,7 @@ mod process_lock;
 pub mod procinfo;
 pub mod program_resume;
 pub mod prompt_idle;
+pub mod pty_holder;
 pub mod pty_holder_frame;
 pub mod release_update;
 pub mod remote_catalog;

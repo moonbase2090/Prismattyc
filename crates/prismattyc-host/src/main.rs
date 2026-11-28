@@ -7006,7 +7006,9 @@ fn rasterize_frame(
         // pane damage, so it must force full frames like the others.
         restore_prompt: host.restore_prompt.is_some()
             || host.session_prompt.is_some()
-            || host.restart_modal.is_some(),
+            || host.restart_modal.is_some()
+            // The server card appears and ages with no pane damage.
+            || host.server != server_state::ServerState::Running,
         palette: host.palette.is_some(),
         theme_picker: host.theme_picker.is_some(),
         space_picker: host.space_picker.is_some(),
@@ -8583,10 +8585,9 @@ fn rasterize_frame(
         }
     }
     // The server card sits over dead panes, under every dialog and menu.
-    let local_live = host
-        .mux
-        .panes_and_rects()
-        .any(|(id, runtime, _)| runtime.child_alive && host.mux.attach_session_of(id).is_none());
+    let local_live = host.mux.panes_and_rects().any(|(id, runtime, _)| {
+        runtime.child_alive && !host.attach_pane_sessions.contains_key(&id)
+    });
     host.server_card_shown = server_state::shows_card(
         &host.server,
         SystemTime::now(),
@@ -18330,7 +18331,12 @@ fn apply_mux_tab_command_body(
     program: &str,
     child_args: &[String],
 ) -> Result<MuxApplyResult> {
-    if command == MuxTabCommand::NewTab && host.space_rail.current.is_some() {
+    // A Space's new tab is one of its sessions, which needs the pmux server.
+    // While the server is down it is a local shell, as the card offers.
+    if command == MuxTabCommand::NewTab
+        && host.space_rail.current.is_some()
+        && host.server == server_state::ServerState::Running
+    {
         spawn_owned_space_pane(host, None, None)?;
         return Ok(MuxApplyResult::Changed(true));
     }
@@ -18393,6 +18399,16 @@ fn handle_mux_command(
     child_args: &[String],
 ) -> bool {
     match command {
+        // A new session needs the pmux server; while it is down, New tab is
+        // a local shell, as the server card offers.
+        MuxCommand::NewTab if host.server != server_state::ServerState::Running => {
+            if let Err(error) = host.mux.new_tab(program, child_args) {
+                rail_error_toast(host, &format!(" could not open a local shell: {error} "));
+            }
+            mark_layout_dirty(host);
+            host.dirty = true;
+            return false;
+        }
         MuxCommand::NewTab => {
             session_prompt::create_pane(host, None);
             return false;

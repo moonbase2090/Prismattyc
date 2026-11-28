@@ -81,6 +81,8 @@ impl RestorePrompt {
         if accept {
             self.declined = false;
             self.automatic_at = Some(now);
+            // The highlight follows the choice now scheduled.
+            self.selected = 0;
         } else {
             // The daemon may still be restoring this Space. Detach only after
             // that startup returns, or it would put the sessions back.
@@ -717,6 +719,10 @@ mod tests {
         // Changing the mind to Restore while still starting clears it.
         prompt.defer(true, Instant::now());
         assert!(!prompt.declined);
+        assert_eq!(
+            prompt.selected, 0,
+            "Restore is selected once it is scheduled"
+        );
         assert_eq!(prompt.rows()[1].describe, "Keep this fresh window.");
         assert_eq!(
             prompt.rows()[0].describe,

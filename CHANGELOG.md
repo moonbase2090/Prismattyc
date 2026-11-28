@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- A floating pane has a **Dock** button in its title row. The new `float_pane` key (**Ctrl+Alt+Shift+F** by default) floats the focused pane, and pressing it again docks the floating pane from any pane. It is in the command palette, `--list-bindings` and the pane menu. Right-clicking the tile under a floating pane also offers **Dock pane**.
+
+### Fixed
+
+- **Restore workspace** at launch brings a floating pane back as an overlay. It used to come back docked.
+- A pane no longer shows "new output" for output the app caused itself, such as a shell redrawing after the app resized or reattached it.
+
 ## [0.3.81] - 2026-11-28
 
 ### Added

@@ -239,8 +239,13 @@ pub(super) fn finish(host: &mut HostState, accept: bool) {
         match result {
             Ok(file) => {
                 set_current_space(host, file.space.clone());
+                let space = file.space.clone();
                 host.attach_layout = Some(file);
                 host.layout_dirty = false;
+                // The tiles are back; put the Space's floating pane back too.
+                if let Some(space) = space.as_deref() {
+                    crate::restore_open_space_float(host, space);
+                }
             }
             Err(error) => {
                 eprintln!("prismattyc-host: could not restore last space: {error:#}");

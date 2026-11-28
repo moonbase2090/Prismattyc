@@ -1285,6 +1285,9 @@ struct HostState {
     space_team_focus: Option<(String, u64, Instant)>,
     team_attention_feed: space_panel::AttentionFeed,
     context_menu_target: Option<ContextMenuTarget>,
+    /// The floating pane, when it had focus just before a right-click opened
+    /// the pane menu on another pane: the menu then offers Dock for it.
+    context_menu_float: Option<PaneId>,
     /// Saved-spaces rail (PT-91): chip list, current space, keyboard mode.
     space_rail: space_rail::SpaceRail,
     /// `[[remote]]` catalog state, shared by every window (issue #24).
@@ -1914,7 +1917,7 @@ fn context_menu_choice(kind: ContextMenuKind, index: usize) -> ContextMenuChoice
                 9 => PaneContextAction::MoveSessionToSpace,
                 10 => PaneContextAction::RemoveSessionFromSpace,
                 11 => PaneContextAction::RemoveAndKillSession,
-                12 => PaneContextAction::Float,
+                FLOAT_MENU_ROW => PaneContextAction::Float,
                 _ => return ContextMenuChoice::Noop,
             };
             ContextMenuChoice::Pane(action)
@@ -4839,6 +4842,7 @@ impl App {
                 space_team_focus: None,
                 team_attention_feed: Default::default(),
                 context_menu_target: None,
+                context_menu_float: None,
                 space_rail,
                 remote: self.remote.clone(),
                 remote_open: None,
@@ -6817,6 +6821,8 @@ struct GraphitePaneChrome {
     running: bool,
     focused: bool,
     handle_hover: bool,
+    /// The floated pane: its title row carries the Dock button.
+    dock: bool,
 }
 
 /// Capture the Graphite slots this frame is re-stroking, then stroke them.
@@ -6847,6 +6853,7 @@ fn paint_retained_graphite_panes(
         _ => None,
     };
     let mut panes = Vec::new();
+    let floated = host.mux.floated_pane();
     for (pane_id, pane, rect) in host.mux.panes_and_rects() {
         let (slot_x, slot_y, slot_width, slot_height) = geom.pane_slot_px(rect);
         let (name, meta) = host.mux.pane_header_text(pane_id);
@@ -6860,6 +6867,7 @@ fn paint_retained_graphite_panes(
             running: pane.is_active_at(frame_now),
             focused: pane_id == focused,
             handle_hover: hover_pane == Some(pane_id),
+            dock: floated == Some(pane_id),
         });
     }
     let tok = graphite::bar_tokens(&host.theme, host.bar_color);
@@ -6914,6 +6922,7 @@ fn paint_retained_graphite_panes(
                 ),
                 focused: pane.focused,
                 handle_hover: pane.handle_hover,
+                dock: pane.dock,
             },
             multi,
             cycle_progress.filter(|_| pane.focused),
@@ -11371,6 +11380,7 @@ fn open_context_menu(host: &mut HostState, target: ContextMenuTarget) {
     let kind = context_menu_kind(target);
     host.context_menu = Some(ContextMenu::new(kind));
     host.context_menu_target = Some(target);
+    host.context_menu_float = None;
     host.palette = None;
     host.space_picker = None;
     host.terminal_targets = None;
@@ -11547,7 +11557,7 @@ fn context_menu_rows(host: &HostState) -> Option<(String, Vec<PaletteRow>)> {
                     "Remove and kill session…",
                     "Remove from Space and stop its processes",
                 ),
-                if host.mux.floated_pane() == Some(pane) {
+                if host.mux.floated_pane() == Some(float_target(host, pane)) {
                     ("Dock pane", "Put this pane back in the tile")
                 } else {
                     ("Float pane", "Lift this pane into an overlay")
@@ -11564,7 +11574,13 @@ fn context_menu_rows(host: &HostState) -> Option<(String, Vec<PaletteRow>)> {
                         } else {
                             description.to_string()
                         };
-                        PaletteRow::plain(label.to_string(), description, String::new())
+                        // The Float/Dock row names its key binding.
+                        let shortcut = if index == FLOAT_MENU_ROW {
+                            graphite_chord_label(&host.keymap, keybind::Action::FloatPane)
+                        } else {
+                            String::new()
+                        };
+                        PaletteRow::plain(label.to_string(), description, shortcut)
                     })
                     .collect(),
             )
@@ -12005,16 +12021,7 @@ fn apply_pane_context_action(
             None
         }
         PaneContextAction::Float => {
-            match host.mux.toggle_float(pane) {
-                Ok(true) => {
-                    store_current_float(host);
-                    mark_layout_dirty(host);
-                    host.dirty = true;
-                    host.window.request_redraw();
-                }
-                Ok(false) => {}
-                Err(error) => eprintln!("prismattyc-host: float failed: {error:#}"),
-            }
+            toggle_float_pane(host, float_target(host, pane));
             None
         }
     };
@@ -14384,6 +14391,62 @@ fn handle_divider_drag_move(host: &mut HostState) -> bool {
 }
 
 /// Left press on the overlay starts a drag. The tile underneath does not.
+/// Float `pane`, or dock it when it is the floated one, and save the overlay
+/// for its Space. Shared by the Dock button, the key binding and the pane menu.
+fn toggle_float_pane(host: &mut HostState, pane: PaneId) {
+    match host.mux.toggle_float(pane) {
+        Ok(true) => {
+            store_current_float(host);
+            mark_layout_dirty(host);
+            host.dirty = true;
+            host.window.request_redraw();
+        }
+        Ok(false) => {}
+        Err(error) => eprintln!("prismattyc-host: float failed: {error:#}"),
+    }
+}
+
+/// The pane a menu Float/Dock row applies to: the floating pane when it is
+/// the target, or when it had focus before the right-click that opened the
+/// menu on the tile beneath it; otherwise the target itself.
+fn float_target(host: &HostState, pane: PaneId) -> PaneId {
+    match host.mux.floated_pane() {
+        Some(floated) if floated == pane || host.context_menu_float == Some(floated) => floated,
+        _ => pane,
+    }
+}
+
+/// The floated pane whose Dock button is under the pointer, if any.
+fn dock_button_at(host: &HostState, px: usize, py: usize) -> Option<PaneId> {
+    let geom = host.mux.geom();
+    if !geom.chrome.graphite {
+        return None;
+    }
+    let floated = host.mux.floated_pane()?;
+    let (_, rect) = host.mux.rects().find(|(pane, _)| *pane == floated)?;
+    let (x, y, width, height) = geom.pane_slot_px(rect);
+    graphite::pane_dock_rect(geom.chrome, graphite::Rect::new(x, y, width, height))
+        .filter(|button| button.contains(px, py))
+        .map(|_| floated)
+}
+
+/// A press on the floating pane's Dock button docks it.
+fn handle_dock_button_press(host: &mut HostState, button: MouseButton) -> bool {
+    if button != MouseButton::Left {
+        return false;
+    }
+    let Some((px, py)) = pointer_cells(host) else {
+        return false;
+    };
+    let Some(pane) = dock_button_at(host, px, py) else {
+        return false;
+    };
+    cancel_tab_rename(host);
+    host.cursor_cell = None;
+    toggle_float_pane(host, pane);
+    true
+}
+
 fn handle_float_drag_press(host: &mut HostState, button: MouseButton) -> bool {
     if button != MouseButton::Left {
         return false;
@@ -17946,6 +18009,9 @@ fn cell_at_position(
     })
 }
 
+/// The pane menu's Float/Dock row.
+const FLOAT_MENU_ROW: usize = 12;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MuxCommand {
     Split(prismattyc_mux::Axis),
@@ -17974,6 +18040,8 @@ enum MuxCommand {
     Preset(mux::LayoutPreset),
     /// Toggle the focused pane's client-local zoom (PT-57).
     ZoomPane,
+    /// Float the focused pane, or dock the floating one.
+    FloatPane,
     NewTab,
     CloseTab,
     NextTab,
@@ -17998,6 +18066,7 @@ enum MuxLayoutCommand {
     EvenColumns(usize),
     EvenQuadrants,
     ZoomPane,
+    FloatPane,
     Close,
 }
 
@@ -18047,6 +18116,7 @@ fn mux_command_plan(command: &MuxCommand) -> MuxCommandPlan {
         }
         MuxCommand::EvenQuadrants => MuxCommandPlan::Layout(MuxLayoutCommand::EvenQuadrants),
         MuxCommand::ZoomPane => MuxCommandPlan::Layout(MuxLayoutCommand::ZoomPane),
+        MuxCommand::FloatPane => MuxCommandPlan::Layout(MuxLayoutCommand::FloatPane),
         MuxCommand::Arrange(_) => {
             unreachable!("arrange is applied directly in handle_mux_command")
         }
@@ -18127,6 +18197,7 @@ fn mux_command_for(action: keybind::Action) -> Option<MuxCommand> {
         Action::PresetMainVertical => MuxCommand::Preset(mux::LayoutPreset::MainVertical),
         Action::PresetMainHorizontal => MuxCommand::Preset(mux::LayoutPreset::MainHorizontal),
         Action::ZoomPane => MuxCommand::ZoomPane,
+        Action::FloatPane => MuxCommand::FloatPane,
         Action::NewWindow
         | Action::Quit
         | Action::BarColorNext
@@ -18458,6 +18529,13 @@ fn apply_mux_layout_command_body(
                 store_current_float(host);
             }
             result
+        }
+        MuxLayoutCommand::FloatPane => {
+            // One pane floats at a time: the key docks it from anywhere.
+            let pane = host.mux.floated_pane().unwrap_or(host.mux.focused_id());
+            let before = host.mux.floated_pane();
+            toggle_float_pane(host, pane);
+            Ok(MuxApplyResult::Changed(host.mux.floated_pane() != before))
         }
         MuxLayoutCommand::Close => {
             let had_float = host.mux.floated_pane().is_some();
@@ -22406,6 +22484,10 @@ impl ApplicationHandler<UserAction> for App {
                         RightClickRoute::Sidebar | RightClickRoute::FallThrough => {}
                         RightClickRoute::Pane => {
                             if let Some((pane, _, _)) = host.cursor_cell {
+                                let float_had_focus = host
+                                    .mux
+                                    .floated_pane()
+                                    .filter(|floated| *floated == host.mux.focused_id());
                                 if host.mux.focus(pane) {
                                     mark_layout_dirty(host);
                                     host.window
@@ -22414,6 +22496,7 @@ impl ApplicationHandler<UserAction> for App {
                                 host.left_button_down = false;
                                 host.app_mouse_button = None;
                                 open_context_menu(host, ContextMenuTarget::Pane(pane));
+                                host.context_menu_float = float_had_focus;
                                 host.window.request_redraw();
                                 return;
                             }
@@ -22508,6 +22591,13 @@ impl ApplicationHandler<UserAction> for App {
                 if state == ElementState::Pressed && handle_divider_press(host, button) {
                     host.left_button_down = false;
                     host.app_mouse_button = None;
+                    host.window.request_redraw();
+                    return;
+                }
+                if state == ElementState::Pressed && handle_dock_button_press(host, button) {
+                    host.left_button_down = false;
+                    host.app_mouse_button = None;
+                    host.suppress_left_release = true;
                     host.window.request_redraw();
                     return;
                 }

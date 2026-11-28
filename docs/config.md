@@ -473,6 +473,8 @@ layout_9 = ["ctrl+shift+f9", "ctrl+shift+alt+f9", "super+shift+f9", "ctrl+alt+9"
 # arrange_grid = []
 # zoom the focused pane to the whole tab; again restores the split.
 zoom_pane = "ctrl+shift+z"
+# float the focused pane over its tile; again docks it back.
+float_pane = "ctrl+alt+shift+f"
 # open a new OS window.
 new_window = "super+n"
 # quit Prismattyc.

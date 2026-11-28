@@ -614,8 +614,18 @@ fn verify_countdown_waits_for_splash(
     std::fs::write(path, original).unwrap();
 }
 
+/// Wait until no open window has a layout write queued. The cache writer
+/// and a test that rewrites the cache share one temp file, so an
+/// overlapping write can fail the rename or replace the test's layout.
+fn settle_attach_writes(app: &App) {
+    for host in app.windows.values() {
+        test_support::wait_for_attach_write(host);
+    }
+}
+
 /// Open a cold window and accept Restore workspace with Enter.
 fn restore_from_prompt(app: &mut App, event_loop: &ActiveEventLoop) -> WindowId {
+    settle_attach_writes(app);
     app.windows.clear();
     let id = app.open_window(event_loop, false).unwrap();
     let host = app.windows.get_mut(&id).unwrap();
@@ -679,6 +689,8 @@ fn verify_restore_keeps_float(app: &mut App, event_loop: &ActiveEventLoop) {
     );
 
     // Quit only the window, then reopen and choose Restore workspace.
+    settle_attach_writes(app);
+    app.windows.clear();
     attach_tabs::persist_if_changed(&path, &mut None, saved).unwrap();
     let id = restore_from_prompt(app, event_loop);
     let host = app.windows.get_mut(&id).unwrap();
@@ -952,6 +964,8 @@ fn verify_startup_restore(app: &mut App, event_loop: &ActiveEventLoop) {
         "a launch that attaches a session still shows the splash"
     );
     app.cli.attach_sessions.clear();
+    // A queued layout write from this window shares the cache's temp file.
+    settle_attach_writes(app);
     app.windows.clear();
 
     // An explicit later workspace update can still be restored.
@@ -962,6 +976,7 @@ fn verify_startup_restore(app: &mut App, event_loop: &ActiveEventLoop) {
     restore_prompt::dispatch_key(host, &Key::Named(NamedKey::Enter), false);
     assert!(host.restore_prompt.is_none());
     assert_eq!(host.mux.tab_count(), 2);
+    settle_attach_writes(app);
     app.windows.clear();
 }
 

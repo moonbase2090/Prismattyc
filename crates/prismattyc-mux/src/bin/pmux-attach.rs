@@ -3781,6 +3781,7 @@ fn run_interactive(
     pane_id: &mut u64,
     mut window_id: u64,
     opts: InteractiveOpts,
+    on_first_paint: impl FnOnce(),
 ) -> Result<(AttachEnd, Option<String>, u64)> {
     // Do not grab the lease on attach. InjectMail must AcquireLease
     // on an idle unfocused pane; a sticky attach lease made every live
@@ -3931,6 +3932,7 @@ fn run_interactive(
         )?;
         Some(frame)
     };
+    on_first_paint();
     let mut prev_mail = Some(mail_depth);
     // --write then interactive starts already holding the lease. Seed the
     // idle timer so InjectMail is not blocked until the first key.
@@ -5440,6 +5442,7 @@ fn attach_interactive(
 ) -> Result<(AttachEnd, Option<String>, u64)> {
     let pid = peer_pid(&client.writer);
     let _raw = RawTerminal::enter()?;
+    let mut can_reconnect = true;
     loop {
         let window_id = pane_window(&snapshot, pane_id)
             .context("selected pane has no window in the snapshot")?;
@@ -5458,10 +5461,20 @@ fn attach_interactive(
             fit: cli.fit,
         };
 
-        match run_interactive(&mut client, client_id, &mut pane_id, window_id, options) {
-            Err(err) if err.is::<AttachDisconnected>() => {
+        match run_interactive(
+            &mut client,
+            client_id,
+            &mut pane_id,
+            window_id,
+            options,
+            || can_reconnect = true,
+        ) {
+            Err(err) if can_reconnect && err.is::<AttachDisconnected>() => {
                 let Some(pid) = pid else { return Err(err) };
                 (client, client_id, snapshot) = reconnect_attach(&cli.socket, pid, pane_id)?;
+                // Registration can succeed while the first frame still fails.
+                // Only a usable connection earns another recovery attempt.
+                can_reconnect = false;
                 wrote = false;
             }
             result => return result,

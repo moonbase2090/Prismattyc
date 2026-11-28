@@ -1408,7 +1408,7 @@ fn resize_transport_failure_logs_request_error() {
     wait_transcript(
         &transcript,
         "pmux-attach: Resize failed pane=",
-        test_time_budget(Duration::from_secs(5)),
+        Duration::from_secs(5),
     );
     let hay = String::from_utf8_lossy(&transcript.lock().expect("transcript")).into_owned();
     assert!(
@@ -1416,10 +1416,24 @@ fn resize_transport_failure_logs_request_error() {
         "Resize failure must name the session, got {hay:?}"
     );
 
-    if let Ok(mut writer) = pair.master.take_writer() {
-        let _ = writer.write_all(&[0x1c, b'd']);
-    }
-    let _ = child.wait();
+    // The proxy drops this resize on every connection. A recovered attach
+    // must paint a frame before another disconnect can trigger recovery.
+    let mut killer = child.clone_killer();
+    let (done, exit) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(child.wait());
+    });
+    let status = exit
+        .recv_timeout(test_time_budget(Duration::from_secs(5)))
+        .unwrap_or_else(|err| {
+            let _ = killer.kill();
+            panic!("attach did not exit after repeated resize failure: {err}");
+        })
+        .expect("wait for attach");
+    assert!(
+        !status.success(),
+        "attach must report the transport failure"
+    );
 }
 
 /// PT-200: a smaller TTY attach shrinks the pane; detach restores host size.

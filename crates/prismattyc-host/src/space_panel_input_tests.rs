@@ -1021,6 +1021,8 @@ fn panel(space: &str, owner: Option<String>, choice: Option<Choice>) -> Panel {
         scroll: 0,
         columns: 80,
         chrome_layout: Some(config::LayoutMode::Bars),
+        server_running: true,
+        stop_armed: false,
     }
 }
 

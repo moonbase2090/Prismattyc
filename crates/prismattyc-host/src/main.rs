@@ -3152,6 +3152,8 @@ enum UserAction {
     IdleRestartReady,
     /// A start the server card asked for finished.
     ServerStartFinished(Result<(), String>),
+    /// A confirmed Save and stop finished.
+    ServerStopFinished(Result<(), String>),
 }
 
 impl From<accesskit_winit::Event> for UserAction {
@@ -17984,6 +17986,8 @@ fn mux_command_for(action: keybind::Action) -> Option<MuxCommand> {
         | Action::SessionSplitRight
         | Action::SessionSplitDown
         | Action::TerminalSwitcher
+        | Action::StartServer
+        | Action::StopServer
         | Action::AgentMessages
         | Action::ActivityMonitor
         | Action::JumpNeedsYou
@@ -20756,6 +20760,15 @@ fn dispatch_action(
         terminal_switcher::open(host);
         return Dispatch::Handled;
     }
+    if action == A::StartServer {
+        host.server_card_request = Some(server_state::CardAction::Start);
+        host.window.request_redraw();
+        return Dispatch::Handled;
+    }
+    if action == A::StopServer {
+        space_panel::stop_server(host);
+        return Dispatch::Handled;
+    }
     if action == A::BarColorNext || action == A::BarColorPrev {
         cycle_bar_color(host, action == A::BarColorNext);
         return Dispatch::Handled;
@@ -21186,6 +21199,7 @@ impl App {
         let program = self.cli.program.clone();
         let child_args = self.cli.child_args.clone();
         let mut start = false;
+        let mut stop = false;
         for host in self.windows.values_mut() {
             if host.server != self.server || host.server_busy != busy {
                 host.server = self.server.clone();
@@ -21199,6 +21213,7 @@ impl App {
             }
             match host.server_card_request.take() {
                 Some(server_state::CardAction::Start) => start = true,
+                Some(server_state::CardAction::Stop) => stop = true,
                 Some(server_state::CardAction::LocalShell) => {
                     host.server_card_dismissed = true;
                     let _ = dispatch_action(host, keybind::Action::NewTab, &program, &child_args);
@@ -21209,6 +21224,76 @@ impl App {
         }
         if start {
             self.start_server();
+        }
+        if stop {
+            self.stop_server(busy);
+        }
+    }
+
+    /// Save every session and stop the server, off the event loop. Refused
+    /// while the app's own update or restart flow owns the server.
+    fn stop_server(&mut self, busy: bool) {
+        if busy {
+            for host in self.windows.values_mut() {
+                rail_error_toast(
+                    host,
+                    " the app is updating or restarting the pmux server; try again after ",
+                );
+            }
+            return;
+        }
+        let Some(socket) = host_mux_socket() else {
+            return;
+        };
+        let proxy = self.event_proxy.clone();
+        let _ = std::thread::Builder::new()
+            .name("server-stop".into())
+            .spawn(move || {
+                let mut command = pmux_capture_command();
+                command
+                    .arg("--socket")
+                    .arg(&socket)
+                    .args(["stop", "--save"])
+                    .stdin(std::process::Stdio::null());
+                let result = prismattyc_process::spawn(&mut command)
+                    .and_then(std::process::Child::wait_with_output)
+                    .map_err(|error| error.to_string())
+                    .and_then(|output| {
+                        if output.status.success() {
+                            Ok(())
+                        } else {
+                            Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+                        }
+                    });
+                let _ = proxy.send_event(UserAction::ServerStopFinished(result));
+            });
+    }
+
+    fn server_stop_finished(&mut self, result: Result<(), String>) {
+        match result {
+            Ok(()) => {
+                // A stop and a start run the installed server, which is what a
+                // pending restart-when-idle waits for: nothing is left to do.
+                update_flow::clear_idle_restart(&update_flow::idle_restart_file());
+                self.server = server_state::ServerState::Stopped {
+                    since: SystemTime::now(),
+                };
+                for host in self.windows.values_mut() {
+                    host.server_card_dismissed = false;
+                    rail_toast(host, " pmux server stopped; sessions saved ");
+                    host.dirty = true;
+                    host.window.request_redraw();
+                }
+            }
+            Err(message) => {
+                for host in self.windows.values_mut() {
+                    rail_error_toast(
+                        host,
+                        &format!(" could not stop the pmux server: {message} "),
+                    );
+                    host.window.request_redraw();
+                }
+            }
         }
     }
 
@@ -21227,8 +21312,17 @@ impl App {
         let _ = std::thread::Builder::new()
             .name("server-start".into())
             .spawn(move || {
-                let result = daemon_startup::ensure_pmuxd_started(&pmux_bin(), &socket)
-                    .map_err(|error| format!("{error:#}"));
+                // Sessions saved by Save and stop come back with the server.
+                let saved = prismattyc_mux::workspace::load(&socket)
+                    .ok()
+                    .flatten()
+                    .is_some();
+                let result = if saved {
+                    daemon_startup::start_restoring(&pmux_bin(), &socket)
+                } else {
+                    daemon_startup::ensure_pmuxd_started(&pmux_bin(), &socket)
+                }
+                .map_err(|error| format!("{error:#}"));
                 let _ = proxy.send_event(UserAction::ServerStartFinished(result));
             });
     }
@@ -22727,6 +22821,7 @@ impl ApplicationHandler<UserAction> for App {
             UserAction::FullUpdate(event) => update_flow::event(self, event),
             UserAction::IdleRestartReady => update_flow::begin_idle_restart(self),
             UserAction::ServerStartFinished(result) => self.server_start_finished(result),
+            UserAction::ServerStopFinished(result) => self.server_stop_finished(result),
             UserAction::AccessKit(event) => self.handle_accesskit(event_loop, event),
         }
     }

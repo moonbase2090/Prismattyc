@@ -32,6 +32,26 @@ pub(crate) fn ensure_pmuxd_started(pmux: &Path, socket: &Path) -> Result<()> {
     Ok(())
 }
 
+/// `pmux up --restore-workspace`: start the server with the sessions a
+/// Save and stop recorded.
+pub(crate) fn start_restoring(pmux: &Path, socket: &Path) -> Result<()> {
+    let output = prismattyc_process::spawn(
+        prismattyc_mux::platform::hidden_capture_command(pmux)
+            .args(["up", "--restore-workspace"])
+            .env("PMUX_SOCKET", socket)
+            .stdin(Stdio::null()),
+    )
+    .and_then(std::process::Child::wait_with_output)
+    .with_context(|| format!("start pmuxd using {}", pmux.display()))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "pmuxd startup failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

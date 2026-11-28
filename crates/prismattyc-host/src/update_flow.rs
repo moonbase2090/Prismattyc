@@ -1143,7 +1143,7 @@ pub(super) struct IdleConsent {
 }
 
 /// Where a restart-when-idle choice is remembered, next to this server's spaces.
-fn idle_restart_file() -> PathBuf {
+pub(super) fn idle_restart_file() -> PathBuf {
     prismattyc_mux::spaces_dir().join("restart-when-idle")
 }
 

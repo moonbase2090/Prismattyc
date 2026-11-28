@@ -43,6 +43,9 @@ enum Choice {
     },
     Result,
     Retry,
+    /// Save every session, then stop the pmux server (asks first).
+    StopServer,
+    StartServer,
 }
 
 #[derive(Clone)]
@@ -102,6 +105,10 @@ pub(super) struct Panel {
     /// Live `layout` while Graphite chrome is on, else None. The Layout rows
     /// are shown only when this is set (#150).
     chrome_layout: Option<config::LayoutMode>,
+    /// The pmux server answers: the update menu offers Stop, else Start.
+    server_running: bool,
+    /// Stop was chosen once; the next Enter on it saves and stops.
+    stop_armed: bool,
 }
 
 impl Panel {
@@ -405,6 +412,27 @@ impl Panel {
                         label,
                         detail,
                         Choice::Command(args.into_iter().map(str::to_owned).collect()),
+                    );
+                }
+                if self.server_running {
+                    self.row(
+                        "Stop the pmux server…",
+                        "Save every session, then stop; Start brings them back",
+                        Choice::StopServer,
+                    );
+                    if self.stop_armed {
+                        let sessions = attach_log::live_snapshot()
+                            .map_or(0, |snapshot| snapshot.sessions.len());
+                        self.note_rows(&format!(
+                            "Enter again saves {sessions} {} and stops the server · Esc cancels",
+                            if sessions == 1 { "session" } else { "sessions" }
+                        ));
+                    }
+                } else {
+                    self.row(
+                        "Start the pmux server",
+                        "Start it and restore the saved sessions",
+                        Choice::StartServer,
                     );
                 }
             }
@@ -875,6 +903,30 @@ pub(super) fn maintenance(host: &mut HostState) {
     }
 }
 
+/// Open Update and restart on Stop the pmux server, already asking for the
+/// confirming Enter (the `stop_server` palette action).
+pub(super) fn stop_server(host: &mut HostState) {
+    maintenance(host);
+    let Some(panel) = host.space_panel.as_mut() else {
+        return;
+    };
+    if !panel.server_running {
+        return;
+    }
+    panel.stop_armed = true;
+    panel.rebuild();
+    let selection = panel
+        .rows
+        .iter()
+        .position(|row| matches!(row.choice, Choice::StopServer))
+        .and_then(|row| panel.selection_of(row));
+    if let (Some(selection), Some(menu)) = (selection, host.context_menu.as_mut()) {
+        menu.selected = selection;
+    }
+    host.dirty = true;
+    host.window.request_redraw();
+}
+
 /// The row that starts Update and restart all components. Its description may
 /// wrap onto rows of its own, which do nothing when chosen.
 #[cfg(test)]
@@ -1030,6 +1082,8 @@ pub(super) fn open(host: &mut HostState, name: String) {
         columns: panel_columns(host),
         chrome_layout: (host.spacing.chrome_style == config::ChromeStyle::Graphite)
             .then_some(host.spacing.layout),
+        server_running: host.server == crate::server_state::ServerState::Running,
+        stop_armed: false,
     });
     command(
         host,
@@ -1309,6 +1363,24 @@ pub(super) fn activate(host: &mut HostState, index: usize) {
         }
         Choice::Command(args) => {
             command(host, args, "maintenance");
+        }
+        Choice::StopServer if !panel.stop_armed => {
+            panel.stop_armed = true;
+            panel.rebuild();
+            host.dirty = true;
+            host.window.request_redraw();
+            // Keep the selection on Stop for the confirming Enter.
+            return;
+        }
+        Choice::StopServer => {
+            host.server_card_request = Some(crate::server_state::CardAction::Stop);
+            close_context_menu(host);
+            return;
+        }
+        Choice::StartServer => {
+            host.server_card_request = Some(crate::server_state::CardAction::Start);
+            close_context_menu(host);
+            return;
         }
         Choice::None | Choice::Message => return,
         Choice::Settings => {
@@ -1983,6 +2055,8 @@ mod maintenance_tests {
             scroll: 0,
             columns,
             chrome_layout: None,
+            server_running: true,
+            stop_armed: false,
         };
         panel.rebuild();
         panel
@@ -2003,6 +2077,50 @@ mod maintenance_tests {
             .iter()
             .find(|row| row.label == label)
             .unwrap_or_else(|| panic!("no row {label}"))
+    }
+
+    #[test]
+    fn the_update_menu_offers_stop_with_a_second_enter_or_start_when_stopped() {
+        let mut panel = update_panel(Page::Maintenance, 100);
+        let stop = panel
+            .rows
+            .iter()
+            .position(|row| matches!(row.choice, Choice::StopServer))
+            .expect("Stop while the server runs");
+        assert_eq!(panel.rows[stop].label, "Stop the pmux server…");
+        assert!(panel.rows[stop].kind.focusable());
+        assert!(!panel
+            .rows
+            .iter()
+            .any(|row| row.label.starts_with("Enter again")));
+        // The first Enter only arms it: a non-focusable line asks again.
+        panel.stop_armed = true;
+        panel.rebuild();
+        let note = &panel.rows[stop + 1];
+        assert!(
+            note.label.starts_with("Enter again saves"),
+            "{}",
+            note.label
+        );
+        assert!(!note.kind.focusable());
+        assert!(!panel
+            .rows
+            .iter()
+            .any(|row| matches!(row.choice, Choice::StartServer)));
+        // Stopped: Start takes Stop's place.
+        panel.server_running = false;
+        panel.stop_armed = false;
+        panel.rebuild();
+        assert!(!panel
+            .rows
+            .iter()
+            .any(|row| matches!(row.choice, Choice::StopServer)));
+        let start = panel
+            .rows
+            .iter()
+            .find(|row| matches!(row.choice, Choice::StartServer))
+            .expect("Start while the server is stopped");
+        assert_eq!(start.label, "Start the pmux server");
     }
 
     #[test]
@@ -2051,7 +2169,7 @@ mod maintenance_tests {
         assert!(!seen.iter().any(|label| label == "Update source"));
         let _ = menu.key(&Key::Named(NamedKey::End), ModifiersState::empty(), count);
         let last = panel.row_at(menu.selected).unwrap();
-        assert_eq!(panel.rows[last].label, "Restart daemon");
+        assert_eq!(panel.rows[last].label, "Stop the pmux server…");
     }
 
     #[test]
@@ -2403,6 +2521,8 @@ mod layout_tests {
             scroll: 0,
             columns: 100,
             chrome_layout,
+            server_running: true,
+            stop_armed: false,
         };
         panel.rebuild();
         panel
@@ -3037,6 +3157,8 @@ mod resize_tests {
             scroll: 0,
             columns: 80,
             chrome_layout: None,
+            server_running: true,
+            stop_armed: false,
         };
         panel.rebuild();
         let back = panel
@@ -3079,6 +3201,8 @@ mod resize_tests {
             scroll: 0,
             columns: 60,
             chrome_layout: None,
+            server_running: true,
+            stop_armed: false,
         };
         panel.rebuild();
         let full = full_update_row(&panel).expect("the full update row exists");

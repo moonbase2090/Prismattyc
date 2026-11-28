@@ -126,8 +126,9 @@ Restart those components before removing the retained bundle.
 On macOS and Linux, **Save and restart** first asks the running pmux server to
 hand its sessions to the new one. The new pmux server takes over each pane's
 terminal in the same process, so the programs in your panes keep running with
-their screens, scrollback and unsaved state. Nothing is restarted, and the
-result reports the server as updated live. App windows reconnect to their
+their screens, scrollback and unsaved state. Nothing is restarted: the
+result says the pmux server moved to the new version without stopping, and
+names the sessions that kept running. App windows reconnect to their
 panes by themselves. An interactive `pmux attach` in another terminal also reconnects
 to its current pane, repaints the screen, and accepts input again. If the
 server process is replaced or the pane no longer exists, the attach ends.

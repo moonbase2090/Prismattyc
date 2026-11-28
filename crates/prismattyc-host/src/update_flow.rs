@@ -119,6 +119,34 @@ impl Carried {
 pub(super) struct Restored {
     restored: Vec<String>,
     lost: Vec<String>,
+    /// The sessions were handed to the new server without stopping
+    /// (`updated_live`); they kept running rather than being restored.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    live: bool,
+}
+
+/// Whether a `pmux restart --json` report handed the sessions to the new
+/// daemon live (`updated_live`) instead of stopping and restarting it.
+fn updated_live(report: &str) -> bool {
+    serde_json::from_str::<Value>(report).is_ok_and(|value| {
+        value["components"].as_array().is_some_and(|components| {
+            components.iter().any(|component| {
+                component["component"] == "daemon" && component["status"] == "updated_live"
+            })
+        })
+    })
+}
+
+/// The result's line about the daemon: a live update kept the sessions
+/// running on the new server; the fallback path restarted it.
+fn daemon_line(live: bool, version: &str) -> String {
+    if live {
+        format!(
+            "The pmux server moved to {version} without stopping; running sessions kept running."
+        )
+    } else {
+        format!("The daemon restarted on {version}.")
+    }
 }
 
 impl Restored {
@@ -151,10 +179,14 @@ impl Restored {
         Some(Self {
             restored: names("restored"),
             lost: names("lost"),
+            live: updated_live(report),
         })
     }
 
     fn summary(&self) -> String {
+        if self.live {
+            return self.live_summary();
+        }
         let mut text = match self.restored.len() {
             0 => "No sessions were restored.".to_string(),
             1 => format!(
@@ -172,6 +204,29 @@ impl Restored {
         if !self.lost.is_empty() {
             text.push_str(&format!(
                 "\nNot restored: {}. Restore them from the saved configuration.",
+                self.lost.join(", ")
+            ));
+        }
+        text
+    }
+
+    /// After a live update nothing was restored: the same processes kept
+    /// running, with their layouts and scrollback.
+    fn live_summary(&self) -> String {
+        let mut text = match self.restored.len() {
+            0 => "No sessions were running.".to_string(),
+            1 => format!(
+                "1 session kept running through the update: {}.",
+                self.restored[0]
+            ),
+            n => format!(
+                "{n} sessions kept running through the update: {}.",
+                self.restored.join(", ")
+            ),
+        };
+        if !self.lost.is_empty() {
+            text.push_str(&format!(
+                "\nNot running after the update: {}. Restore them from the saved configuration.",
                 self.lost.join(", ")
             ));
         }
@@ -694,6 +749,7 @@ fn complete_install(
     let restart_args = restart.iter().map(String::as_str).collect::<Vec<_>>();
     let (restarted, steps) = restart_daemon(&installed, &restart_args, report)
         .context("The files are installed, but the daemon restart failed")?;
+    let live = updated_live(&restarted);
     let restored = (!delete_consent)
         .then(|| Restored::from_report(&restarted))
         .flatten();
@@ -727,9 +783,9 @@ fn complete_install(
     report(restart_step("Relaunching the app", steps + 2, steps));
     Ok((
         format!(
-            "Prismattyc {} is installed. The daemon restarted on {}.\n{}{}\n{}{}",
+            "Prismattyc {} is installed. {}\n{}{}\n{}{}",
             plan.target(),
-            actual,
+            daemon_line(live, actual),
             launcher,
             space_panel::maintenance_result(&mcp),
             space_panel::maintenance_result(&versions.to_string()),
@@ -1533,6 +1589,68 @@ echo note >&2"#,
     }
 
     #[test]
+    fn a_live_update_says_the_sessions_kept_running() {
+        let live = r#"{"components":[{"component":"daemon","status":"updated_live","version":"0.4.0"},{"component":"sessions","lost":[],"restored":["work","notes"],"status":"restored"},{"component":"plugins","status":"reconciled"}],"status":"restart_results"}"#;
+        assert!(updated_live(live));
+        let kept = Restored::from_report(live).expect("sessions entry");
+        let text = kept.summary();
+        assert_eq!(
+            text,
+            "2 sessions kept running through the update: work, notes."
+        );
+        assert!(
+            !text.contains("Restored") && !text.contains("started again"),
+            "{text}"
+        );
+        assert_eq!(
+            daemon_line(true, "0.4.0"),
+            "The pmux server moved to 0.4.0 without stopping; running sessions kept running."
+        );
+        let one_lost = r#"{"components":[{"component":"daemon","status":"updated_live","version":"0.4.0"},{"component":"sessions","lost":["gone"],"restored":["work"],"status":"partial"}],"status":"restart_results"}"#;
+        let text = Restored::from_report(one_lost).unwrap().summary();
+        assert!(
+            text.starts_with("1 session kept running through the update: work."),
+            "{text}"
+        );
+        assert!(
+            text.contains("Not running after the update: gone."),
+            "{text}"
+        );
+
+        // The fallback path (live update skipped or unavailable) restarted
+        // the daemon, and keeps the restart wording.
+        let fallback = r#"{"components":[{"component":"daemon","status":"live_update_skipped","detail":"refused"},{"component":"daemon","status":"restarted"},{"component":"sessions","lost":[],"restored":["work"],"status":"restored"}],"status":"restart_results"}"#;
+        assert!(!updated_live(fallback));
+        let restarted = Restored::from_report(fallback).unwrap();
+        assert!(
+            restarted.summary().starts_with("Restored 1 session"),
+            "{}",
+            restarted.summary()
+        );
+        assert_eq!(
+            daemon_line(false, "0.4.0"),
+            "The daemon restarted on 0.4.0."
+        );
+        assert!(!updated_live("not json"));
+    }
+
+    #[test]
+    fn a_live_resume_round_trips_and_an_older_resume_reads_as_restarted() {
+        let kept = Restored {
+            restored: vec!["work".into()],
+            lost: Vec::new(),
+            live: true,
+        };
+        let json = serde_json::to_string(&kept).unwrap();
+        assert!(json.contains("\"live\":true"), "{json}");
+        assert_eq!(serde_json::from_str::<Restored>(&json).unwrap(), kept);
+        // An app from before this field wrote no `live`: it reads as a restart.
+        let older: Restored = serde_json::from_str(r#"{"restored":["work"],"lost":[]}"#).unwrap();
+        assert!(!older.live);
+        assert!(older.summary().starts_with("Restored 1 session"));
+    }
+
+    #[test]
     fn an_unconfirmed_restore_keeps_the_saved_configuration_question() {
         // The restart could not read the new daemon's sessions: nothing is
         // known to be back, so the app must still offer the saved file.
@@ -1559,6 +1677,7 @@ echo note >&2"#,
             restored: Some(Restored {
                 restored: vec!["work".into()],
                 lost: Vec::new(),
+                live: false,
             }),
             views: Vec::new(),
             progress: None,

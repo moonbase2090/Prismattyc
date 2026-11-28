@@ -509,9 +509,13 @@ fn release_failure_text(space: &str, failures: &[String]) -> Option<String> {
         1 => String::new(),
         n => format!(" (and {} more)", n - 1),
     };
+    let (what, still) = if failures.len() == 1 {
+        ("a session", "It still belongs")
+    } else {
+        ("sessions", "They still belong")
+    };
     Some(format!(
-        " Start fresh could not release {} from {space}: {first}{more}. They still belong to {space}. ",
-        if failures.len() == 1 { "a session" } else { "sessions" },
+        " Start fresh could not release {what} from {space}: {first}{more}. {still} to {space}. "
     ))
 }
 
@@ -761,9 +765,10 @@ mod tests {
         assert_eq!(release_failure_text("work", &[]), None);
         let many = release_failure_text("work", &["a: x".into(), "b: y".into()]).unwrap();
         assert!(
-            many.contains("sessions from work: a: x (and 1 more)"),
+            many.contains("sessions from work: a: x (and 1 more). They still belong to work."),
             "{many}"
         );
+        assert!(text.ends_with("It still belongs to work. "), "{text}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

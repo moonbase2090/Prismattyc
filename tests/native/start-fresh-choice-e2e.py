@@ -8,7 +8,8 @@ Restore before the key arrives. The hold then runs the real client.
 Start fresh must leave an empty window, keep the saved session process
 alive, and drop that session's Space owner so it can be attached again.
 Restore must show the saved Space, tabs, and panes. Neither choice may
-kill the session.
+kill the session. On Linux the script starts a private display and sends
+the keys to that host window.
 """
 
 import argparse
@@ -18,6 +19,7 @@ from pathlib import Path
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -51,26 +53,49 @@ class Keys:
     ENTER = 36
 
     def __init__(self, pid):
-        import ctypes
         self.pid = pid
-        quartz = ctypes.CDLL(
-            "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")
-        quartz.CGEventCreateKeyboardEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_bool]
-        quartz.CGEventCreateKeyboardEvent.restype = ctypes.c_void_p
-        quartz.CGEventPostToPid.argtypes = [ctypes.c_int, ctypes.c_void_p]
-        quartz.CFRelease.argtypes = [ctypes.c_void_p]
-        self.quartz = quartz
+        if sys.platform == "darwin":
+            import ctypes
+            quartz = ctypes.CDLL(
+                "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")
+            quartz.CGEventCreateKeyboardEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_bool]
+            quartz.CGEventCreateKeyboardEvent.restype = ctypes.c_void_p
+            quartz.CGEventPostToPid.argtypes = [ctypes.c_int, ctypes.c_void_p]
+            quartz.CFRelease.argtypes = [ctypes.c_void_p]
+            self.quartz = quartz
+            self.front()
+            return
+        self.wid = wait_for(self._window, "host window", timeout=15)
         self.front()
 
+    def _window(self):
+        result = subprocess.run(
+            ["xdotool", "search", "--onlyvisible", "--pid", str(self.pid)],
+            capture_output=True, text=True, timeout=5)
+        lines = [line for line in result.stdout.splitlines() if line.strip()]
+        return lines[-1] if lines else None
+
     def front(self):
+        if sys.platform == "darwin":
+            subprocess.run(
+                ["osascript", "-e",
+                 'tell application "System Events" to set frontmost of '
+                 f'(first process whose unix id is {self.pid}) to true'],
+                capture_output=True, timeout=20)
+            return
         subprocess.run(
-            ["osascript", "-e",
-             'tell application "System Events" to set frontmost of '
-             f'(first process whose unix id is {self.pid}) to true'],
-            capture_output=True, timeout=20)
+            ["xdotool", "windowfocus", "--sync", self.wid],
+            capture_output=True, timeout=10)
 
     def tap(self, code):
         self.front()
+        if sys.platform != "darwin":
+            name = "Escape" if code == self.ESCAPE else "Return"
+            subprocess.run(
+                ["xdotool", "key", "--clearmodifiers", "--window", self.wid, name],
+                check=True, timeout=10)
+            time.sleep(0.05)
+            return
         for pressed in (True, False):
             event = self.quartz.CGEventCreateKeyboardEvent(None, code, pressed)
             if not event:
@@ -130,6 +155,23 @@ class Fixture:
             'automatic_update_checks = false\n'
             'font_px = 14.0\n'
         )
+        self.xvfb = None
+        if sys.platform.startswith("linux"):
+            self._start_display()
+
+    def _start_display(self):
+        log = (self.root / "xvfb.log").open("w")
+        child = subprocess.Popen(
+            ["Xvfb", "-displayfd", "1", "-screen", "0", "1400x900x24", "-nolisten", "tcp"],
+            stdout=subprocess.PIPE, stderr=log, start_new_session=True)
+        line = child.stdout.readline().decode().strip()
+        log.close()
+        if not line:
+            raise AssertionError("private display did not start")
+        self.xvfb = child
+        self.env["DISPLAY"] = f":{line}"
+        self.env["WINIT_UNIX_BACKEND"] = "x11"
+        os.environ["DISPLAY"] = self.env["DISPLAY"]
 
     def spawn(self, binary, *args):
         log = (self.root / f"{binary}-{len(self.children)}.log").open("w")
@@ -186,6 +228,8 @@ class Fixture:
             pass
         for child in reversed(self.children):
             self.kill(child)
+        if self.xvfb is not None:
+            self.kill(self.xvfb)
         # A delayed `pmux up` can daemonize after the host process group is gone.
         root = str(self.root)
         try:

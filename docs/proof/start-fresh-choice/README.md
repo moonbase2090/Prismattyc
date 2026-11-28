@@ -18,4 +18,5 @@ so it can be attached again. The empty window's shell prints the machine
 account, so that frame is not stored here.
 
 The script is `tests/native/start-fresh-choice-e2e.py`. It covers Esc, Enter,
-and the deadline. Linux was not run for this window flow.
+and the deadline. On Linux it starts a private display and sends those keys
+to the host window.

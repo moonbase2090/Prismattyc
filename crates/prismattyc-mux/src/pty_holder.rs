@@ -251,24 +251,12 @@ mod windows {
             LOGON32_LOGON_NETWORK, LOGON32_PROVIDER_DEFAULT,
         };
 
-        fn pipe_dacl(pipe: &File) -> String {
-            let mut descriptor = std::ptr::null_mut();
-            // SAFETY: a live pipe handle; the descriptor is LocalAlloc'd.
-            let status = unsafe {
-                GetSecurityInfo(
-                    pipe.as_raw_handle() as HANDLE,
-                    SE_KERNEL_OBJECT,
-                    DACL_SECURITY_INFORMATION,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    &mut descriptor,
-                )
-            };
-            assert_eq!(status, 0, "GetSecurityInfo");
+        /// A descriptor's DACL as SDDL text. Windows writes well-known SIDs
+        /// by alias (the built-in Administrator account is `LA`), so expected
+        /// text must go through here too before it is compared.
+        fn dacl_text(descriptor: windows_sys::Win32::Security::PSECURITY_DESCRIPTOR) -> String {
             let mut text = std::ptr::null_mut();
-            // SAFETY: `descriptor` came from GetSecurityInfo above.
+            // SAFETY: `descriptor` is a valid security descriptor.
             let ok = unsafe {
                 ConvertSecurityDescriptorToStringSecurityDescriptorW(
                     descriptor,
@@ -289,11 +277,49 @@ mod windows {
             }
             // SAFETY: `len` UTF-16 units were just measured.
             let sddl = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text, len) });
-            // SAFETY: both were LocalAlloc'd by the calls above.
-            unsafe {
-                windows_sys::Win32::Foundation::LocalFree(text.cast());
-                windows_sys::Win32::Foundation::LocalFree(descriptor);
-            }
+            // SAFETY: LocalAlloc'd by the call above.
+            unsafe { windows_sys::Win32::Foundation::LocalFree(text.cast()) };
+            sddl
+        }
+
+        /// `sddl` as Windows itself would print it.
+        fn canonical(sddl: &str) -> String {
+            let mut descriptor = std::ptr::null_mut();
+            // SAFETY: NUL-terminated input; the descriptor is LocalAlloc'd.
+            let ok = unsafe {
+                windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    wide(sddl).as_ptr(),
+                    SDDL_REVISION_1,
+                    &mut descriptor,
+                    std::ptr::null_mut(),
+                )
+            };
+            assert_ne!(ok, 0, "parse {sddl}");
+            let text = dacl_text(descriptor);
+            // SAFETY: LocalAlloc'd by the call above.
+            unsafe { windows_sys::Win32::Foundation::LocalFree(descriptor) };
+            text
+        }
+
+        fn pipe_dacl(pipe: &File) -> String {
+            let mut descriptor = std::ptr::null_mut();
+            // SAFETY: a live pipe handle; the descriptor is LocalAlloc'd.
+            let status = unsafe {
+                GetSecurityInfo(
+                    pipe.as_raw_handle() as HANDLE,
+                    SE_KERNEL_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut descriptor,
+                )
+            };
+            assert_eq!(status, 0, "GetSecurityInfo");
+            let sddl = dacl_text(descriptor);
+            // SAFETY: LocalAlloc'd by GetSecurityInfo.
+            unsafe { windows_sys::Win32::Foundation::LocalFree(descriptor) };
             sddl
         }
 
@@ -313,7 +339,13 @@ mod windows {
             let path = test_pipe_path();
             let pipe = create_pipe(&path, PIPE_ACCESS_INBOUND).unwrap();
             let sid = crate::platform::current_user_sid().unwrap();
-            assert_eq!(pipe_dacl(&pipe), format!("D:P(A;;FA;;;{sid})"));
+            let dacl = pipe_dacl(&pipe);
+            assert_eq!(dacl, canonical(&format!("D:P(A;;FA;;;{sid})")));
+            assert_eq!(dacl.matches("(A;").count(), 1, "one allow entry: {dacl}");
+            assert!(
+                dacl.starts_with("D:P"),
+                "protected from inherited entries: {dacl}"
+            );
 
             if let (Ok(user), Ok(password)) = (
                 std::env::var("PMUX_TEST_OTHER_USER"),

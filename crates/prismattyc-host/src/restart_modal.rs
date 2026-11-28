@@ -40,7 +40,7 @@ const ONE_CONFIRM: [(&str, &str, update_flow::Action); 3] = [
 const OPTIONS_LIVE: [(&str, &str, update_flow::Action); 3] = [
     (
         "Save and restart",
-        "Sessions keep running; saved in case they cannot",
+        "Sessions keep running; saved as a fallback",
         update_flow::Action::SaveAndContinue,
     ),
     OPTIONS[1],
@@ -1418,7 +1418,7 @@ mod tests {
         review.live = true;
         assert_eq!(
             review.rows()[0],
-            "Save and restart: Sessions keep running; saved in case they cannot"
+            "Save and restart: Sessions keep running; saved as a fallback"
         );
         assert_eq!(
             review.rows()[1],

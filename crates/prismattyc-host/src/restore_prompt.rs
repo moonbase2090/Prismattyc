@@ -75,6 +75,46 @@ impl RestorePrompt {
         });
     }
 
+    /// A choice made while the daemon is still starting waits for it. Esc
+    /// selects Start fresh and says so, so the key visibly took effect.
+    fn defer(&mut self, accept: bool, now: Instant) {
+        if accept {
+            self.declined = false;
+            self.automatic_at = Some(now);
+        } else {
+            // The daemon may still be restoring this Space. Detach only after
+            // that startup returns, or it would put the sessions back.
+            self.declined = true;
+            self.automatic_at = None;
+            self.selected = 1;
+        }
+    }
+
+    /// The two choices, with what each will do right now.
+    fn rows(&self) -> [PaletteRow; 2] {
+        let waiting = self.startup.is_some();
+        [
+            PaletteRow::plain(
+                "Restore workspace".into(),
+                if self.automatic_at.is_some() && !self.declined {
+                    "Restoring automatically. Esc starts fresh.".into()
+                } else {
+                    "Reconnect saved sessions, tabs, panes, and Spaces.".into()
+                },
+                "R".into(),
+            ),
+            PaletteRow::plain(
+                "Start fresh".into(),
+                if self.declined && waiting {
+                    "Starting fresh once the pmux server has started…".into()
+                } else {
+                    "Keep this fresh window.".into()
+                },
+                "Esc".into(),
+            ),
+        ]
+    }
+
     pub(super) fn deadline(&self) -> Option<Instant> {
         self.startup
             .is_none()
@@ -177,15 +217,9 @@ pub(super) fn hover_button(host: &HostState) -> Option<usize> {
 
 pub(super) fn finish(host: &mut HostState, accept: bool) {
     if let Some(prompt) = host.restore_prompt.as_mut().filter(|p| p.startup.is_some()) {
-        if accept {
-            prompt.declined = false;
-            prompt.automatic_at = Some(Instant::now());
-        } else {
-            // The daemon may still be restoring this Space. Detach only after
-            // that startup returns, or it would put the sessions back.
-            prompt.declined = true;
-            prompt.automatic_at = None;
-        }
+        prompt.defer(accept, Instant::now());
+        host.dirty = true;
+        host.window.request_redraw();
         return;
     }
     let Some(prompt) = host.restore_prompt.take() else {
@@ -263,7 +297,7 @@ pub(super) fn finish(host: &mut HostState, accept: bool) {
             }
         }
         if let Some(name) = space_name {
-            detach_saved_sessions(&name);
+            host.start_fresh_release = release_saved_sessions(&name, host.ui_wake.clone());
         }
     }
     host.dirty = true;
@@ -392,49 +426,113 @@ fn countdown_step(
     }
 }
 
-/// Drop live Space ownership for the saved sessions. Processes keep running
-/// and stay in the attach list. `space remove` without `--kill` is the
-/// existing release; it does not destroy the session.
-fn detach_saved_sessions(space_name: &str) {
-    let Some(socket) = host_mux_socket() else {
-        return;
-    };
-    if !socket.exists() {
-        return;
-    }
-    let Ok(space) = load_space(&spaces_dir(), space_name) else {
-        return;
-    };
-    let pmux = find_mux_bin();
-    for session in space.sessions {
+/// Start fresh releasing a saved Space's sessions: a worker thread, and the
+/// sessions it could not release (`name: reason`) once it is done.
+pub(super) struct Release {
+    space: String,
+    done: std::sync::mpsc::Receiver<Vec<String>>,
+}
+
+/// Drop live Space ownership for the saved sessions, off the window thread.
+/// Processes keep running and stay in the attach list. `space remove`
+/// without `--kill` is the existing release; it does not destroy the session.
+fn release_saved_sessions(space_name: &str, wake: mux::Wake) -> Option<Release> {
+    let socket = host_mux_socket().filter(|socket| socket.exists())?;
+    let space = load_space(&spaces_dir(), space_name).ok()?;
+    let names: Vec<String> = space.sessions.into_iter().map(|s| s.name).collect();
+    spawn_release(find_mux_bin(), socket, space_name.to_owned(), names, wake)
+}
+
+/// Run [`release_sessions`] on a worker thread and return at once.
+fn spawn_release(
+    pmux: PathBuf,
+    socket: PathBuf,
+    space: String,
+    names: Vec<String>,
+    wake: mux::Wake,
+) -> Option<Release> {
+    let (sender, done) = std::sync::mpsc::channel();
+    let worker_space = space.clone();
+    std::thread::Builder::new()
+        .name("start-fresh-release".into())
+        .spawn(move || {
+            let _ = sender.send(release_sessions(&pmux, &socket, &worker_space, &names));
+            wake();
+        })
+        .ok()?;
+    Some(Release { space, done })
+}
+
+/// Release each session from the Space; returns `name: reason` for each
+/// one that could not be released.
+fn release_sessions(
+    pmux: &std::path::Path,
+    socket: &std::path::Path,
+    space: &str,
+    names: &[String],
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    for name in names {
         let output = prismattyc_process::spawn(
-            prismattyc_mux::platform::hidden_capture_command(&pmux)
+            prismattyc_mux::platform::hidden_capture_command(pmux)
                 .arg("--socket")
-                .arg(&socket)
+                .arg(socket)
                 .arg("space")
                 .arg("remove")
-                .arg(space_name)
+                .arg(space)
                 .arg("--session")
-                .arg(&session.name),
+                .arg(name),
         )
         .and_then(std::process::Child::wait_with_output);
-        match output {
-            Ok(output) if output.status.success() => {}
+        let reason = match output {
+            Ok(output) if output.status.success() => continue,
             Ok(output) => {
-                let detail = String::from_utf8_lossy(&output.stderr);
-                eprintln!(
-                    "prismattyc-host: could not detach {}: {}",
-                    session.name,
-                    detail.trim()
-                );
+                let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+                if detail.is_empty() {
+                    format!("pmux exited with {}", output.status)
+                } else {
+                    detail
+                }
             }
-            Err(error) => {
-                eprintln!(
-                    "prismattyc-host: could not detach {}: {error}",
-                    session.name
-                );
-            }
+            Err(error) => error.to_string(),
+        };
+        eprintln!("prismattyc-host: could not detach {name}: {reason}");
+        failures.push(format!("{name}: {reason}"));
+    }
+    failures
+}
+
+/// The error the app shows when Start fresh could not release sessions.
+fn release_failure_text(space: &str, failures: &[String]) -> Option<String> {
+    let first = failures.first()?;
+    let more = match failures.len() {
+        1 => String::new(),
+        n => format!(" (and {} more)", n - 1),
+    };
+    Some(format!(
+        " Start fresh could not release {} from {space}: {first}{more}. They still belong to {space}. ",
+        if failures.len() == 1 { "a session" } else { "sessions" },
+    ))
+}
+
+/// Show the result of Start fresh's release once its worker is done.
+pub(super) fn poll_release(host: &mut HostState) {
+    let Some(release) = host.start_fresh_release.as_ref() else {
+        return;
+    };
+    let failures = match release.done.try_recv() {
+        Ok(failures) => failures,
+        Err(std::sync::mpsc::TryRecvError::Empty) => return,
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            vec!["the release worker stopped".to_owned()]
         }
+    };
+    let space = release.space.clone();
+    host.start_fresh_release = None;
+    if let Some(text) = release_failure_text(&space, &failures) {
+        rail_error_toast(host, &text);
+        host.dirty = true;
+        host.window.request_redraw();
     }
 }
 
@@ -466,22 +564,7 @@ pub(super) fn paint(host: &mut HostState, buffer: &mut [u32], width: usize, heig
     let Some(prompt) = host.restore_prompt.as_ref() else {
         return;
     };
-    let rows = [
-        PaletteRow::plain(
-            "Restore workspace".into(),
-            if prompt.automatic_at.is_some() {
-                "Restoring automatically. Esc starts fresh.".into()
-            } else {
-                "Reconnect saved sessions, tabs, panes, and Spaces.".into()
-            },
-            "R".into(),
-        ),
-        PaletteRow::plain(
-            "Start fresh".into(),
-            "Keep this fresh window.".into(),
-            "Esc".into(),
-        ),
-    ];
+    let rows = prompt.rows();
     let sections = [PaletteSection {
         header: "Restore workspace",
         subtitle: prompt.layout.space.as_deref().unwrap_or("Previous window"),
@@ -588,6 +671,133 @@ mod tests {
             ..Default::default()
         })
         .unwrap()
+    }
+
+    #[test]
+    fn esc_during_startup_selects_start_fresh_and_says_it_waits() {
+        let mut prompt = prompt();
+        let (_sender, receiver) = std::sync::mpsc::channel();
+        prompt.startup = Some(receiver);
+        prompt.automatic_at = Some(Instant::now());
+        assert_eq!(prompt.rows()[1].describe, "Keep this fresh window.");
+        prompt.defer(false, Instant::now());
+        assert!(prompt.declined);
+        assert_eq!(prompt.selected, 1, "Esc moves the selection to Start fresh");
+        let rows = prompt.rows();
+        assert_eq!(
+            rows[1].describe,
+            "Starting fresh once the pmux server has started…"
+        );
+        assert_eq!(
+            rows[0].describe,
+            "Reconnect saved sessions, tabs, panes, and Spaces."
+        );
+        // Changing the mind to Restore while still starting clears it.
+        prompt.defer(true, Instant::now());
+        assert!(!prompt.declined);
+        assert_eq!(prompt.rows()[1].describe, "Keep this fresh window.");
+        assert_eq!(
+            prompt.rows()[0].describe,
+            "Restoring automatically. Esc starts fresh."
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_failed_release_names_the_session_and_why() {
+        let dir = std::env::temp_dir().join(format!("prismattyc-release-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("calls");
+        let pmux = dir.join("pmux");
+        crate::test_support::write_script(
+            &pmux,
+            &format!(
+                "#!/bin/sh\necho \"$*\" >> {}\nfor a in \"$@\"; do last=$a; done\n\
+                 if [ \"$last\" = beta ]; then echo 'session beta is not in work' >&2; exit 1; fi\n",
+                log.display()
+            ),
+            "700",
+        );
+        let failures = release_sessions(
+            &pmux,
+            &dir.join("pmux.sock"),
+            "work",
+            &["alpha".into(), "beta".into()],
+        );
+        assert_eq!(failures, ["beta: session beta is not in work"]);
+        let calls = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            calls.contains("space remove work --session alpha")
+                && calls.contains("space remove work --session beta"),
+            "{calls}"
+        );
+        assert!(!calls.contains("--kill"), "a release never ends a session");
+        let text = release_failure_text("work", &failures).unwrap();
+        assert!(
+            text.contains(
+                "could not release a session from work: beta: session beta is not in work"
+            ),
+            "{text}"
+        );
+        assert_eq!(release_failure_text("work", &[]), None);
+        let many = release_failure_text("work", &["a: x".into(), "b: y".into()]).unwrap();
+        assert!(
+            many.contains("sessions from work: a: x (and 1 more)"),
+            "{many}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_release_runs_off_the_calling_thread() {
+        let dir =
+            std::env::temp_dir().join(format!("prismattyc-release-thread-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let go = dir.join("go");
+        let pmux = dir.join("pmux");
+        // Blocks until the test lets it go (at most about 30 s, so a release
+        // run on this thread fails the check below instead of hanging).
+        crate::test_support::write_script(
+            &pmux,
+            &format!(
+                "#!/bin/sh\nn=0\nwhile [ ! -e {} ] && [ $n -lt 600 ]; do sleep 0.05; n=$((n+1)); done\necho 'server busy' >&2\nexit 1\n",
+                go.display()
+            ),
+            "700",
+        );
+        let woke = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = woke.clone();
+        let wake: mux::Wake = std::sync::Arc::new(move || {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let release = spawn_release(
+            pmux,
+            dir.join("pmux.sock"),
+            "work".into(),
+            vec!["alpha".into()],
+            wake,
+        )
+        .expect("worker");
+        // pmux cannot finish before `go` exists, so this call returned first.
+        assert!(matches!(
+            release.done.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        std::fs::write(&go, b"").unwrap();
+        let failures = release
+            .done
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the worker reports");
+        assert_eq!(failures, ["alpha: server busy"]);
+        assert!(
+            woke.load(std::sync::atomic::Ordering::SeqCst),
+            "the window is woken"
+        );
+        assert_eq!(release.space, "work");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

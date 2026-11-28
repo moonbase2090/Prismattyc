@@ -1303,6 +1303,9 @@ struct HostState {
     /// untouched, until the splash is dismissed.
     splash: Option<splash::Splash>,
     restore_prompt: Option<restore_prompt::RestorePrompt>,
+    /// Start fresh releasing the saved Space's sessions on a worker; the
+    /// failures it reports, once done.
+    start_fresh_release: Option<restore_prompt::Release>,
     restart_modal: Option<restart_modal::RestartModal>,
     /// The last opt-in UI change line's state (see `ui_events`).
     ui_events_last: Option<serde_json::Value>,
@@ -4240,6 +4243,7 @@ impl App {
             let phase_started = Instant::now();
             maybe_e2e_dismiss_splash(host);
             restore_prompt::poll(host);
+            restore_prompt::poll_release(host);
             let due_link_opens = host.link_click_gesture.take_due(Instant::now());
             for url in due_link_opens {
                 let _ = open_url(&url);
@@ -4850,6 +4854,7 @@ impl App {
                 find: FindMode::default(),
                 splash,
                 restore_prompt,
+                start_fresh_release: None,
                 restart_modal: None,
                 ui_events_last: None,
                 ui_events_pending: Vec::new(),

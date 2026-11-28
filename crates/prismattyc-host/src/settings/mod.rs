@@ -1738,7 +1738,7 @@ pub(super) fn activate(host: &mut crate::HostState, index: usize) -> bool {
     true
 }
 
-fn follow_up(host: &mut crate::HostState) {
+pub(super) fn follow_up(host: &mut crate::HostState) {
     let Some(panel) = host.settings.as_mut() else {
         return;
     };

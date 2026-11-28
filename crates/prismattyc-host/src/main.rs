@@ -6386,6 +6386,10 @@ fn open_modal(host: &HostState) -> Option<&'static str> {
     }
 }
 
+fn server_card_accepts_input(host: &HostState) -> bool {
+    host.server_card_shown && open_modal(host).is_none() && host.splash.is_none()
+}
+
 /// Paint the modal scrim when a modal is open, and keep frames coming while
 /// it fades in.
 fn paint_modal_scrim(host: &mut HostState, buffer: &mut [u32], width: usize, height: usize) {
@@ -21620,7 +21624,7 @@ impl ApplicationHandler<UserAction> for App {
         if restart_modal::handle_pointer(host, &event) {
             return;
         }
-        if host.server_card_shown && host.settings.is_none() {
+        if server_card_accepts_input(host) {
             if let WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
@@ -21927,13 +21931,7 @@ impl ApplicationHandler<UserAction> for App {
                     restart_modal::dispatch_key(host, &event.logical_key, event.repeat);
                     return;
                 }
-                if host.server_card_shown
-                    && host.palette.is_none()
-                    && host.space_picker.is_none()
-                    && host.context_menu.is_none()
-                    && host.settings.is_none()
-                    && host.theme_picker.is_none()
-                {
+                if server_card_accepts_input(host) {
                     match server_state::key(&host.server, &event.logical_key) {
                         server_state::CardKey::Act(action) => {
                             host.server_card_request = Some(action);

@@ -58,6 +58,7 @@ fn exercise_in_window(full_settings: bool) {
                 verify_rail(host);
                 verify_dispatch(host);
                 verify_space_command_completions(host);
+                verify_server_card_pointer(&mut self.app, event_loop, id);
             }
             self.done = true;
             self.app.windows.clear();
@@ -88,6 +89,56 @@ fn exercise_in_window(full_settings: bool) {
     };
     event_loop.run_app(&mut proof).unwrap();
     assert!(proof.done, "the event loop must run the input assertions");
+}
+
+fn verify_server_card_pointer(app: &mut App, event_loop: &ActiveEventLoop, id: WindowId) {
+    let host = app.windows.get_mut(&id).unwrap();
+    quiet(host);
+    host.server_card_shown = true;
+    host.server_card_buttons = [
+        graphite::Rect::new(10, 10, 20, 20),
+        graphite::Rect::new(40, 10, 20, 20),
+    ];
+
+    for (x, expected) in [
+        (20.0, server_state::CardAction::Start),
+        (50.0, server_state::CardAction::LocalShell),
+    ] {
+        let host = app.windows.get_mut(&id).unwrap();
+        host.pointer_px = Some((x, 20.0));
+        app.window_event(event_loop, id, left_press());
+        assert_eq!(
+            app.windows.get_mut(&id).unwrap().server_card_request.take(),
+            Some(expected)
+        );
+    }
+
+    for (action, overlay) in [
+        (keybind::Action::CommandPalette, "palette"),
+        (keybind::Action::UpdateRestart, "space panel"),
+    ] {
+        let host = app.windows.get_mut(&id).unwrap();
+        quiet(host);
+        assert_eq!(dispatch(host, action), Dispatch::Handled);
+        assert_eq!(open_modal(host), Some(overlay));
+        for x in [20.0, 50.0] {
+            app.windows.get_mut(&id).unwrap().pointer_px = Some((x, 20.0));
+            app.window_event(event_loop, id, left_press());
+            assert_eq!(
+                app.windows.get(&id).unwrap().server_card_request,
+                None,
+                "clicks on the card must yield to the {overlay}"
+            );
+        }
+    }
+}
+
+fn left_press() -> WindowEvent {
+    WindowEvent::MouseInput {
+        device_id: winit::event::DeviceId::dummy(),
+        state: ElementState::Pressed,
+        button: MouseButton::Left,
+    }
 }
 
 fn verify_full_settings_menus(host: &mut HostState) {

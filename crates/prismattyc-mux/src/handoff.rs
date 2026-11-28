@@ -306,36 +306,23 @@ pub fn exec(
     }
 }
 
-/// The new server's arguments: this server's own, with the record descriptor
-/// in place of any earlier one, before a `--` that starts the first pane's
-/// command (after it, the flag would be that command's argument).
+/// The new server's arguments: the record descriptor first, then this
+/// server's own arguments. Anything after the first positional argument (the
+/// first pane's program, with or without `--`) belongs to that program, so
+/// the flag must come before it. An earlier record flag, which this function
+/// always put first, is dropped.
 #[cfg(unix)]
 fn handoff_args(
     args: impl IntoIterator<Item = std::ffi::OsString>,
     record_fd: i32,
 ) -> Vec<std::ffi::OsString> {
-    let mut out = Vec::new();
-    let mut args = args.into_iter();
-    let mut placed = false;
-    while let Some(arg) = args.next() {
-        if arg == "--" {
-            out.push(FD_ARG.into());
-            out.push(record_fd.to_string().into());
-            placed = true;
-            out.push(arg);
-            out.extend(args.by_ref());
-            break;
-        }
-        if arg == FD_ARG {
-            let _ = args.next();
-            continue;
-        }
-        out.push(arg);
+    let mut args = args.into_iter().peekable();
+    while args.peek().is_some_and(|arg| arg == FD_ARG) {
+        args.next();
+        args.next();
     }
-    if !placed {
-        out.push(FD_ARG.into());
-        out.push(record_fd.to_string().into());
-    }
+    let mut out: Vec<std::ffi::OsString> = vec![FD_ARG.into(), record_fd.to_string().into()];
+    out.extend(args);
     out
 }
 
@@ -445,13 +432,14 @@ mod tests {
 
     #[test]
     fn the_record_flag_goes_before_the_first_pane_command() {
+        // With --, and with a positional program and its own arguments.
         assert_eq!(
             handoff_args(strings(&["--socket", "/s", "--", "/bin/sh", "-c", "x"]), 9),
             strings(&[
-                "--socket",
-                "/s",
                 "--handoff-fd",
                 "9",
+                "--socket",
+                "/s",
                 "--",
                 "/bin/sh",
                 "-c",
@@ -459,8 +447,12 @@ mod tests {
             ])
         );
         assert_eq!(
+            handoff_args(strings(&["--socket", "/s", "/bin/sh", "-l"]), 9),
+            strings(&["--handoff-fd", "9", "--socket", "/s", "/bin/sh", "-l"])
+        );
+        assert_eq!(
             handoff_args(strings(&["--socket", "/s"]), 9),
-            strings(&["--socket", "/s", "--handoff-fd", "9"])
+            strings(&["--handoff-fd", "9", "--socket", "/s"])
         );
     }
 
@@ -469,11 +461,10 @@ mod tests {
         assert_eq!(
             handoff_args(
                 strings(&[
-                    "--socket",
-                    "/s",
                     "--handoff-fd",
                     "4",
-                    "--",
+                    "--socket",
+                    "/s",
                     "prog",
                     "--handoff-fd",
                     "x"
@@ -481,11 +472,10 @@ mod tests {
                 9
             ),
             strings(&[
-                "--socket",
-                "/s",
                 "--handoff-fd",
                 "9",
-                "--",
+                "--socket",
+                "/s",
                 "prog",
                 "--handoff-fd",
                 "x"

@@ -100,3 +100,12 @@ fn a_failed_live_update_leaves_the_server_or_restores_the_sessions() {
     assert_eq!(proof["exec_failed"], "restored");
     assert_eq!(proof["import_failed"], "restored");
 }
+
+#[test]
+fn a_live_update_keeps_the_first_pane_with_either_launch_form() {
+    let proof = run("live-update-launch-forms");
+    assert_eq!(
+        proof["kept"],
+        serde_json::json!(["/bin/sh -i", "-- /bin/sh -i"])
+    );
+}

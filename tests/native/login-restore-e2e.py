@@ -539,6 +539,8 @@ def restored_after_crash(f, daemon, old_pid, name="live"):
 
 
 def live_update_fallbacks(f):
+    # Pane logs on, as for a socket in the instance directory.
+    f.env["PMUX_PANE_LOG"] = str(f.root / "pane-log.json")
     # 1. Probe refused: nothing changes.
     daemon = f.daemon()
     pane_id, pid = live_session(f)
@@ -551,12 +553,18 @@ def live_update_fallbacks(f):
     f.cli("send", pane_id, "echo still-$$", "--enter")
     wait_for(lambda: f"still-{pid}" in f.cli("save-buffer", pane_id, "-"), "the pane still reads after a refusal")
 
-    # 2. Exec fails: the binary answers the probe, then is gone.
+    # 2. Exec fails: the binary answers the probe, then is gone. The pane's
+    # scrollback must survive in the pane-log checkpoint for the restore.
+    f.cli("send", pane_id, "echo kept-in-scrollback-$$", "--enter")
+    wait_for(lambda: f"kept-in-scrollback-{pid}" in f.cli("save-buffer", pane_id, "-"), "the marker line")
     vanishing = stand_in(f, "pmuxd-vanishing",
                          'case " $* " in *" --handoff-probe "*) probe=1;; esac\nif [ -n "$probe" ]; then "$REAL" "$@"; rm -f "$0"; exit 0; fi\nexit 1\n')
     answer = request_handoff(f, vanishing)
     assert answer["status"] == "ok", answer
-    restored_after_crash(f, daemon, pid)
+    session = restored_after_crash(f, daemon, pid)
+    restored_pane = session["windows"][0]["panes"][0]["id"]
+    history = f.cli("save-buffer", restored_pane, "-", "--history")
+    assert f"kept-in-scrollback-{pid}" in history, history[-2000:]
 
     # 3. Import fails: the new server cannot read the record.
     f.cli("stop")
@@ -573,16 +581,41 @@ def live_update_fallbacks(f):
             "import_failed": "restored", "result": "PASS"}
 
 
+def live_update_launch_forms(f):
+    """The first pane's program keeps its pid whether it was given after -- or positionally."""
+    kept = []
+    for form in (["/bin/sh", "-i"], ["--", "/bin/sh", "-i"]):
+        daemon = f.spawn("pmuxd", "--socket", f.socket, *form)
+        session = wait_for(lambda: f.snapshot()[0], "the first session")
+        pane = session["windows"][0]["panes"][0]
+        server_pid = int(wait_for(lambda: f.socket.with_suffix(".pid").read_text(), "pid file"))
+        answer = request_handoff(f, f.binaries / "pmuxd")
+        assert answer["status"] == "ok", answer
+        def new_server():
+            try:
+                return f.request("server_info")["pid"] == server_pid
+            except AssertionError:
+                return False
+        wait_for(new_server, "the new server")
+        current = f.snapshot()[0]["windows"][0]["panes"][0]
+        assert current["child_pid"] == pane["child_pid"], (form, pane, current)
+        assert daemon.poll() is None, ("the server exited instead of exec'ing", form)
+        kept.append(" ".join(form))
+        f.cli("stop")
+        daemon.wait(timeout=20)
+    return {"case": "live-update-launch-forms", "kept": kept, "result": "PASS"}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bins", type=Path, required=True)
-    parser.add_argument("--case", choices=["single-instance", "concurrent", "foreground", "stable-replay", "reboot", "supervisor", "new-install", "migration", "corrupt", "service", "live-update", "live-update-fallbacks", "all"], default="all")
+    parser.add_argument("--case", choices=["single-instance", "concurrent", "foreground", "stable-replay", "reboot", "supervisor", "new-install", "migration", "corrupt", "service", "live-update", "live-update-fallbacks", "live-update-launch-forms", "all"], default="all")
     parser.add_argument("--host", action="store_true")
     parser.add_argument("--out", type=Path)
     parser.add_argument("--capture", type=Path)
     args = parser.parse_args()
     bins = args.bins.resolve()
-    for name in ([args.case] if args.case != "all" else ["single-instance", "concurrent", "foreground", "stable-replay", "reboot", "supervisor", "new-install", "migration", "corrupt", "live-update", "live-update-fallbacks"]):
+    for name in ([args.case] if args.case != "all" else ["single-instance", "concurrent", "foreground", "stable-replay", "reboot", "supervisor", "new-install", "migration", "corrupt", "live-update", "live-update-fallbacks", "live-update-launch-forms"]):
         with tempfile.TemporaryDirectory(prefix="plogin-", dir="/tmp") as directory:
             fixture = Fixture(bins, Path(directory).resolve())
             try:
@@ -594,7 +627,8 @@ def main():
                           "migration": lambda: migration(fixture, args.host),
                           "corrupt": lambda: corrupt_checkpoint(fixture), "service": lambda: service(fixture),
                           "live-update": lambda: live_update(fixture),
-                          "live-update-fallbacks": lambda: live_update_fallbacks(fixture)}[name]()
+                          "live-update-fallbacks": lambda: live_update_fallbacks(fixture),
+                          "live-update-launch-forms": lambda: live_update_launch_forms(fixture)}[name]()
                 print(json.dumps(result), flush=True)
             finally:
                 if args.out:

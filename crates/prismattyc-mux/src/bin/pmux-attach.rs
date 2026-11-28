@@ -362,28 +362,7 @@ impl Client {
         let response = self
             .send(make)
             .and_then(|id| self.read_matching(id))
-            .map_err(|err| {
-                let kind = err
-                    .downcast_ref::<io::Error>()
-                    .map(io::Error::kind)
-                    .or_else(|| {
-                        err.downcast_ref::<serde_json::Error>()
-                            .and_then(|e| e.io_error_kind())
-                    });
-                if matches!(
-                    kind,
-                    Some(
-                        io::ErrorKind::UnexpectedEof
-                            | io::ErrorKind::BrokenPipe
-                            | io::ErrorKind::ConnectionReset
-                            | io::ErrorKind::ConnectionAborted
-                    )
-                ) {
-                    err.context(AttachDisconnected)
-                } else {
-                    err
-                }
-            })?;
+            .map_err(mark_disconnect)?;
         match response.body {
             ControlResponseBody::Ok { response } => Ok(response),
             ControlResponseBody::Error { error }
@@ -5476,15 +5455,91 @@ fn reconnect_once(socket: &PathBuf, pid: i32, pane_id: u64) -> Result<(Client, u
     Ok((client, id, snapshot))
 }
 
+/// Whether a request failed because the control connection itself dropped:
+/// the socket closed mid-frame, or a write found the peer gone. The writer
+/// reports these as `io::Error`; the reader can wrap them in a JSON error.
+/// Every other failure is a real error and must propagate as it is.
+fn transport_disconnect(err: &anyhow::Error) -> bool {
+    let kind = err
+        .downcast_ref::<io::Error>()
+        .map(io::Error::kind)
+        .or_else(|| {
+            err.downcast_ref::<serde_json::Error>()
+                .and_then(serde_json::Error::io_error_kind)
+        });
+    matches!(
+        kind,
+        Some(
+            io::ErrorKind::UnexpectedEof
+                | io::ErrorKind::BrokenPipe
+                | io::ErrorKind::ConnectionReset
+                | io::ErrorKind::ConnectionAborted
+        )
+    )
+}
+
+/// Tag a lost connection as [`AttachDisconnected`] so the attach can try to
+/// recover; leave any other error untouched.
+fn mark_disconnect(err: anyhow::Error) -> anyhow::Error {
+    if transport_disconnect(&err) {
+        err.context(AttachDisconnected)
+    } else {
+        err
+    }
+}
+
+/// How long a lost attach keeps trying the original server. The window
+/// starts when the disconnect is seen, not when the attach started, so a
+/// live update that takes a moment to come back is still caught.
+const RECONNECT_WINDOW: Duration = Duration::from_secs(5);
+const RECONNECT_RETRY: Duration = Duration::from_millis(50);
+
 fn reconnect_attach(socket: &PathBuf, pid: i32, pane_id: u64) -> Result<(Client, u64, Snapshot)> {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    retry_reconnect(Instant::now() + RECONNECT_WINDOW, || {
+        reconnect_once(socket, pid, pane_id)
+    })
+    .with_context(|| format!("reattach to pane {pane_id}"))
+}
+
+/// Retry `attempt` while it fails with a pending error (server not back
+/// yet) and `deadline` has not passed. Any other error, including a
+/// replaced server, ends the retry at once.
+fn retry_reconnect<T>(deadline: Instant, mut attempt: impl FnMut() -> Result<T>) -> Result<T> {
     loop {
-        match reconnect_once(socket, pid, pane_id) {
+        match attempt() {
             Err(err) if Instant::now() < deadline && reconnect_pending(&err) => {
-                thread::sleep(Duration::from_millis(50));
+                thread::sleep(RECONNECT_RETRY);
             }
-            result => return result.with_context(|| format!("reattach to pane {pane_id}")),
+            result => return result,
         }
+    }
+}
+
+/// When a lost attach may reconnect. One recovery is allowed at the start.
+/// Using it disarms recovery until the recovered attach paints a frame:
+/// registering alone is not proof the connection works. After a paint, a
+/// later disconnect may recover again, so a server process that keeps
+/// painting and dropping is followed each time; every attempt still needs
+/// the same server process (peer PID) and the same pane, and gives up after
+/// [`RECONNECT_WINDOW`].
+#[derive(Debug)]
+struct Recovery {
+    armed: bool,
+}
+
+impl Recovery {
+    fn new() -> Self {
+        Self { armed: true }
+    }
+
+    /// The current connection painted a frame.
+    fn painted(&mut self) {
+        self.armed = true;
+    }
+
+    /// Spend the recovery if it is armed.
+    fn take(&mut self) -> bool {
+        std::mem::replace(&mut self.armed, false)
     }
 }
 
@@ -5511,7 +5566,7 @@ fn attach_interactive(
 ) -> Result<(AttachEnd, Option<String>, u64)> {
     let pid = peer_pid(&client.writer);
     let _raw = RawTerminal::enter()?;
-    let mut can_reconnect = true;
+    let mut recovery = Recovery::new();
     loop {
         let window_id = pane_window(&snapshot, pane_id)
             .context("selected pane has no window in the snapshot")?;
@@ -5536,14 +5591,11 @@ fn attach_interactive(
             &mut pane_id,
             window_id,
             options,
-            || can_reconnect = true,
+            || recovery.painted(),
         ) {
-            Err(err) if can_reconnect && err.is::<AttachDisconnected>() => {
+            Err(err) if err.is::<AttachDisconnected>() && recovery.take() => {
                 let Some(pid) = pid else { return Err(err) };
                 (client, client_id, snapshot) = reconnect_attach(&cli.socket, pid, pane_id)?;
-                // Registration can succeed while the first frame still fails.
-                // Only a usable connection earns another recovery attempt.
-                can_reconnect = false;
                 wrote = false;
             }
             result => return result,
@@ -10414,5 +10466,130 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         panic!("subscriber on a missing socket must exit so the TTY loop can fall back");
+    }
+
+    #[test]
+    fn transport_disconnect_recognizes_lost_connections_only() {
+        use super::transport_disconnect;
+        use std::io;
+        let lost = [
+            io::ErrorKind::UnexpectedEof,
+            io::ErrorKind::BrokenPipe,
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::ConnectionAborted,
+        ];
+        for kind in lost {
+            let direct = anyhow::Error::new(io::Error::new(kind, "gone"));
+            assert!(transport_disconnect(&direct), "io {kind:?}");
+            let wrapped = anyhow::Error::new(serde_json::Error::io(io::Error::new(kind, "gone")));
+            assert!(transport_disconnect(&wrapped), "json-wrapped {kind:?}");
+        }
+        let unrelated = [
+            anyhow::Error::new(io::Error::new(io::ErrorKind::PermissionDenied, "denied")),
+            anyhow::Error::new(io::Error::new(io::ErrorKind::ConnectionRefused, "refused")),
+            anyhow::Error::new(serde_json::from_str::<u8>("not json").unwrap_err()),
+            anyhow::anyhow!("pane 7 has no window"),
+        ];
+        for err in &unrelated {
+            assert!(!transport_disconnect(err), "{err:#}");
+        }
+    }
+
+    #[test]
+    fn mark_disconnect_tags_lost_connections_and_passes_others_through() {
+        use super::{mark_disconnect, AttachDisconnected};
+        use std::io;
+        let lost = mark_disconnect(anyhow::Error::new(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "write failed",
+        )));
+        assert!(lost.is::<AttachDisconnected>());
+        assert!(
+            lost.downcast_ref::<io::Error>().is_some(),
+            "keeps the cause"
+        );
+
+        let other = mark_disconnect(anyhow::anyhow!("selected pane has no window"));
+        assert!(!other.is::<AttachDisconnected>());
+        assert_eq!(other.to_string(), "selected pane has no window");
+        let denied = mark_disconnect(anyhow::Error::new(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "denied",
+        )));
+        assert!(!denied.is::<AttachDisconnected>());
+        assert_eq!(
+            denied.downcast_ref::<io::Error>().map(io::Error::kind),
+            Some(io::ErrorKind::PermissionDenied)
+        );
+    }
+
+    #[test]
+    fn retry_reconnect_waits_for_the_server_until_the_window_closes() {
+        use super::{retry_reconnect, AttachDisconnected, RECONNECT_WINDOW};
+        use std::io;
+        use std::time::{Duration, Instant};
+        assert_eq!(RECONNECT_WINDOW, Duration::from_secs(5));
+        let refused = || anyhow::Error::new(io::Error::from(io::ErrorKind::ConnectionRefused));
+
+        // Not back yet, then back: the retry returns the recovered value.
+        let mut attempts = 0;
+        let value = retry_reconnect(Instant::now() + RECONNECT_WINDOW, || {
+            attempts += 1;
+            if attempts < 3 {
+                Err(refused())
+            } else {
+                Ok(attempts)
+            }
+        })
+        .unwrap();
+        assert_eq!(value, 3);
+
+        // A dropped registration also counts as not back yet.
+        let mut attempts = 0;
+        retry_reconnect(Instant::now() + RECONNECT_WINDOW, || {
+            attempts += 1;
+            if attempts < 2 {
+                Err(anyhow::anyhow!("eof").context(AttachDisconnected))
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap();
+        assert_eq!(attempts, 2);
+
+        // A replaced server ends the retry at once.
+        let mut attempts = 0;
+        let err = retry_reconnect::<()>(Instant::now() + RECONNECT_WINDOW, || {
+            attempts += 1;
+            Err(anyhow::anyhow!("attach server was replaced"))
+        })
+        .unwrap_err();
+        assert_eq!(attempts, 1);
+        assert_eq!(err.to_string(), "attach server was replaced");
+
+        // A server that never comes back fails once the deadline passes.
+        let deadline = Instant::now();
+        let mut attempts = 0;
+        let err = retry_reconnect::<()>(deadline, || {
+            attempts += 1;
+            Err(refused())
+        })
+        .unwrap_err();
+        assert_eq!(attempts, 1, "a passed deadline stops after one try");
+        assert!(err.downcast_ref::<io::Error>().is_some());
+    }
+
+    #[test]
+    fn recovery_rearms_only_after_the_recovered_attach_paints() {
+        use super::Recovery;
+        let mut recovery = Recovery::new();
+        assert!(recovery.take(), "the first disconnect may recover");
+        assert!(!recovery.take(), "no second recovery before a paint");
+        recovery.painted();
+        assert!(recovery.take(), "a paint re-arms recovery");
+        recovery.painted();
+        recovery.painted();
+        assert!(recovery.take());
+        assert!(!recovery.take(), "paints do not stack");
     }
 }

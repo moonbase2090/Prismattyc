@@ -362,7 +362,7 @@ enum LiveUpdate {
 
 /// The pmuxd to hand the sessions to, or `None` when live updates are off.
 fn live_update_binary() -> Option<PathBuf> {
-    if !cfg!(unix) {
+    if !cfg!(any(unix, windows)) {
         return None;
     }
     let enabled = prismattyc_mux::load_mux_section(&prismattyc_mux::prism_config_path())
@@ -394,6 +394,9 @@ fn live_update(paths: &Paths, client: &mut Client, client_id: u64, binary: &Path
         Err(error) => return LiveUpdate::Refused(format!("{error:#}")),
     }
     let deadline = Instant::now() + LIVE_UPDATE_WAIT;
+    // On Windows the new server takes the instance lock only after the old
+    // one exits, so the lock is briefly free during a good update.
+    let mut free_since: Option<Instant> = None;
     loop {
         let running = Client::connect(&paths.socket).and_then(|mut client| {
             client.request(|request_id| ControlRequest::ServerInfo {
@@ -412,7 +415,9 @@ fn live_update(paths: &Paths, client: &mut Client, client_id: u64, binary: &Path
             }
         }
         let held = prismattyc_mux::daemon_lock::DaemonLock::is_held(&paths.socket).unwrap_or(true);
-        if !held {
+        if held {
+            free_since = None;
+        } else if free_since.get_or_insert_with(Instant::now).elapsed() >= LOCK_GAP {
             return LiveUpdate::Lost("the new pmux server did not start".into());
         }
         if Instant::now() >= deadline {
@@ -423,6 +428,10 @@ fn live_update(paths: &Paths, client: &mut Client, client_id: u64, binary: &Path
         std::thread::sleep(Duration::from_millis(50));
     }
 }
+
+/// How long the instance lock may stay free during a live update before the
+/// new server counts as not started.
+const LOCK_GAP: Duration = Duration::from_secs(3);
 
 /// How long a live update may take before the restart gives up on it.
 const LIVE_UPDATE_WAIT: Duration = Duration::from_secs(20);

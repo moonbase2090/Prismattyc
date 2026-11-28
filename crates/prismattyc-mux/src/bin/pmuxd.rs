@@ -39,6 +39,8 @@ struct Cli {
     restore_workspace: bool,
     /// A live update: the previous server's record is on this descriptor.
     handoff_fd: Option<i32>,
+    /// A Windows live update: the previous server's record is in this file.
+    handoff_file: Option<std::path::PathBuf>,
     program: String,
     argv: Vec<String>,
 }
@@ -60,6 +62,7 @@ impl Cli {
         let mut program = None;
         let mut restore_workspace = false;
         let mut handoff_fd = None;
+        let mut handoff_file = None;
         let mut argv = Vec::new();
         while let Some(arg) = args.next() {
             if arg == "--" {
@@ -107,6 +110,10 @@ impl Cli {
                     let value = args.next().context("--handoff-fd requires a descriptor")?;
                     handoff_fd = Some(value.parse().context("--handoff-fd is not a number")?);
                 }
+                prismattyc_mux::handoff::FILE_ARG if program.is_none() => {
+                    let value = args.next().context("--handoff-file requires a path")?;
+                    handoff_file = Some(value.into());
+                }
                 _ if program.is_none() => program = Some(arg),
                 _ => argv.push(arg),
             }
@@ -123,6 +130,7 @@ impl Cli {
             experimental_activity,
             restore_workspace,
             handoff_fd,
+            handoff_file,
             program: program.unwrap_or_else(prismattyc_mux::platform::default_shell),
             argv,
         })
@@ -244,12 +252,25 @@ fn main() -> Result<()> {
         None => None,
     };
     #[cfg(not(unix))]
-    let adopted: Option<std::convert::Infallible> = {
-        if cli.handoff_fd.is_some() {
-            bail!("live updates are not available on this platform");
-        }
-        None
+    if cli.handoff_fd.is_some() {
+        bail!("live updates by descriptor are only available on unix");
+    }
+    #[cfg(not(windows))]
+    if cli.handoff_file.is_some() {
+        bail!("live updates by record file are only available on Windows");
+    }
+    // A Windows live update reconnects to every pane holder first; the holders
+    // keep their programs while this server waits for the old one to exit.
+    #[cfg(windows)]
+    let adopted = match cli.handoff_file.as_deref() {
+        Some(path) => Some(
+            prismattyc_mux::handoff::adopt_file(path, &cli.socket)
+                .context("take over from the previous pmux server")?,
+        ),
+        None => None,
     };
+    #[cfg(not(any(unix, windows)))]
+    let adopted: Option<std::convert::Infallible> = None;
     #[cfg(unix)]
     let (instance, adopted) = match adopted {
         Some(adopted) => {
@@ -268,7 +289,25 @@ fn main() -> Result<()> {
             None,
         ),
     };
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    let (instance, adopted) = match adopted {
+        Some(adopted) => {
+            eprintln!(
+                "pmuxd: took over the running panes from pmuxd {}",
+                adopted.from_version
+            );
+            (
+                acquire_after_handoff(&cli.socket)?,
+                Some((adopted.plane, adopted.resumes)),
+            )
+        }
+        None => (
+            prismattyc_mux::daemon_lock::DaemonLock::acquire(&cli.socket)
+                .context("acquire pmuxd instance lock")?,
+            None,
+        ),
+    };
+    #[cfg(not(any(unix, windows)))]
     let (instance, adopted) = (
         prismattyc_mux::daemon_lock::DaemonLock::acquire(&cli.socket)
             .context("acquire pmuxd instance lock")?,
@@ -301,7 +340,13 @@ fn main() -> Result<()> {
         }
         (None, None) => (bootstrap_plane(&cli, first_pane_dir)?, Vec::new(), None),
     };
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    let (mut plane, deferred_resumes) = match (adopted, saved.as_ref()) {
+        (Some((plane, resumes)), _) => (plane, resumes),
+        (None, Some(saved)) => saved.restore_plane(&cli.socket)?,
+        (None, None) => (bootstrap_plane(&cli, first_pane_dir)?, Vec::new()),
+    };
+    #[cfg(not(any(unix, windows)))]
     let (mut plane, deferred_resumes) = match saved.as_ref() {
         Some(saved) => saved.restore_plane(&cli.socket)?,
         None => (bootstrap_plane(&cli, first_pane_dir)?, Vec::new()),
@@ -419,8 +464,43 @@ fn main() -> Result<()> {
         }
         return Ok(());
     }
+    #[cfg(windows)]
+    if handing_over {
+        if let Some(prepared) = server.finish_for_handoff() {
+            if let Err(error) = prismattyc_mux::handoff::start_successor(
+                prepared,
+                &cli.socket,
+                std::env::args_os().skip(1),
+            ) {
+                // The holders end their programs when their grace runs out;
+                // the saved workspace restores them as after a restart.
+                eprintln!("pmuxd: the live update could not start the new server: {error}");
+                std::process::exit(1);
+            }
+        }
+        // Exiting releases the instance lock and the socket for the new server.
+        return Ok(());
+    }
     drop(server);
     Ok(())
+}
+
+/// The instance lock after a Windows live update: the old server holds it
+/// until it exits, which it does right after starting this one.
+#[cfg(windows)]
+fn acquire_after_handoff(
+    socket: &std::path::Path,
+) -> Result<prismattyc_mux::daemon_lock::DaemonLock> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        match prismattyc_mux::daemon_lock::DaemonLock::acquire(socket) {
+            Ok(lock) => return Ok(lock),
+            Err(error) if std::time::Instant::now() >= deadline => {
+                return Err(error).context("the previous pmux server did not release its lock");
+            }
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
+        }
+    }
 }
 
 /// Create the default Space when this start finds none. A failure is

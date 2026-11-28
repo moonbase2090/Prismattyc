@@ -520,6 +520,31 @@ fn start_windows_io(
     ))
 }
 
+/// The screen a live-update record describes: its snapshot when it fits the
+/// pane, with the log frames after it replayed. Returns the emulator, the
+/// pane's columns and rows, and its cell pixels.
+#[cfg(any(unix, windows))]
+fn restored_screen(record: &crate::handoff::PaneHandoff) -> (Emulator, usize, usize, u32, u32) {
+    let cols = usize::from(record.cols).max(1);
+    let rows = usize::from(record.rows).max(1);
+    let cell_w = record.cell_px.0.max(1);
+    let cell_h = record.cell_px.1.max(1);
+    let (mut emulator, replay_from) = match record.snapshot.clone().map(Emulator::import_state) {
+        Some(Ok(emulator))
+            if emulator.screen().columns() == cols && emulator.screen().rows() == rows =>
+        {
+            (emulator, record.snapshot_seq)
+        }
+        _ => (Emulator::new(cols, rows, MAX_SCROLLBACK), 0),
+    };
+    emulator.set_retain_alt_history(true);
+    emulator.set_cell_pixels(cell_w, cell_h);
+    for frame in record.tail.iter().filter(|frame| frame.seq > replay_from) {
+        replay_event(&mut emulator, &frame.event);
+    }
+    (emulator, cols, rows, cell_w, cell_h)
+}
+
 /// A pane's holder process on Windows, when it has one.
 #[cfg(windows)]
 type PaneHolder = Option<crate::pty_holder::HolderHandle>;
@@ -708,9 +733,13 @@ impl LivePane {
         Ok(())
     }
 
-    /// The pane as a live-update record, with `fd` as the master's number.
-    #[cfg(unix)]
-    fn to_handoff(&self, pane_id: u64, fd: i32) -> crate::handoff::PaneHandoff {
+    /// The pane as a live-update record, reached through `transport`.
+    #[cfg(any(unix, windows))]
+    fn to_handoff(
+        &self,
+        pane_id: u64,
+        transport: crate::handoff::PaneTransport,
+    ) -> crate::handoff::PaneHandoff {
         let snapshot = self.emulator.export_state().ok();
         let snapshot_seq = if snapshot.is_some() {
             self.log.current_seq()
@@ -720,7 +749,10 @@ impl LivePane {
         let (resume_token, resume_record, resume_times) = self.resume.handoff_parts();
         crate::handoff::PaneHandoff {
             pane_id,
-            fd,
+            #[cfg(unix)]
+            fd: transport,
+            #[cfg(windows)]
+            holder: transport,
             pid: self.child_pid,
             exited: !self.child_alive(),
             cols: u16::try_from(self.cols).unwrap_or(u16::MAX),
@@ -751,24 +783,7 @@ impl LivePane {
             .pid
             .with_context(|| format!("pane {} has no program pid", record.pane_id))?;
         let session = PtySession::adopt(master, pid, record.exited)?;
-        let cols = usize::from(record.cols).max(1);
-        let rows = usize::from(record.rows).max(1);
-        let cell_w = record.cell_px.0.max(1);
-        let cell_h = record.cell_px.1.max(1);
-        let (mut emulator, replay_from) = match record.snapshot.clone().map(Emulator::import_state)
-        {
-            Some(Ok(emulator))
-                if emulator.screen().columns() == cols && emulator.screen().rows() == rows =>
-            {
-                (emulator, record.snapshot_seq)
-            }
-            _ => (Emulator::new(cols, rows, MAX_SCROLLBACK), 0),
-        };
-        emulator.set_retain_alt_history(true);
-        emulator.set_cell_pixels(cell_w, cell_h);
-        for frame in record.tail.iter().filter(|frame| frame.seq > replay_from) {
-            replay_event(&mut emulator, &frame.event);
-        }
+        let (emulator, cols, rows, cell_w, cell_h) = restored_screen(&record);
         let (from_pty_rx, to_child_tx, io) = PaneIo::start(&session, record.pane_id)?;
         Ok(Self {
             emulator,
@@ -789,6 +804,59 @@ impl LivePane {
             },
             hive_cell: record.hive_cell,
             child_pid: Some(pid),
+            controller_id: None,
+            log: PaneLog::from_frames(record.tail, DEFAULT_PANE_LOG_BYTES),
+            logged_cwd: record.logged_cwd,
+            watch,
+            size_owner: record.size_owner,
+            resume: crate::program_resume::PaneResume::from_handoff(
+                record.resume_token,
+                record.resume_record,
+                record.resume_times,
+            ),
+            resume_checked: None,
+        })
+    }
+
+    /// Take over a pane from a Windows live-update record by reconnecting to
+    /// its holder. The holder's program keeps running.
+    #[cfg(windows)]
+    fn adopt(
+        record: crate::handoff::PaneHandoff,
+        watch: std::sync::Arc<PaneLogWatch>,
+    ) -> Result<Self> {
+        let (emulator, cols, rows, cell_w, cell_h) = restored_screen(&record);
+        let size = pty_size_with_cell_pixels(cols, rows, cell_w, cell_h);
+        let (mut session, holder) = crate::pty_holder::adopt_holder(&record.holder, size)?;
+        let child_pid = session.process_id().or(record.pid);
+        let (from_pty_rx, to_child_tx, reader_thread, reader_publish_delay_ms) =
+            start_windows_io(&mut session, record.pane_id)?;
+        #[cfg(not(test))]
+        let () = reader_publish_delay_ms;
+        Ok(Self {
+            holder: Some(holder),
+            emulator,
+            session,
+            from_pty_rx,
+            reader_thread,
+            #[cfg(test)]
+            reader_publish_delay_ms,
+            to_child_tx,
+            cols,
+            outer_rows: usize::from(record.outer_rows).max(rows),
+            rows,
+            cell_w,
+            cell_h,
+            revision: record.revision.saturating_add(1),
+            exit: if record.exited {
+                ChildExitState::Exited
+            } else {
+                ChildExitState::Running {
+                    next_poll: Instant::now() + EXIT_POLL_INTERVAL,
+                }
+            },
+            hive_cell: record.hive_cell,
+            child_pid,
             controller_id: None,
             log: PaneLog::from_frames(record.tail, DEFAULT_PANE_LOG_BYTES),
             logged_cwd: record.logged_cwd,
@@ -1267,7 +1335,7 @@ impl LiveRuntime {
         Ok(())
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub(crate) fn has_pane(&self, pane_id: u64) -> bool {
         self.panes.contains_key(&pane_id)
     }
@@ -1409,6 +1477,68 @@ impl LiveRuntime {
         }
         self.watch.note();
         Ok(out)
+    }
+
+    /// Give every Windows pane up for a live update, after
+    /// [`LiveRuntime::quiesce_for_handoff`]: each record names the pane's
+    /// holder, and each holder is told to keep its program for the next
+    /// server. On an error nothing has been given up.
+    #[cfg(windows)]
+    pub(crate) fn export_handoff(&mut self) -> Result<Vec<crate::handoff::KeptPane>> {
+        let mut ids: Vec<u64> = self.panes.keys().copied().collect();
+        ids.sort_unstable();
+        let mut out = Vec::with_capacity(ids.len());
+        for id in &ids {
+            let pane = &self.panes[id];
+            let holder = pane
+                .holder
+                .as_ref()
+                .with_context(|| format!("pane {id} runs without a pane holder"))?;
+            out.push(pane.to_handoff(*id, holder.endpoint()));
+        }
+        for id in ids {
+            if let Some(mut pane) = self.panes.remove(&id) {
+                if let Some(holder) = &pane.holder {
+                    if let Err(error) = holder.release(crate::handoff::HANDOFF_GRACE_MS) {
+                        eprintln!(
+                            "pmuxd: pane {id} holder did not take the handoff notice: {error}"
+                        );
+                    }
+                }
+                pane.session.release_program();
+            }
+        }
+        self.watch.note();
+        Ok(out)
+    }
+
+    /// Take over Windows panes from a live update by reconnecting to their
+    /// holders. A pane that cannot be adopted is returned with the reason;
+    /// its holder ends its program when the grace runs out.
+    #[cfg(windows)]
+    pub(crate) fn adopt_handoff(
+        panes: Vec<crate::handoff::KeptPane>,
+        mux_socket: Option<PathBuf>,
+        watch: std::sync::Arc<PaneLogWatch>,
+    ) -> (Self, Vec<(u64, anyhow::Error)>) {
+        let mut runtime = Self {
+            panes: HashMap::new(),
+            mux_socket,
+            watch,
+            pending_size_owner: None,
+        };
+        let mut failed = Vec::new();
+        for record in panes {
+            let id = record.pane_id;
+            match LivePane::adopt(record, std::sync::Arc::clone(&runtime.watch)) {
+                Ok(pane) => {
+                    runtime.panes.insert(id, pane);
+                }
+                Err(error) => failed.push((id, error)),
+            }
+        }
+        runtime.watch.note();
+        (runtime, failed)
     }
 
     /// Take over panes from a live update. A pane that cannot be adopted is

@@ -179,6 +179,9 @@ struct LivePane {
     /// The reader and writer threads, which a live update can stop.
     #[cfg(unix)]
     io: PaneIo,
+    /// The pane holder that owns this pane's console, when there is one.
+    #[cfg(windows)]
+    holder: Option<crate::pty_holder::HolderHandle>,
     to_child_tx: mpsc::SyncSender<Vec<u8>>,
     cols: usize,
     outer_rows: usize,
@@ -418,6 +421,12 @@ pub(crate) struct GuestStamp<'a> {
     pub agent_id: Option<&'a str>,
 }
 
+/// A pane's holder process on Windows, when it has one.
+#[cfg(windows)]
+type PaneHolder = Option<crate::pty_holder::HolderHandle>;
+#[cfg(not(windows))]
+type PaneHolder = ();
+
 /// Start a pane's program. On Windows it runs in a pane holder process when
 /// holders are on, so a server update can hand it over (see
 /// [`crate::pty_holder`]). Elsewhere, and with holders off, the program's
@@ -428,12 +437,16 @@ fn spawn_pane_session(
     cwd: Option<&Path>,
     env: &BTreeMap<String, String>,
     size: portable_pty::PtySize,
-) -> Result<PtySession> {
+) -> Result<(PtySession, PaneHolder)> {
     #[cfg(windows)]
     if pane_holders_enabled() {
-        return crate::pty_holder::spawn_holder(program, argv, cwd, env, size);
+        let (session, holder) = crate::pty_holder::spawn_holder(program, argv, cwd, env, size)?;
+        return Ok((session, Some(holder)));
     }
-    PtySession::spawn_config(program, argv, cwd, env, size)
+    Ok((
+        PtySession::spawn_config(program, argv, cwd, env, size)?,
+        PaneHolder::default(),
+    ))
 }
 
 /// Holders run this executable with `--pty-holder`, so only pmuxd itself
@@ -482,7 +495,7 @@ impl LivePane {
                 env.remove(crate::program_resume::TOKEN_ENV);
             }
         }
-        let session = spawn_pane_session(
+        let (session, holder) = spawn_pane_session(
             &spawn.program,
             &spawn.argv,
             spawn.cwd.as_deref(),
@@ -490,6 +503,8 @@ impl LivePane {
             size,
         )
         .with_context(|| format!("spawn {:?} for pane {pane_id}", spawn.program))?;
+        #[cfg(not(windows))]
+        let () = holder;
         #[cfg(windows)]
         let mut session = session;
         // Capture seat identity at spawn from the inject map — never re-read after death
@@ -595,6 +610,8 @@ impl LivePane {
         emulator.set_retain_alt_history(true);
         emulator.set_cell_pixels(cell_w, cell_h);
         Ok(Self {
+            #[cfg(windows)]
+            holder,
             emulator,
             session,
             from_pty_rx,
@@ -640,8 +657,9 @@ impl LivePane {
     /// Apply output a stopping reader already queued. Unlike [`LivePane::drain`]
     /// a closed channel is not a death: the reader closes it when it stops.
     /// End of file and read errors still are. Returns any exit notice and the
-    /// bytes applied.
-    #[cfg(unix)]
+    /// bytes applied. On Windows a paused holder's reader waits instead of
+    /// stopping, so the same applies.
+    #[cfg(any(unix, windows))]
     fn drain_stopping(&mut self, pane_id: u64) -> (Option<CellExitNotice>, usize) {
         if !self.child_alive() {
             return (None, 0);
@@ -1276,6 +1294,61 @@ impl LiveRuntime {
             }
             thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    /// Pause every pane's holder for a live update, and apply all output it
+    /// sent before pausing. A pane without a holder cannot be handed over.
+    /// On an error some holders may be paused: call
+    /// [`LiveRuntime::resume_after_handoff`] before using the runtime again.
+    #[cfg(windows)]
+    pub(crate) fn quiesce_for_handoff(&mut self, timeout: Duration) -> Result<Vec<CellExitNotice>> {
+        let deadline = Instant::now() + timeout;
+        for (&id, pane) in &self.panes {
+            let holder = pane
+                .holder
+                .as_ref()
+                .with_context(|| format!("pane {id} runs without a pane holder"))?;
+            holder
+                .pause()
+                .with_context(|| format!("pause the holder of pane {id}"))?;
+        }
+        let mut notices = Vec::new();
+        loop {
+            let mut waiting = None;
+            for (&id, pane) in &mut self.panes {
+                let (notice, _) = pane.drain_stopping(id);
+                notices.extend(notice);
+                let paused = pane.holder.as_ref().is_some_and(|holder| holder.paused());
+                if !paused && pane.child_alive() {
+                    waiting = Some(id);
+                }
+            }
+            let Some(id) = waiting else {
+                // Every reader has returned all output before its pause.
+                for (&id, pane) in &mut self.panes {
+                    let (notice, _) = pane.drain_stopping(id);
+                    notices.extend(notice);
+                }
+                return Ok(notices);
+            };
+            if Instant::now() >= deadline {
+                anyhow::bail!("the holder of pane {id} did not pause in {timeout:?}");
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// Let every holder send output again after a live update was abandoned.
+    #[cfg(windows)]
+    pub(crate) fn resume_after_handoff(&mut self) -> Result<()> {
+        for (&id, pane) in &self.panes {
+            if let Some(holder) = &pane.holder {
+                holder
+                    .resume()
+                    .with_context(|| format!("resume the holder of pane {id}"))?;
+            }
+        }
+        Ok(())
     }
 
     /// Restart every pane's reader and writer after a live update was
